@@ -1,0 +1,189 @@
+---
+title: "Quantization: INT8, GPTQ, AWQ"
+description: "How mapping float weights to low-bit integers — done naively, with Hessian-guided correction (GPTQ), or with activation-aware channel protection (AWQ) — shrinks LLMs 2-4x with minimal accuracy loss."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "inference", "quantization", "gptq", "awq", "int8"]
+prerequisites: ["Floating-point vs. integer representations", "Linear algebra basics", "Weight matrices in a Transformer"]
+---
+
+<Prerequisites items={[
+  "Floating-point (FP16/BF16) vs. integer number representations",
+  "Basic linear algebra: matrix multiplication, matrix inverses",
+  "How weight matrices are used inside a Transformer layer",
+]} />
+
+## Intuition
+
+LLM weights are normally stored in 16-bit floating point. Every parameter costs 2 bytes, so a 70B-parameter model needs roughly 140 GB just for weights — before any KV cache or activations. Quantization asks: can we store those same weights in fewer bits (8, 4, even lower) without materially hurting output quality? The naive answer — just round every float to the nearest representable low-bit value — works reasonably well for INT8 but degrades quickly at 4 bits, because a uniform rounding rule treats every weight as equally important, when in reality some weights (and some input channels) contribute far more to the model's output than others.
+
+GPTQ and AWQ are two different, more careful answers to "which weights matter, and how do we quantize without breaking them." GPTQ corrects for quantization error using the layer's local *curvature* information (an approximate Hessian) — after quantizing one weight, it adjusts the *remaining* unquantized weights to compensate for the error just introduced. AWQ instead asks which weight *channels* are most important based on the activations that flow through them, and protects that small salient fraction from heavy quantization error via a scaling transform, without needing any backpropagation or reconstruction at all.
+
+<Callout type="tip" title="The one-sentence idea">
+  INT8 quantization is a *uniform* rounding rule (same treatment for every weight); GPTQ and AWQ are both attempts to quantize *unevenly* — spending more care where the model is most sensitive — using two different signals for "where the model is sensitive": GPTQ uses second-order loss curvature, AWQ uses activation magnitude.
+</Callout>
+
+## INT8: The Baseline Mechanism
+
+Post-training INT8 quantization maps a real-valued weight range $[\alpha, \beta]$ onto the integers representable in 8 bits ($[-128, 127]$ for signed INT8) via a **scale** $s$ and, optionally, a **zero-point** $z$:
+
+$$
+q = \text{round}\!\left(\frac{x}{s}\right) + z, \qquad s = \frac{\beta - \alpha}{255}
+$$
+
+To recover an approximate real value from the quantized integer (**dequantization**):
+
+$$
+\hat{x} = s \cdot (q - z)
+$$
+
+- **Symmetric** quantization sets $z = 0$ and centers the range on zero — simpler, cheaper at inference (no zero-point offset to track), standard for weights whose distributions are roughly symmetric around zero.
+- **Per-tensor** quantization uses one scale for an entire weight matrix; **per-channel** (per-output-dimension) quantization uses a separate scale per row/column, which better handles weight matrices where different channels have very different magnitude ranges — this refinement alone substantially closes the gap to full precision for INT8.
+- The core failure mode: **outlier weights or activations** with unusually large magnitude force the scale $s$ to be large (to cover the outlier's range), which coarsens the resolution available to the vast majority of "normal" values — this is exactly the problem GPTQ and AWQ each work around, in different ways.
+
+## GPTQ: Layer-by-Layer, Hessian-Guided Quantization
+
+GPTQ ("Generative Pre-trained Transformer Quantization") quantizes a model **layer by layer**, and *within* each layer, weight-by-weight, in a way that explicitly compensates for the error each quantization step introduces:
+
+1. For a given layer, GPTQ formulates quantization as minimizing the squared error between the original layer output and the output produced by quantized weights, using calibration data to estimate this.
+2. It builds on **Optimal Brain Quantization (OBQ)**: quantize one weight (or column) at a time; after each one is rounded, immediately update all *remaining* not-yet-quantized weights to compensate for the error just introduced, using the inverse of an approximate **Hessian** of the layer's reconstruction-error objective (second-order curvature information — which weights the error is most/least sensitive to).
+3. GPTQ's efficiency contribution over plain OBQ is algorithmic: it quantizes weights in a fixed column order (rather than always picking the "best" weight next) and uses a **Cholesky decomposition** of the Hessian inverse computed once up front, which makes the whole procedure numerically stable and fast enough to quantize models with hundreds of billions of parameters in a few GPU-hours rather than being computationally prohibitive.
+4. Net effect: after quantizing weight $w_i$, the remaining weights are nudged to absorb the rounding error just introduced, so the *layer's overall output* stays close to the unquantized layer's output — even though individual weights are now much lower precision.
+
+<Callout type="note" title="Verified via web search, July 2026">
+  GPTQ (arXiv:2210.17323) reports quantizing 175B-parameter models in about four GPU-hours down to 3-4 bits per weight with minimal accuracy loss, and reports end-to-end inference speedups of roughly 3.25x (A100) to 4.5x (A6000) over FP16 in the original paper's benchmarks.
+</Callout>
+
+## AWQ: Activation-Aware Weight Quantization
+
+AWQ starts from a different observation: not all weights are equally important, but — unlike GPTQ — it identifies importance from **activations**, not from the quantization loss surface, and it does not require any backpropagation or output reconstruction at all.
+
+1. **Salience via activation magnitude.** For each input channel (column of the weight matrix), AWQ looks at the *typical magnitude of the activations* that flow through it, using a small calibration dataset. Channels that consistently see large activation magnitudes are judged "salient" — the paper finds that protecting only around the top ~1% of salient weight channels can substantially reduce quantization error.
+2. **Why not just keep salient weights in higher precision?** Mixed-precision storage (some weights INT4, some FP16) is accurate but hardware-unfriendly — it breaks the uniform memory layout GPU kernels rely on for speed.
+3. **The scaling trick.** Instead of mixed precision, AWQ mathematically derives that *scaling up* a salient channel's weights before quantization (and correspondingly scaling down the matching activations, keeping the layer's output mathematically unchanged) reduces the relative quantization error for that channel, because the scaled-up weights occupy a larger portion of the quantization grid's resolution. This equivalent transformation is applied per-channel, with scale factors chosen by a search that minimizes output error on calibration data — and the whole process still uses a uniform low-bit format for every weight, keeping it hardware-friendly.
+4. **No backpropagation, no reconstruction.** Because AWQ only needs activation statistics (not gradients or per-weight error correction like GPTQ), it generalizes better across domains/calibration sets not perfectly matched to the deployment distribution, and is markedly faster to run than GPTQ's per-layer optimization.
+
+<Callout type="note" title="Verified via web search, July 2026">
+  AWQ (arXiv:2306.00978, Lin et al., MLSys 2024 Best Paper) explicitly finds that "not all weights are equally important" and identifies salient channels from activation distribution rather than weight distribution, using an equivalent per-channel scaling transform rather than mixed-precision storage.
+</Callout>
+
+<Mermaid chart={`
+graph TD
+  W["FP16 weight matrix"] --> Choice{"Quantization method"}
+  Choice --> INT8["INT8: uniform scale/zero-point, same treatment for every weight"]
+  Choice --> GPTQ["GPTQ: quantize column-by-column, correct remaining weights via inverse-Hessian update"]
+  Choice --> AWQ["AWQ: find salient channels from activation magnitude, scale to protect them, then quantize uniformly"]
+  INT8 --> Out["Low-bit weights + scale(s)"]
+  GPTQ --> Out
+  AWQ --> Out
+`} />
+
+## Code Sketch
+
+```python
+# Illustrative — real usage goes through libraries like AutoGPTQ,
+# AutoAWQ, or vLLM/TensorRT-LLM's built-in quantization loaders.
+
+# --- Naive INT8 (per-channel, symmetric) ---
+def quantize_int8_per_channel(weight):  # weight: [out_features, in_features]
+    max_abs = weight.abs().amax(dim=1, keepdim=True)          # per-output-channel range
+    scale = max_abs / 127.0
+    q = torch.round(weight / scale).clamp(-128, 127).to(torch.int8)
+    return q, scale  # dequantize later: q.float() * scale
+
+# --- GPTQ-style quantization (conceptual loop) ---
+def gptq_quantize_layer(weight, hessian_inv_cholesky, group_size=128):
+    # weight: [out_features, in_features]; processes columns in order,
+    # correcting not-yet-quantized columns after each step.
+    q_weight = weight.clone()
+    for col in range(weight.shape[1]):
+        w_col = q_weight[:, col]
+        q_col = quantize_to_grid(w_col, group_size)      # round to low-bit grid
+        error = (w_col - q_col) / hessian_inv_cholesky[col, col]
+        q_weight[:, col] = q_col
+        # Propagate the rounding error to not-yet-quantized columns:
+        q_weight[:, col + 1:] -= error[:, None] * hessian_inv_cholesky[col, col + 1:]
+    return q_weight
+
+# --- AWQ-style scaling (conceptual) ---
+def awq_scale_channels(weight, activation_stats, alpha=0.5):
+    # activation_stats: average magnitude per input channel from calibration data
+    scale = activation_stats.clamp(min=1e-5).pow(alpha)      # search picks alpha
+    scaled_weight = weight * scale                            # protect salient channels
+    scaled_activation_factor = 1.0 / scale                    # keep output unchanged
+    return scaled_weight, scaled_activation_factor
+```
+
+## Complexity and Memory Analysis
+
+<ComparisonTable
+  headers={["Method", "Bits/weight", "Calibration needed", "Correction mechanism", "Typical use case"]}
+  rows={[
+    ["FP16/BF16 (baseline)", "16", "No", "None — full precision", "Training, small-scale serving"],
+    ["Naive INT8 (per-tensor/channel)", "8", "Optional (for ranges)", "None — uniform rounding", "Simple, robust 2x memory savings"],
+    ["GPTQ", "3-4 (commonly 4)", "Yes — small calibration set", "Inverse-Hessian error correction, layer-by-layer", "Maximum compression with tight accuracy budget"],
+    ["AWQ", "3-4 (commonly 4)", "Yes — small calibration set (activations only)", "Per-channel scaling based on activation salience", "Fast quantization, strong generalization across domains"],
+  ]}
+/>
+
+| Quantity | FP16 | INT8 | GPTQ / AWQ (4-bit) |
+| --- | --- | --- | --- |
+| Bytes per weight | 2 | 1 | 0.5 |
+| Memory for 70B params | ~140 GB | ~70 GB | ~35 GB |
+| Relative inference speedup (memory-bound decode) | 1x | ~1.5-2x | ~2-4x (kernel-dependent) |
+| Quantization time (175B-class model) | — | Minutes | GPTQ: ~4 GPU-hours; AWQ: comparable or faster (no per-weight optimization) |
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Quantization is often the single cheapest way to fit a larger model on a given GPU, or to serve more concurrent requests by freeing memory for the KV cache.",
+    "GPTQ and AWQ both push effective bit-width down to 3-4 bits with much smaller accuracy loss than naive rounding, by targeting the true sources of quantization error (curvature vs. activation salience).",
+    "AWQ's activation-only calibration (no backprop) makes it fast to apply and robust across data distributions not seen during calibration.",
+  ]}
+  cons={[
+    "Aggressive quantization (below ~4 bits) still degrades quality noticeably on tasks requiring precise reasoning or rare-token generation — always benchmark on the target task, not just perplexity.",
+    "GPTQ's layer-by-layer correction is sequential and calibration-set-dependent — quality can be sensitive to how representative the calibration data is.",
+    "Both methods are weight-only by default — activations often stay in higher precision, meaning peak compute speedups are smaller than the memory-size reduction would suggest unless combined with activation quantization or specialized low-precision kernels.",
+]}
+/>
+
+- Conflating quantization-aware training (QAT) with post-training quantization (PTQ) — GPTQ and AWQ are both PTQ methods: they take an already-trained FP16 model and quantize it without further gradient-based training of the weights themselves.
+- Assuming a single global scale is sufficient for all weight matrices — per-channel or per-group scaling is usually necessary once bit-width drops to 4 bits, because outlier channels otherwise blow out the shared scale for everyone.
+- Treating "4-bit" as a magic threshold that always preserves quality — the achievable bit-width for negligible degradation depends heavily on model size, architecture, and task; always validate on representative downstream evaluations.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What information does GPTQ use to decide how to compensate for the error introduced when quantizing a given weight?",
+    options: [
+      "The activation magnitudes seen during a calibration forward pass, exactly like AWQ",
+      "Approximate second-order (Hessian) information about the layer's reconstruction-error surface, used to update remaining unquantized weights after each weight is rounded",
+      "A fixed heuristic based on weight magnitude alone, with no data-dependent signal",
+      "Gradient descent fine-tuning of all weights jointly after an initial rounding pass",
+    ],
+    answerIndex: 1,
+    explanation: "GPTQ builds on Optimal Brain Quantization: it quantizes weights one at a time (using a fixed, efficient column order) and, after each step, uses the inverse of an approximate Hessian of the layer's output-reconstruction loss to nudge the remaining, not-yet-quantized weights so they compensate for the error the last rounding step introduced.",
+  },
+  {
+    question: "What specifically does AWQ mean by a weight channel being 'salient,' and how does it protect salient channels without resorting to mixed-precision storage?",
+    options: [
+      "Salient channels are those with the largest weight magnitudes; AWQ stores them in FP16 while quantizing the rest to INT4",
+      "Salient channels are identified by the magnitude of activations flowing through them (from calibration data); AWQ scales those channels' weights up before quantization (and compensates activations correspondingly) so they occupy more of the quantization grid, all while keeping every weight in the same low-bit format",
+      "Salient channels are chosen at random each time to avoid overfitting to a calibration set",
+      "Salient channels are determined by Hessian curvature, identically to GPTQ",
+    ],
+    answerIndex: 1,
+    explanation: "AWQ's key finding is that channel importance correlates with activation magnitude, not weight magnitude. Rather than storing salient weights at higher precision (which breaks hardware-friendly uniform low-bit layouts), it applies a per-channel scaling transform — scale up the salient weights, scale down the corresponding activations to leave the output mathematically unchanged — so uniform low-bit quantization afterward loses much less information on the channels that matter most.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers", authors: "Frantar, E. et al.", venue: "ICLR", year: 2023, url: "https://arxiv.org/abs/2210.17323" },
+  { title: "AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration", authors: "Lin, J. et al.", venue: "MLSys", year: 2024, url: "https://arxiv.org/abs/2306.00978" },
+  { title: "LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale", authors: "Dettmers, T. et al.", venue: "NeurIPS", year: 2022, url: "https://arxiv.org/abs/2208.07339" },
+]} />

@@ -1,0 +1,148 @@
+---
+title: "CLIP & Multimodal Vision-Language Models"
+description: "How training on 400 million noisy image-caption pairs with a single contrastive objective produced an image classifier that needs zero labeled training examples for a new task."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "computer-vision", "multimodal", "clip", "contrastive-learning"]
+prerequisites: ["The Transformer Architecture", "Vision Transformers (ViT)", "Convolutional Neural Networks"]
+---
+
+<Prerequisites items={["The Transformer Architecture", "Vision Transformers (ViT)", "Convolutional Neural Networks"]} />
+
+## Intuition
+
+Standard image classifiers are trained to predict one of a fixed, predetermined set of class labels — decided in advance, baked into the final classification layer's shape. Add a new class and you must collect labeled examples and retrain (or at least fine-tune) that layer. CLIP's premise: instead of training to predict *labels*, train a model to predict whether an image and a piece of *natural-language text* describe the same thing. Do that well enough, over a large and diverse enough set of (image, text) pairs scraped from the internet, and the model never needs a fixed label set at all — any class can be expressed as a text description at inference time, with no retraining.
+
+<Callout type="tip" title="The one-sentence idea">
+  Train an image encoder and a text encoder jointly so that the embeddings of a matching image-caption pair are pulled close together and embeddings of mismatched pairs are pushed apart — then classify a new image, zero-shot, by seeing which class-name text embedding it's closest to, with no classification layer ever trained for those specific classes.
+</Callout>
+
+## The Contrastive Pretraining Objective
+
+CLIP trains two separate encoders in parallel: an image encoder $f$ (a CNN like ResNet, or a ViT) producing image embeddings, and a text encoder $g$ (a Transformer) producing text embeddings, both projected into a shared $d$-dimensional embedding space. Given a batch of $N$ (image, text) pairs scraped from the web — a caption naturally paired with its image — CLIP computes image embeddings $\{v_1, \ldots, v_N\}$ and text embeddings $\{u_1, \ldots, u_N\}$ (both L2-normalized), then the $N \times N$ matrix of cosine similarities:
+
+$$
+\text{sim}(v_i, u_j) = \frac{v_i \cdot u_j}{\|v_i\| \|u_j\|}
+$$
+
+Only the $N$ diagonal entries $(v_i, u_i)$ are true matching pairs; all $N^2 - N$ off-diagonal entries are mismatched (image $i$ paired with some other caption $j \neq i$) — and crucially, CLIP doesn't need these negatives labeled or curated: *any* other caption in the same batch is a valid negative, since it's very unlikely to describe image $i$. The loss treats this as a symmetric classification problem over the batch, applying InfoNCE-style cross-entropy in both directions:
+
+$$
+\mathcal{L} = \frac{1}{2N} \sum_{i=1}^{N} \left[ -\log \frac{\exp(\text{sim}(v_i, u_i) / \tau)}{\sum_{j=1}^{N} \exp(\text{sim}(v_i, u_j) / \tau)} - \log \frac{\exp(\text{sim}(v_i, u_i) / \tau)}{\sum_{j=1}^{N} \exp(\text{sim}(u_i, v_j) / \tau)} \right]
+$$
+
+The first term is the standard cross-entropy loss of a classifier that, given image $i$'s embedding, must pick out its true caption $u_i$ from among all $N$ captions in the batch (image-to-text direction); the second term is the same thing in reverse — given caption $i$, pick out its true image from among all $N$ images (text-to-image direction). $\tau$ is a learned temperature that controls how peaked the softmax distribution is. Averaging both directions (hence "symmetric") ensures the objective pulls matched pairs together and pushes apart mismatched pairs from *both* modalities' perspectives, not just one.
+
+Why this works with noisy, uncurated web data: the objective never requires a fixed taxonomy of classes or manually verified negative pairs — it only needs "this caption was found next to this image," and treats every other pair in a large batch as an (imperfect but statistically good enough) negative. Larger batch sizes give harder, more numerous negatives and are one of the main levers CLIP-style training uses to improve embedding quality.
+
+<Mermaid chart={`
+graph TD
+  Img["Batch of N images"] --> ImgEnc["Image encoder (ResNet or ViT)"]
+  Txt["Batch of N paired captions"] --> TxtEnc["Text encoder (Transformer)"]
+  ImgEnc --> V["Image embeddings v_1..v_N"]
+  TxtEnc --> U["Text embeddings u_1..u_N"]
+  V --> Sim["N x N cosine similarity matrix"]
+  U --> Sim
+  Sim --> Loss["Symmetric InfoNCE loss: maximize diagonal (matched pairs), minimize off-diagonal (mismatched pairs)"]
+`} />
+
+## Zero-Shot Classification — Why the Contrastive Objective Enables It
+
+Because CLIP's image and text encoders are trained to place semantically matching content close together in one *shared* embedding space — regardless of which specific classes appeared during pretraining — a new classification task can be solved without training a single new weight:
+
+1. Take the target class names (e.g. "cat", "dog", "airplane") and turn each into a short natural-language prompt, e.g. `"a photo of a {class}."` (prompt engineering matters here — the exact phrasing measurably affects accuracy, since the text encoder was trained on caption-like sentences, not bare class names).
+2. Encode every prompt with the text encoder to get one embedding per candidate class.
+3. Encode the query image with the image encoder to get its embedding.
+4. Compute cosine similarity between the image embedding and every class-prompt embedding; predict the class whose prompt embedding is most similar.
+
+This works precisely *because* the pretraining objective never tied the embedding space to a fixed label set — it only ever learned "these two things co-occurred, these did not," which generalizes to any new text description at inference time, including class names never seen paired with any image during training. A conventional classifier's final layer, by contrast, has a fixed number of output units baked in at training time and has no mechanism at all for handling a class it wasn't trained on.
+
+<ComparisonTable
+  headers={["Property", "Conventional supervised classifier", "CLIP zero-shot"]}
+  rows={[
+    ["Label set", "Fixed at training time; a new class requires retraining the output layer", "Open — any class expressible as a text prompt, including ones unseen during pretraining"],
+    ["Training data needed per new task", "Labeled examples for every class in the new task", "None — only requires the class names as text"],
+    ["What is learned", "A discriminative mapping from image directly to one of K fixed labels", "A shared embedding space where semantic similarity (of any text, to any image) is measured by cosine distance"],
+    ["Sensitivity", "Not sensitive to label wording (labels are just indices)", "Sensitive to exact prompt phrasing, since prompts are processed as natural language by the text encoder"],
+  ]}
+/>
+
+## Code Sketch
+
+```python
+import torch
+import torch.nn.functional as F
+
+def clip_loss(image_embeds, text_embeds, temperature):
+    """image_embeds, text_embeds: (N, d), L2-normalized. Matched pairs share index i."""
+    logits = image_embeds @ text_embeds.T / temperature   # (N, N) similarity matrix
+    labels = torch.arange(logits.size(0), device=logits.device)  # diagonal = matches
+
+    loss_i2t = F.cross_entropy(logits, labels)      # image -> correct text
+    loss_t2i = F.cross_entropy(logits.T, labels)    # text -> correct image
+    return (loss_i2t + loss_t2i) / 2
+
+def zero_shot_classify(image, class_names, image_encoder, text_encoder, tokenizer):
+    prompts = [f"a photo of a {name}." for name in class_names]
+    text_embeds = F.normalize(text_encoder(tokenizer(prompts)), dim=-1)     # (C, d)
+    image_embed = F.normalize(image_encoder(image.unsqueeze(0)), dim=-1)   # (1, d)
+    similarities = image_embed @ text_embeds.T                              # (1, C)
+    return similarities.argmax(dim=-1)   # predicted class index
+```
+
+<KeyTakeaways items={[
+  "CLIP trains an image encoder and a text encoder jointly with a symmetric contrastive (InfoNCE-style) loss over batches of (image, caption) pairs — no fixed label taxonomy is ever involved in pretraining.",
+  "Every non-matching pair within a training batch serves as a free negative example, which is what lets CLIP scale to hundreds of millions of noisy, uncurated web (image, text) pairs without manual negative-pair curation.",
+  "Zero-shot classification works by encoding candidate class names as text prompts and comparing them, via cosine similarity in the shared embedding space, against the query image's embedding — no classifier layer is ever trained for the specific target classes.",
+  "Because the text encoder processes prompts as natural language (not label indices), the exact prompt wording measurably affects zero-shot accuracy — a property with no analogue in conventional classifiers.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Zero-shot transfer to new classification tasks with no task-specific labeled data or retraining — only text prompts describing the classes are needed.",
+    "Learns from abundant, cheap, naturally occurring web (image, caption) pairs rather than requiring expensively hand-labeled class annotations.",
+    "The shared embedding space generalizes beyond classification — image-text retrieval, guiding text-to-image generation, and captioning-adjacent tasks all reuse the same embedding.",
+  ]}
+  cons={[
+    "Zero-shot accuracy is measurably sensitive to prompt phrasing — using bare class names instead of full sentence-like prompts (as the text encoder was trained on) noticeably hurts accuracy in practice.",
+    "The model inherits biases and noise present in web-scraped (image, caption) data, since there's no curated, balanced label set filtering what it learns.",
+    "Assuming CLIP embeddings are class-optimal out of the box — task-specific fine-tuning ('linear probing' on top of frozen CLIP features) typically still outperforms pure zero-shot on a specific downstream task when labeled data is available.",
+    "Confusing CLIP's contrastive objective with a standard cross-entropy classification loss — CLIP's negatives are the other examples in the same batch, not a fixed set of incorrect classes, which is why batch size materially affects training quality.",
+  ]}
+/>
+
+<Quiz questions={[
+  {
+    question: "In CLIP's contrastive pretraining loss, where do the negative examples for a given (image, caption) pair come from?",
+    options: [
+      "A manually curated set of incorrect captions written specifically as hard negatives",
+      "Every other image-caption pair in the same training batch — any caption other than an image's own paired caption is treated as a negative",
+      "A separate held-out set of adversarial examples generated before training",
+      "CLIP does not use negative examples; it only maximizes similarity of matched pairs",
+    ],
+    answerIndex: 1,
+    explanation: "CLIP's symmetric InfoNCE-style loss treats the N x N similarity matrix within a batch as a classification problem: for image i, its true caption i is the positive, and all N-1 other captions in the batch serve as negatives (and symmetrically for text-to-image). This requires no manual negative curation, which is exactly what makes training on hundreds of millions of noisy web pairs feasible.",
+  },
+  {
+    question: "Why does CLIP's contrastive pretraining objective enable zero-shot classification on classes never seen during training?",
+    options: [
+      "Because the model memorizes every possible class name during pretraining",
+      "Because the objective never ties the embedding space to a fixed label set — it only learns to place semantically matching image and text content close together, so any new class expressed as a text prompt can be compared against an image embedding at inference time without retraining",
+      "Because zero-shot classification does not actually require the pretrained embeddings, only the image encoder",
+      "Because CLIP's image encoder outputs class probabilities directly",
+    ],
+    answerIndex: 1,
+    explanation: "Unlike a conventional classifier whose final layer has a fixed number of output units decided at training time, CLIP's shared embedding space is defined purely by semantic similarity between image and text content. A new class is just a new text prompt encoded into that same space — nothing about the architecture or training objective assumed a fixed set of classes, so novel class names work without any retraining.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Learning Transferable Visual Models From Natural Language Supervision (CLIP)", authors: "Radford, A. et al.", venue: "ICML", year: 2021, url: "https://arxiv.org/abs/2103.00020" },
+  { title: "Representation Learning with Contrastive Predictive Coding", authors: "Oord, A. van den, Li, Y., Vinyals, O.", venue: "arXiv", year: 2018, url: "https://arxiv.org/abs/1807.03748" },
+  { title: "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale", authors: "Dosovitskiy, A. et al.", venue: "ICLR", year: 2020, url: "https://arxiv.org/abs/2010.11929" },
+]} />

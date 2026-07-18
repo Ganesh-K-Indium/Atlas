@@ -1,0 +1,165 @@
+---
+title: "Cross-Validation Strategies"
+description: "How to estimate out-of-sample performance honestly — and the specific ways naive k-fold silently leaks information on time-series and grouped data."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["machine-learning", "evaluation", "model-selection", "time-series"]
+prerequisites: ["Train/test split", "Bias-variance tradeoff"]
+---
+
+<Prerequisites items={["Basic train/test split", "Bias-variance tradeoff", "Notion of i.i.d. sampling"]} />
+
+## Intuition
+
+A single train/test split gives one noisy estimate of generalization performance — it depends heavily on which particular examples happened to land in the test set. **Cross-validation (CV)** repeatedly partitions the data into different train/validation splits, evaluates the model on each, and averages the results, trading extra compute for a lower-variance, more trustworthy estimate of how the model will perform on unseen data.
+
+<Callout type="tip" title="The core idea">
+  Cross-validation approximates "how would this model perform on data it has never seen" by repeatedly holding out different subsets as pseudo-test-sets — but this approximation is only valid if the held-out fold is generated the same way the real future/unseen data will be generated. When rows are correlated (time order, shared groups), a naive random split violates that assumption and leaks information from the future or from a group into training.
+</Callout>
+
+## Formal Definition
+
+**k-fold CV**: partition the dataset $D$ of size $n$ into $k$ roughly equal, disjoint folds $D_1, \dots, D_k$. For each $i = 1, \dots, k$, train on $D \setminus D_i$ and evaluate on $D_i$, producing a validation score $s_i$. The CV estimate is $\bar{s} = \frac{1}{k}\sum_{i=1}^k s_i$, with variance across folds giving a sense of estimate stability.
+
+**Stratified k-fold**: for classification, folds are constructed so each fold preserves (approximately) the same class proportions as the full dataset. This matters most for imbalanced classes, where a naive random split could produce a fold with zero or very few minority-class examples.
+
+**Leave-one-out CV (LOOCV)**: the special case $k = n$ — each fold holds out exactly one example. It is nearly unbiased (each training set is almost the full dataset) but has high variance (the $n$ fitted models are nearly identical and highly correlated with each other, and it is computationally expensive for anything but closed-form estimators).
+
+**Time-series / walk-forward CV**: folds are constructed to respect temporal order — training always precedes validation in time, and the split point walks forward through the series (also called rolling-origin evaluation).
+
+## Derivation: Why Naive k-Fold Leaks Information
+
+**Case 1 — Time series.** Suppose $y_t$ depends on $y_{t-1}$ (autocorrelation), which is true of essentially all real time series. In naive random k-fold, a training fold can contain $y_{t+1}$ while the validation fold contains $y_t$ — that is, the model trains on data from *after* the point it is asked to predict. Formally, if the true predictive task is $\mathbb{E}[y_t \mid \mathcal{F}_{<t}]$ (using only information available strictly before $t$), but the training set used to fit $\hat f$ includes observations indexed at $t' > t$, then $\hat f$ has implicitly been fit using information from the future relative to some validation points. The resulting validation score estimates a different, easier quantity — "interpolation accuracy given both past and future context" — not the quantity that matters in deployment: extrapolation into an unseen future. This inflates the estimated score relative to true forecast performance, sometimes dramatically for highly autocorrelated series.
+
+Walk-forward CV avoids this by construction: fold $i$'s training set is always a prefix of the series ending at time $t_i$, and its validation set is a subsequent window $(t_i, t_{i+1}]$. No training example is ever indexed later in time than a validation example it's evaluated against.
+
+**Case 2 — Grouped data.** Suppose observations are naturally clustered into groups $g \in \{1, \dots, G\}$ (e.g., multiple rows per patient, multiple sensor readings per device) and observations within a group are correlated (share a patient-specific baseline, a device-specific calibration offset, etc.). If a naive random split places some rows from group $g$ in the training fold and other rows from the *same* group $g$ in the validation fold, the model can effectively memorize group-specific idiosyncrasies (e.g., "patient #42 tends to run high") during training and then "recognize" that same patient in validation — inflating validation accuracy relative to how the model would perform on a genuinely new, unseen group. Formally, if rows are only conditionally i.i.d. given the group (i.e., $\mathrm{Cov}(y_i, y_j \mid g_i = g_j) \neq 0$), the i.i.d. assumption behind ordinary k-fold's unbiasedness is violated. `GroupKFold` fixes this by ensuring an entire group is assigned to either train or validation, never split across both.
+
+## Diagram
+
+<Mermaid chart={`graph TD
+  subgraph "k-fold CV (k=5)"
+  direction LR
+  F1["Fold 1 = val, 2-5 = train"]
+  F2["Fold 2 = val, 1,3-5 = train"]
+  F3["Fold 3 = val, 1-2,4-5 = train"]
+  F4["Fold 4 = val, 1-3,5 = train"]
+  F5["Fold 5 = val, 1-4 = train"]
+  end
+  F1 --> Avg[Average the 5 validation scores]
+  F2 --> Avg
+  F3 --> Avg
+  F4 --> Avg
+  F5 --> Avg
+
+  subgraph "Walk-forward CV (time series)"
+  direction LR
+  W1["Train t in 0..10, Val t in 10..12"]
+  W2["Train t in 0..12, Val t in 12..14"]
+  W3["Train t in 0..14, Val t in 14..16"]
+  end
+  W1 --> W2 --> W3
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+from sklearn.model_selection import (
+    KFold, StratifiedKFold, LeaveOneOut, TimeSeriesSplit, GroupKFold, cross_val_score
+)
+from sklearn.ensemble import RandomForestClassifier
+
+X, y = np.random.randn(200, 10), np.random.randint(0, 2, 200)
+groups = np.repeat(np.arange(40), 5)  # 40 groups, 5 correlated rows each
+
+model = RandomForestClassifier(n_estimators=200, random_state=0)
+
+# Plain k-fold — fine for i.i.d. tabular data with no groups/time structure
+kf = KFold(n_splits=5, shuffle=True, random_state=0)
+print("KFold:", cross_val_score(model, X, y, cv=kf).mean())
+
+# Stratified k-fold — preserves class balance per fold, essential under class imbalance
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+print("StratifiedKFold:", cross_val_score(model, X, y, cv=skf).mean())
+
+# Leave-one-out — nearly unbiased, high variance, expensive; rarely used beyond small n
+loo = LeaveOneOut()
+# print("LOOCV:", cross_val_score(model, X, y, cv=loo).mean())  # O(n) model fits
+
+# GroupKFold — never splits a group across train/validation
+gkf = GroupKFold(n_splits=5)
+print("GroupKFold:", cross_val_score(model, X, y, cv=gkf, groups=groups).mean())
+
+# TimeSeriesSplit — walk-forward, training set only ever precedes validation set in time
+tscv = TimeSeriesSplit(n_splits=5)
+print("TimeSeriesSplit:", cross_val_score(model, X, y, cv=tscv).mean())
+```
+
+## Comparing CV Strategies
+
+<ComparisonTable
+  headers={["Strategy", "Assumption required", "Bias of estimate", "Variance of estimate", "Use when"]}
+  rows={[
+    ["k-fold (k=5 or 10)", "Rows i.i.d., no time/group structure", "Low", "Moderate", "Standard i.i.d. tabular data"],
+    ["Stratified k-fold", "Rows i.i.d.; class proportions matter", "Low", "Lower than plain k-fold for classification", "Classification, especially imbalanced classes"],
+    ["Leave-one-out (LOOCV)", "Rows i.i.d.", "Very low (nearly unbiased)", "High (folds are highly correlated with each other)", "Very small datasets, or estimators with cheap closed-form leave-one-out updates"],
+    ["GroupKFold", "Observations correlated within groups", "Low (w.r.t. new-group generalization)", "Depends on number of groups", "Multiple rows per entity (patient, user, device)"],
+    ["Walk-forward / TimeSeriesSplit", "Temporal order matters, autocorrelation present", "Low (w.r.t. true forecasting task)", "Higher — fewer independent folds, especially early on", "Time series and any forecasting task"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Cross-validation trades compute for a lower-variance estimate of generalization performance by averaging over multiple train/validation splits.",
+  "Stratified k-fold matters most under class imbalance, where a random split risks under-representing (or excluding) the minority class in some folds.",
+  "LOOCV is nearly unbiased but high-variance because its n fitted models are almost identical and highly correlated with each other.",
+  "Naive random k-fold on time series lets the model train on future information relative to validation points, silently inflating the validation score.",
+  "Naive random k-fold on grouped data lets group-specific patterns leak from training into validation, silently inflating the validation score.",
+  "GroupKFold and walk-forward CV both fix leakage by construction: an entire group, or an entire time window boundary, is respected rather than split.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Frequent errors">
+  - **Fitting preprocessing (scalers, imputers, feature selection, target encoders) on the full dataset before splitting into folds.** Any statistic computed using validation-fold data (even just a mean or standard deviation) and then applied to that same fold leaks information; always fit the *entire* pipeline — scaler included — inside each fold's training data only (`Pipeline` + `cross_val_score`, not `scaler.fit(X)` before the CV loop).
+  - **Using random k-fold on time series.** As derived above, this lets the model see the future, and the reported CV score can be substantially higher than true forecast accuracy — always use `TimeSeriesSplit` or walk-forward validation for temporally ordered data.
+  - **Splitting by row instead of by group when rows are correlated within an entity.** A model that "memorizes" a patient/user/device from training rows can trivially perform well on other rows from that same entity in validation, without having learned anything that generalizes to new entities.
+  - **Selecting hyperparameters using the average CV score and then reporting that same score as the final generalization estimate.** Once a CV score has been used to choose among candidates, it's an optimistic (upward-biased) estimate for the chosen candidate — nested CV, or a separate untouched test set, is needed for an honest final number.
+  - **Using accuracy-based stratification alone without considering time or group structure that also happens to be present.** Stratification only addresses class balance; if the data also has group or time correlation, stratified k-fold alone is still leaky.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "You are forecasting daily sales and use standard 5-fold shuffled cross-validation to evaluate a model. The validation score looks great, but the model performs poorly in production. What is the most likely explanation?",
+    options: [
+      "The model is underfitting",
+      "Shuffled k-fold let the model train on days after the validation days, so the CV score reflects interpolation using future context rather than true forecasting; use walk-forward validation instead",
+      "5 folds is too few — more folds would fix this",
+      "The production data distribution is different and nothing about CV could have caught this",
+    ],
+    answerIndex: 1,
+    explanation: "Shuffling before splitting destroys temporal order, so training folds can contain data from timestamps after the validation fold's timestamps. The model implicitly benefits from information that would not be available at prediction time in deployment, inflating the CV score. Walk-forward (TimeSeriesSplit) fixes this by keeping training strictly before validation in time.",
+  },
+  {
+    question: "Why does leave-one-out cross-validation (LOOCV) have low bias but high variance as an estimator of test error, compared to 5-fold or 10-fold CV?",
+    options: [
+      "LOOCV trains on almost the entire dataset each time (low bias, since the training set closely resembles the full dataset), but the n fitted models are nearly identical and highly correlated with each other, so their average score fluctuates a lot depending on the specific dataset drawn (high variance)",
+      "LOOCV is always both lower bias and lower variance than k-fold",
+      "LOOCV has high bias because it only tests on one point at a time",
+      "Variance does not apply to LOOCV since there is no randomness involved",
+    ],
+    answerIndex: 0,
+    explanation: "Because each LOOCV training set omits only one point, the fitted models are nearly identical to a model fit on the full dataset (near-zero bias). But because the n training sets overlap almost completely, the n resulting models — and their errors — are highly correlated with each other, so averaging them doesn't reduce variance as much as averaging k largely-independent fold estimates would in ordinary k-fold.",
+    },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "The Elements of Statistical Learning (Ch. 7: Model Assessment and Selection)", authors: "Hastie, T., Tibshirani, R., & Friedman, J.", venue: "Springer", year: 2009 },
+  { title: "A Survey of Cross-Validation Procedures for Model Selection", authors: "Arlot, S., & Celisse, A.", venue: "Statistics Surveys", year: 2010, url: "https://arxiv.org/abs/0907.4728" },
+  { title: "scikit-learn: Cross-validation — evaluating estimator performance", authors: "Pedregosa, F. et al.", venue: "scikit-learn documentation", year: 2011, url: "https://scikit-learn.org/stable/modules/cross_validation.html" },
+]} />

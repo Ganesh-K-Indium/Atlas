@@ -1,0 +1,189 @@
+---
+title: "State Space Models: Mamba & RWKV"
+description: "How reviving the linear recurrence of classical control theory — made input-dependent and computed via a parallel scan — lets Mamba match Transformer quality with linear, not quadratic, compute in sequence length."
+difficulty: "expert"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "state-space-models", "mamba", "rwkv", "sequence-models"]
+prerequisites: ["Transformer architecture (for contrast)", "Linear algebra (matrix-vector recurrences)", "Basic recurrent neural networks"]
+---
+
+## Intuition
+
+Self-attention's defining cost is quadratic in sequence length: every token attends to every other token, so doubling the sequence length quadruples the compute for the attention operation (see [The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture) for the full complexity breakdown). For very long sequences, this becomes the dominant bottleneck.
+
+**State Space Models (SSMs)**, in the sense used by architectures like Mamba, take a different approach borrowed from classical control theory: maintain a fixed-size hidden **state** that gets updated at each timestep by a linear recurrence, the same conceptual object used to model dynamical systems (e.g., a thermostat's internal state evolving in response to temperature readings). Because the state update is a simple linear recurrence rather than an attention operation over the whole sequence, processing $n$ tokens costs $O(n)$, not $O(n^2)$ — the same asymptotic advantage RNNs always had over attention. The historical problem with plain RNN-style recurrences was that they were hard to train at scale and struggled to selectively retain long-range information; Mamba's central contribution is a set of fixes that make this linear-recurrence approach competitive with Transformers in practice, not just in theoretical complexity.
+
+<Callout type="tip" title="The one-sentence idea">
+  Mamba processes a sequence with a linear state-space recurrence (like a classical control-theory state-space model) whose transition parameters are made input-dependent (selective) at every timestep, and computes this efficiently on modern hardware via a parallel scan — achieving Transformer-competitive quality at linear, rather than quadratic, compute in sequence length.
+</Callout>
+
+## The State-Space Recurrence
+
+A continuous-time linear state-space model, as used in classical control theory, describes how an internal state $h(t)$ evolves in response to an input $x(t)$ and produces an output $y(t)$:
+
+$$
+h'(t) = A h(t) + B x(t), \qquad y(t) = C h(t)
+$$
+
+where $A$ is the state transition matrix (how the state evolves on its own), $B$ maps the input into the state update, and $C$ reads the output out of the state. Discretizing this (converting the continuous differential equation into a discrete-time update suitable for processing a sequence of tokens, via a discretization step size $\Delta$) gives a **linear recurrence** over discrete timesteps $t = 1, 2, \dots$:
+
+$$
+h_t = \bar{A}\, h_{t-1} + \bar{B}\, x_t, \qquad y_t = C\, h_t
+$$
+
+where $\bar{A}, \bar{B}$ are the discretized versions of $A, B$ (functions of the original continuous parameters and $\Delta$). This is structurally the same kind of recurrence an RNN uses ($h_t$ depends on $h_{t-1}$ and $x_t$), but with a crucial restriction: the state update is **linear** in $h_{t-1}$ (no nonlinearity applied inside the recurrence itself, unlike an RNN's typical $\tanh$ or gating nonlinearities). This linearity is what makes the recurrence mathematically tractable to compute efficiently in parallel (discussed below) — a nonlinear recurrence generally cannot be parallelized this way, because each step's output would depend non-linearly on all previous steps rather than through a simple, associative combination.
+
+## Why Plain (Non-Selective) SSMs Are Limited
+
+In the recurrence above, $\bar{A}$, $\bar{B}$, and $C$ are the same fixed matrices at every timestep, regardless of what the actual input $x_t$ is — the system's dynamics don't depend on content, only on position in the sequence. This is analogous to a Transformer with no attention mechanism at all: the state has no way to decide, based on what it's currently seeing, "this token is important, remember it strongly" versus "this token is irrelevant, let it decay." Earlier SSM-based architectures (predating Mamba) used exactly this content-independent recurrence and, despite being efficient, generally underperformed attention-based models on tasks requiring content-based reasoning over long contexts — the fixed dynamics can't selectively focus on or ignore specific tokens the way attention's learned, per-pair relevance scores can.
+
+## Mamba's Key Innovation: Selective (Input-Dependent) State Transitions
+
+Mamba's central change is to make the discretized parameters $\bar{B}$, $C$, and the discretization step $\Delta$ **functions of the current input** $x_t$, rather than fixed matrices shared across all timesteps:
+
+$$
+B_t = f_B(x_t), \qquad C_t = f_C(x_t), \qquad \Delta_t = f_\Delta(x_t)
+$$
+
+(each $f$ is typically a small learned linear projection of $x_t$). This means the state update at each timestep now depends on the actual content of the current input, not just its position:
+
+$$
+h_t = \bar{A}_t\, h_{t-1} + \bar{B}_t\, x_t, \qquad y_t = C_t\, h_t
+$$
+
+Concretely, this lets the model learn to do things like: "for tokens matching a certain pattern, set $\Delta_t$ large (or $\bar{B}_t$ strong) so this token's information is written into the state prominently and persists," or conversely "for irrelevant filler tokens, effectively skip updating the state." This selectivity is what gives the model a content-aware mechanism for deciding what to remember and what to forget — filling the gap that made earlier, non-selective SSMs weaker than attention on tasks requiring this kind of content-based reasoning.
+
+## The Parallel Scan: Why Selectivity Doesn't Sacrifice Efficiency
+
+Making $\bar{A}_t, \bar{B}_t$ input-dependent seems, at first glance, to reintroduce the sequential bottleneck that made plain RNNs slow to train — $h_t$ depends on $h_{t-1}$, so it looks like the recurrence must be computed one step at a time. Mamba's second key contribution is recognizing that this linear recurrence (even with input-dependent, i.e. time-varying, coefficients) is an instance of a mathematical operation called a **scan**, and specifically an *associative* one: the composition of two consecutive linear state updates can itself be written as a single combined linear update. This associativity property is exactly what allows a **parallel scan** algorithm (the same class of algorithm used for parallel prefix-sum computations) to compute the entire sequence of states $h_1, \dots, h_n$ in $O(\log n)$ sequential depth using $O(n)$ total work spread across parallel hardware threads, rather than requiring $n$ strictly sequential steps.
+
+Mamba further pairs this with a **hardware-aware implementation**: the recurrence is computed with a custom GPU kernel that keeps the (comparatively large) intermediate state representations in fast on-chip SRAM rather than repeatedly reading and writing them to slower GPU HBM memory — conceptually similar in spirit to how FlashAttention avoids materializing the full attention matrix in slow memory. This combination — an associative linear recurrence computable via parallel scan, plus a memory-access pattern tuned to GPU hardware — is what makes selective SSMs practical to train at the throughput required for large-scale language modeling, rather than being only a theoretical curiosity.
+
+<Callout type="note" title="What the actual complexity claim is">
+  The precise, well-established claim is: Mamba's compute and memory scale **linearly** in sequence length ($O(n)$) for both training (via the parallel scan) and, notably, for autoregressive inference (each generation step is a single constant-size state update, unlike attention's need to attend over a growing KV cache) — versus a standard Transformer's $O(n^2)$ compute for a full sequence and its growing per-step KV-cache cost during generation. This is a genuine asymptotic advantage for long sequences, not merely a constant-factor speedup, and it is the specific claim substantiated in the Mamba paper's benchmarks — not a claim that SSMs strictly dominate Transformers on every axis (quality on all tasks, ease of training, ecosystem maturity, etc. are separate questions still actively studied).
+</Callout>
+
+## RWKV: A Related but Distinct Approach
+
+**RWKV** ("Receptance Weighted Key Value") is another architecture aimed at the same goal — competitive quality with sub-quadratic compute — via a different, though related, route: it reformulates a form of attention as a linear recurrence with learned, time-decaying weighting, so that it can be run either as a parallelizable computation (similar in spirit to a Transformer, for efficient training) or as a strictly recurrent, constant-per-step computation (for efficient inference), without a growing KV cache. At a conceptual level, RWKV and Mamba share the same underlying motivation — trading attention's quadratic cost for a recurrence-based mechanism with constant-size state — but arrive at their specific recurrence structure differently; the precise gating/decay formulation RWKV uses has evolved across its released versions, so treat this as the shared conceptual thread rather than a claim about any one exact formulation.
+
+<Mermaid chart={`
+graph TD
+  X["Input sequence x_1 ... x_n"] --> Params["Compute input-dependent B_t, C_t, Delta_t per token"]
+  Params --> Scan["Parallel scan over the linear recurrence h_t = A_t h_(t-1) + B_t x_t"]
+  Scan --> States["Hidden states h_1 ... h_n (fixed-size state per step)"]
+  States --> Out["Output y_t = C_t h_t per token"]
+`} />
+
+<ComparisonTable
+  headers={["Property", "Transformer (self-attention)", "Selective SSM (Mamba)"]}
+  rows={[
+    ["Training compute (sequence length n)", "O(n^2)", "O(n) via parallel scan"],
+    ["Inference compute per generated token", "Grows with cache size (attends over full KV cache)", "O(1) -- constant-size state update per step"],
+    ["Memory during generation", "KV cache grows with sequence length", "Fixed-size state, independent of sequence length"],
+    ["Content-based selectivity", "Learned per-token-pair attention weights", "Learned input-dependent state-transition parameters (selectivity mechanism)"],
+    ["Parallelization during training", "Fully parallel over all token pairs", "Parallel via associative scan, not pairwise attention"],
+  ]}
+/>
+
+## Implementation Sketch (Simplified Selective Scan)
+
+```python
+import torch
+import torch.nn as nn
+
+class SelectiveSSMLayer(nn.Module):
+    def __init__(self, d_model, d_state):
+        super().__init__()
+        self.d_state = d_state
+        self.A_log = nn.Parameter(torch.randn(d_model, d_state))   # base transition (before input-gating)
+        self.to_B = nn.Linear(d_model, d_state)   # input-dependent B_t
+        self.to_C = nn.Linear(d_model, d_state)   # input-dependent C_t
+        self.to_delta = nn.Linear(d_model, d_model)  # input-dependent discretization step
+
+    def forward(self, x):
+        # x: [batch, seq_len, d_model]
+        batch, seq_len, d_model = x.shape
+        A = -torch.exp(self.A_log)                # ensure stable (negative) continuous-time dynamics
+        h = torch.zeros(batch, d_model, self.d_state, device=x.device)
+        outputs = []
+
+        # NOTE: shown here as an explicit sequential loop for clarity;
+        # in practice this recurrence is computed via a parallel scan, not a Python for-loop.
+        for t in range(seq_len):
+            xt = x[:, t, :]                                   # [batch, d_model]
+            delta_t = torch.softplus(self.to_delta(xt))        # input-dependent step size, > 0
+            B_t = self.to_B(xt)                                 # [batch, d_state]
+            C_t = self.to_C(xt)                                 # [batch, d_state]
+
+            A_bar = torch.exp(delta_t.unsqueeze(-1) * A)        # discretized, input-dependent transition
+            B_bar = delta_t.unsqueeze(-1) * B_t.unsqueeze(1)    # discretized, input-dependent input matrix
+
+            h = A_bar * h + B_bar * xt.unsqueeze(-1)            # selective state update
+            y_t = (h * C_t.unsqueeze(1)).sum(dim=-1)            # read out via C_t
+            outputs.append(y_t)
+
+        return torch.stack(outputs, dim=1)
+```
+
+The sequential `for` loop above is written for clarity only — production Mamba implementations replace it with a parallel scan (and a fused, hardware-aware CUDA kernel) precisely to avoid paying an $O(n)$ sequential-step penalty in wall-clock time despite the recurrence being mathematically sequential.
+
+<KeyTakeaways items={[
+  "SSMs process sequences via a linear recurrence (state transition matrix A, input matrix B, output matrix C), the same structural idea as a classical control-theory state-space model.",
+  "Plain (non-selective) SSMs use fixed A, B, C at every timestep -- efficient, but unable to selectively attend to content the way attention can.",
+  "Mamba's selectivity makes B, C, and the discretization step Delta functions of the current input, giving the state update content-aware retain/forget behavior.",
+  "This linear (even if time-varying) recurrence is associative, which is what enables a parallel scan to compute it in O(log n) depth / O(n) total work, instead of n strictly sequential steps.",
+  "The resulting asymptotic advantage over Transformers is real and specific: O(n) training compute (vs O(n^2)) and O(1) per-step inference compute with a fixed-size state (vs a growing KV cache) -- not a vague general claim of superiority.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Linear-in-sequence-length training compute and constant per-step inference compute/memory -- a genuine asymptotic advantage over attention for very long sequences.",
+    "No growing KV cache during autoregressive generation, which is a major practical memory advantage for long-context serving.",
+    "The parallel scan preserves trainability at scale despite the recurrence being sequential in principle.",
+  ]}
+  cons={[
+    "A fixed-size hidden state is a bottleneck in principle -- it must compress all relevant history into a bounded-size representation, unlike attention's ability to directly reference any earlier token's exact representation.",
+    "The ecosystem (tooling, pretrained checkpoints, established best practices) is considerably less mature than the Transformer ecosystem as of recent literature.",
+    "Achieving the parallel-scan speedup in practice requires a custom, hardware-aware kernel -- a naive sequential implementation (as in the simplified code sketch above) would not realize the claimed efficiency benefits.",
+  ]}
+/>
+
+A common overclaim to avoid: treating Mamba's linear compute scaling as proof it strictly outperforms Transformers in quality on all tasks. The established claim is specifically about compute/memory scaling in sequence length; task-quality comparisons are a separate, still actively evolving area of empirical research.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What specifically is Mamba's 'selective' state-space model changing relative to earlier (non-selective) SSMs, and why does that matter?",
+    options: [
+      "It replaces the linear recurrence with a full attention mechanism",
+      "It makes the discretized input matrix B, output matrix C, and discretization step Delta functions of the current input token, rather than fixed matrices shared across all timesteps -- giving the model a content-aware mechanism to decide what to write into and retain in its state, which earlier fixed-parameter SSMs lacked",
+      "It removes the state entirely and replaces it with a KV cache",
+      "It increases the state dimension to match the sequence length",
+    ],
+    answerIndex: 1,
+    explanation: "Earlier SSMs used the same A, B, C at every timestep regardless of input content, so they had no way to selectively emphasize or ignore specific tokens. Mamba makes B, C, and Delta input-dependent, so the state update's behavior can vary token-by-token based on content -- directly addressing the gap that made non-selective SSMs weaker than attention on content-based reasoning tasks.",
+  },
+  {
+    question: "Given that Mamba's state update h_t = A_t h_(t-1) + B_t x_t is still a recurrence (h_t depends on h_(t-1)), why doesn't making A_t and B_t input-dependent destroy the ability to parallelize its computation?",
+    options: [
+      "It does destroy parallelism -- Mamba is trained with a strictly sequential loop, matching its inference-time behavior",
+      "Because even with time-varying (input-dependent) coefficients, the recurrence remains linear, and composing consecutive linear updates is associative -- this associativity is exactly what a parallel scan algorithm exploits to compute the full sequence of states in O(log n) parallel depth rather than n sequential steps",
+      "Because the input-dependent parameters are computed only once per sequence, not per timestep",
+      "Because Mamba discards the state entirely at each timestep, removing the dependency on h_(t-1)",
+    ],
+    answerIndex: 1,
+    explanation: "Linearity (not constancy of the coefficients) is what makes the recurrence's per-step update composable into a single combined linear transformation across any span of timesteps -- this associative-composition property is precisely what a parallel scan algorithm requires, letting it compute all states with O(n) total work in only O(log n) sequential depth, even though A_t and B_t vary with t.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Mamba: Linear-Time Sequence Modeling with Selective State Spaces", authors: "Gu, A. & Dao, T.", venue: "arXiv preprint", year: 2023, url: "https://arxiv.org/abs/2312.00752" },
+  { title: "RWKV: Reinventing RNNs for the Transformer Era", authors: "Peng, B. et al.", venue: "EMNLP (Findings)", year: 2023, url: "https://arxiv.org/abs/2305.13048" },
+]} />

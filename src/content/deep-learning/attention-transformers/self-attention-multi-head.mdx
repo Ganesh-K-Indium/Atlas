@@ -1,0 +1,172 @@
+---
+title: "Self-Attention & Multi-Head Attention"
+description: "Why Q, K, and V need to be three separate learned projections rather than one, what individual attention heads actually specialize in, and the real compute/memory cost of splitting attention into heads."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "nlp", "attention", "transformers"]
+prerequisites: ["The Transformer Architecture", "Linear algebra basics", "Softmax"]
+---
+
+<Prerequisites items={["The Transformer Architecture", "Matrix multiplication", "Softmax and its gradient"]} />
+
+## Intuition
+
+[The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture) introduces scaled dot-product attention as the mechanism that lets every token look at every other token. This page goes one level deeper into *why* it's built the specific way it is: why three separate projections instead of a plain self-similarity computation, what a "head" actually buys you beyond more parameters, and what multi-head attention costs relative to one large attention computation.
+
+<Callout type="tip" title="The one-sentence idea">
+  Self-attention isn't "tokens comparing themselves to themselves" — it's three *different, learned* views of each token (what it's looking for, what it advertises, and what it actually delivers), and multi-head attention runs several independent, lower-dimensional versions of this in parallel so different heads can specialize in different kinds of relationships.
+</Callout>
+
+## Why Not Just Use the Raw Input as Q, K, and V?
+
+The naive version of "let tokens attend to each other" would be to skip projections entirely and compute $\text{softmax}(XX^\top / \sqrt{d}) X$ directly on the input embeddings $X$. This would work in the sense that it's computable, but it's needlessly rigid:
+
+- **A single embedding vector would have to serve three incompatible roles at once**: representing what this token is looking for, what it exposes to others' searches, and what content it actually contributes when selected. Forcing one vector to do all three collapses information that's naturally different — "the query a token issues" and "the content it offers" are not the same thing conceptually, and conflating them means the similarity used for *routing* (deciding who attends to whom) is rigidly tied to the *content* being routed.
+- **No learnable degrees of freedom for the routing itself.** With raw $XX^\top$, the only way to change which tokens attend to which is to change the embeddings themselves — which also changes what gets aggregated. Separate learned projections $W^Q, W^K, W^V$ decouple these: training can shape "how to decide relevance" ($W^Q$, $W^K$) somewhat independently from "what to actually pass along once relevance is decided" ($W^V$).
+- **Symmetry would be forced.** $XX^\top$ is a symmetric matrix (if token $i$ scores high with token $j$, token $j$ automatically scores exactly as high with token $i$, before the row-wise softmax). But relevance is often *asymmetric* in language: a pronoun like "it" needs to attend strongly to its antecedent noun, but that noun doesn't need to attend back to the pronoun nearly as much. Using separate $Q = XW^Q$ and $K = XW^K$ makes $QK^\top$ asymmetric in general, which is necessary to model this.
+
+So the projections are:
+
+$$
+Q = XW^Q, \qquad K = XW^K, \qquad V = XW^V, \qquad W^Q, W^K, W^V \in \mathbb{R}^{d_{\text{model}} \times d_k}
+$$
+
+each a separate learned linear map applied to the *same* input $X$ — same source, three different learned lenses on it.
+
+## Multi-Head Attention: What Each Head Can Specialize In
+
+A single attention computation forces every relevance judgment through one $d_k$-dimensional space — one notion of "similarity" has to capture syntax, coreference, semantics, and positional relationships all at once. Multi-head attention instead splits the model dimension into $h$ smaller subspaces and runs $h$ independent attention computations:
+
+$$
+\text{head}_i = \text{Attention}(X W_i^Q,\ X W_i^K,\ X W_i^V), \qquad i = 1, \ldots, h
+$$
+$$
+\text{MultiHead}(X) = \text{Concat}(\text{head}_1, \ldots, \text{head}_h)\, W^O
+$$
+
+Each head has its own $W_i^Q, W_i^K, W_i^V$, projecting into a smaller dimension $d_k = d_{\text{model}} / h$, so each head learns its *own* notion of relevance, independent of the others.
+
+**A concrete illustrative example** (based on patterns commonly reported when attention heads in trained Transformers are visualized): imagine processing the sentence "The trophy didn't fit in the suitcase because it was too big." One head might learn to mostly track **adjacent-token / local syntax** (each word attending strongly to its immediate neighbors — useful for phrase structure). Another head might specialize in **coreference-like relationships** — the token "it" attending strongly back to "trophy" (or "suitcase," depending on context), which is exactly the kind of long-range, content-dependent link self-attention was built to capture in a single hop. A third head might track **positional regularities** largely independent of content. No head is *told* to do this — the specialization emerges from gradient descent because having heads split up different kinds of relevance is a more expressive decomposition than one shared space, and the training objective rewards whatever internal division of labor reduces loss. (Exactly which heads specialize in what varies by model, layer, and training run — this is an illustration of the *kind* of division of labor observed, not a claim about a specific fixed head assignment in every model.)
+
+<Mermaid chart={`
+graph TD
+  X["Input X"] --> P1["Head 1: W1^Q, W1^K, W1^V"]
+  X --> P2["Head 2: W2^Q, W2^K, W2^V"]
+  X --> P3["Head 3: ... "]
+  X --> Ph["Head h"]
+  P1 --> A1["Attention output, d_k dims"]
+  P2 --> A2["Attention output, d_k dims"]
+  P3 --> A3["..."]
+  Ph --> Ah["Attention output, d_k dims"]
+  A1 --> Concat["Concat -> d_model dims"]
+  A2 --> Concat
+  A3 --> Concat
+  Ah --> Concat
+  Concat --> WO["x W^O (mixes across heads)"]
+  WO --> Out["Multi-head attention output"]
+`} />
+
+## Cost: Multi-Head vs. One Large Head
+
+A subtlety worth being precise about: multi-head attention with $h$ heads of dimension $d_k = d_{\text{model}}/h$ each uses **roughly the same total parameter count and the same total FLOPs** as one large head operating at the full $d_{\text{model}}$ dimension — the parameters are *split*, not *added*.
+
+- Total projection parameters for $Q$ across all heads: $h$ heads $\times$ ($d_{\text{model}} \times d_k$) $= h \times d_{\text{model}} \times (d_{\text{model}}/h) = d_{\text{model}}^2$ — identical to a single $d_{\text{model}} \times d_{\text{model}}$ projection. The same holds for $K$, $V$, and the output projection $W^O$.
+- The dot products inside each head cost $O(n^2 d_k)$; summed over $h$ heads, $O(n^2 \cdot h \cdot d_k) = O(n^2 \cdot d_{\text{model}})$ — again the same order as one large-head computation over the full dimension.
+
+So multi-head attention is **not** a heavier version of single-head attention with more parameters bolted on — it's the *same* budget, factored into several lower-rank, independently-specializable subspaces instead of one high-rank space. The practical cost that *does* increase somewhat is implementation overhead (more small matrix multiplies instead of one big one, and reshaping/transposing tensors to batch heads together), which is why efficient implementations (e.g., fused attention kernels) batch all heads into a single set of larger matrix multiplies rather than looping over heads naively.
+
+| Configuration | Total Q/K/V parameters | Total attention FLOPs (score computation) | Expressiveness |
+| --- | --- | --- | --- |
+| 1 head, dim $d_{\text{model}}$ | $O(d_{\text{model}}^2)$ | $O(n^2 d_{\text{model}})$ | One shared relevance notion for the whole sequence |
+| $h$ heads, dim $d_{\text{model}}/h$ each | $O(d_{\text{model}}^2)$ (same) | $O(n^2 d_{\text{model}})$ (same) | $h$ independently learnable relevance notions |
+
+## Code Sketch
+
+```python
+import torch
+import torch.nn as nn
+import math
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_model, num_heads):
+        super().__init__()
+        assert d_model % num_heads == 0
+        self.h = num_heads
+        self.d_k = d_model // num_heads
+
+        # Single big projections that implicitly hold all heads' W_i^Q/K/V
+        self.W_q = nn.Linear(d_model, d_model, bias=False)
+        self.W_k = nn.Linear(d_model, d_model, bias=False)
+        self.W_v = nn.Linear(d_model, d_model, bias=False)
+        self.W_o = nn.Linear(d_model, d_model, bias=False)
+
+    def split_heads(self, x, batch_size, seq_len):
+        # [batch, seq, d_model] -> [batch, h, seq, d_k]
+        x = x.view(batch_size, seq_len, self.h, self.d_k)
+        return x.transpose(1, 2)
+
+    def forward(self, x, mask=None):
+        batch_size, seq_len, _ = x.shape
+
+        Q = self.split_heads(self.W_q(x), batch_size, seq_len)
+        K = self.split_heads(self.W_k(x), batch_size, seq_len)
+        V = self.split_heads(self.W_v(x), batch_size, seq_len)
+
+        scores = Q @ K.transpose(-2, -1) / math.sqrt(self.d_k)   # [batch, h, seq, seq]
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, float("-inf"))
+        attn = torch.softmax(scores, dim=-1)
+        out = attn @ V                                            # [batch, h, seq, d_k]
+
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        return self.W_o(out)
+```
+
+<KeyTakeaways items={[
+  "Q, K, V come from three separate learned linear projections of the same input, not from a plain XXᵀ self-similarity — this decouples 'how to decide relevance' from 'what content to aggregate' and allows asymmetric relevance (i causally attends to j without the reverse being equally strong).",
+  "Multi-head attention splits the same total parameter budget across h independent, lower-dimensional attention computations rather than adding parameters — total FLOPs and parameter count are the same order as one large head.",
+  "Different heads empirically specialize in different relationship types (local syntax, coreference-like long-range links, positional patterns) — this division of labor emerges from training, not explicit supervision.",
+  "The main practical overhead of multi-head vs. single-head is implementation complexity (reshaping/batching many small matmuls), not additional theoretical compute or parameters.",
+]} />
+
+## Common Mistakes
+
+- **Believing multi-head attention has h times the parameters of single-head attention.** It doesn't — the total dimension is split across heads, keeping the parameter budget constant (this is the single most common misconception).
+- **Assuming heads are hand-assigned specific jobs.** Head specialization is an emergent, empirically-observed pattern from analyzing trained models, not an architectural guarantee — different training runs, model sizes, and layers show different (and sometimes overlapping or redundant) head behaviors.
+- **Forgetting the asymmetry of QKᵀ.** Because $Q$ and $K$ come from different projections, $QK^\top$ is not symmetric — token $i$ attending strongly to token $j$ does not imply the reverse holds equally, which is essential for modeling directional relationships like coreference.
+- **Confusing the number of heads with model capacity in general.** More heads at a fixed $d_{\text{model}}$ means each head is *lower*-dimensional, not that the model has more total capacity — the tradeoff is about how the same capacity is organized, not increased.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why are Q, K, and V computed as three separate learned projections of the input, rather than using the raw input embeddings directly (e.g., softmax(XXᵀ)X)?",
+    options: [
+      "Separate projections are only used to reduce the number of parameters",
+      "Using raw embeddings would force one vector to serve as query, key, and value simultaneously, produce a symmetric similarity matrix unable to model asymmetric relevance, and leave no learnable separation between 'how to route attention' and 'what content to aggregate' — separate W^Q, W^K, W^V projections fix all three",
+      "Separate projections are required only for numerical stability of softmax",
+      "Q, K, and V must differ only because of positional encoding",
+    ],
+    answerIndex: 1,
+    explanation: "XXᵀ is symmetric and conflates the role of a token's content with its relevance-routing signal. Learned projections W^Q, W^K, W^V let training shape asymmetric, decoupled notions of 'what I'm looking for' vs. 'what I offer,' which raw self-similarity cannot express.",
+  },
+  {
+    question: "How does the total parameter count and FLOP cost of multi-head attention (h heads of dimension d_model/h) compare to a single attention head operating at the full d_model dimension?",
+    options: [
+      "Multi-head attention uses roughly h times more parameters and FLOPs",
+      "Multi-head attention uses roughly the same total parameters and FLOPs — the d_model-dimensional budget is split across h smaller heads rather than added on top",
+      "Multi-head attention always uses fewer parameters regardless of h",
+      "The comparison depends entirely on sequence length, not on d_model or h",
+    ],
+    answerIndex: 1,
+    explanation: "Each head's projections are d_model × (d_model/h), and summing over h heads gives d_model² total — identical in order to one full-dimension head. The same holds for FLOPs: O(n²·h·d_k) = O(n²·d_model). Multi-head attention reorganizes the same budget into more, lower-rank subspaces rather than increasing it.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Attention Is All You Need", authors: "Vaswani, A. et al.", venue: "NeurIPS", year: 2017, url: "https://arxiv.org/abs/1706.03762" },
+  { title: "Neural Machine Translation by Jointly Learning to Align and Translate", authors: "Bahdanau, D., Cho, K. & Bengio, Y.", venue: "ICLR", year: 2015, url: "https://arxiv.org/abs/1409.0473" },
+]} />

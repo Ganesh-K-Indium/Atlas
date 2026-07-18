@@ -1,0 +1,241 @@
+---
+title: "Markov Decision Processes"
+description: "The formal skeleton behind every reinforcement learning algorithm: how states, actions, and rewards combine into the Bellman equations that define optimal behavior."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["reinforcement-learning", "machine-learning", "mdp", "bellman-equations", "dynamic-programming"]
+prerequisites: ["Probability basics (expectation, conditional distributions)", "Basic linear algebra", "Recursion / dynamic programming intuition"]
+---
+
+<Prerequisites items={[
+  "Probability basics (expectation, conditional distributions)",
+  "Basic linear algebra",
+  "Recursion / dynamic programming intuition",
+]} />
+
+## Intuition
+
+Reinforcement learning is about an agent that acts inside a world it doesn't fully control, receives a reward signal, and wants to act so as to accumulate as much reward as possible over time. Before we can talk about *learning* good behavior, we need a precise mathematical object that describes the world the agent is acting in. That object is the **Markov Decision Process (MDP)**.
+
+The "Markov" part is a simplifying assumption: the future only depends on the present, not the full history. If you know the current state, you know everything relevant for predicting what happens next — the path you took to get there is irrelevant. This assumption is what makes the whole framework tractable: it turns "optimize behavior over an entire history" into "optimize behavior as a function of the current state," which is a dramatically smaller object.
+
+<Callout type="tip" title="The one idea that matters">
+  An MDP reduces "what should I do given everything that's happened so far?" to "what should I do given the state I'm in right now?" — and the Bellman equations are simply the statement that the value of a state is the immediate reward plus the (discounted) value of whatever state you land in next.
+</Callout>
+
+## Formal Definition
+
+An MDP is a tuple $(\mathcal{S}, \mathcal{A}, P, R, \gamma)$:
+
+- $\mathcal{S}$ — the set of **states**, describing everything about the environment relevant to decision-making.
+- $\mathcal{A}$ — the set of **actions** available to the agent (possibly state-dependent, $\mathcal{A}(s)$).
+- $P(s' \mid s, a)$ — the **transition dynamics**: the probability of landing in state $s'$ given that the agent was in state $s$ and took action $a$.
+- $R(s, a, s')$ (or more simply $R(s,a)$) — the **reward function**, the immediate scalar reward received for that transition.
+- $\gamma \in [0, 1)$ — the **discount factor**, controlling how much the agent prefers immediate reward over future reward.
+
+The **Markov property** is the assumption baked into $P$: the next state depends only on the current state and action, not on the full trajectory that preceded it,
+
+$$
+P(s_{t+1} \mid s_t, a_t, s_{t-1}, a_{t-1}, \dots, s_0, a_0) = P(s_{t+1} \mid s_t, a_t).
+$$
+
+A **policy** $\pi$ is the agent's behavior: $\pi(a \mid s)$ gives the probability of taking action $a$ in state $s$ (a *deterministic* policy is the special case where this probability is 1 for exactly one action). The agent's goal is to find a policy that maximizes long-run reward.
+
+The **return** $G_t$ from time $t$ is the discounted sum of future rewards along a trajectory:
+
+$$
+G_t = R_{t+1} + \gamma R_{t+2} + \gamma^2 R_{t+3} + \cdots = \sum_{k=0}^{\infty} \gamma^k R_{t+k+1}.
+$$
+
+Discounting ($\gamma < 1$) serves two purposes: it keeps the infinite sum finite (as long as rewards are bounded) and it encodes a preference for reward sooner rather than later — a modeling choice, not just a mathematical convenience.
+
+## The Value Function and Q-Function
+
+Since the return $G_t$ is a random variable (both the policy and the environment's transitions can be stochastic), we define value functions as its *expectation*, conditioned on where the agent is (and, for the Q-function, what it's about to do).
+
+The **state-value function** under policy $\pi$:
+
+$$
+V^\pi(s) = \mathbb{E}_\pi\left[ G_t \mid S_t = s \right]
+$$
+
+— "how good is it to be in state $s$, if I follow $\pi$ from here on?"
+
+The **action-value function** (Q-function) under policy $\pi$:
+
+$$
+Q^\pi(s, a) = \mathbb{E}_\pi\left[ G_t \mid S_t = s, A_t = a \right]
+$$
+
+— "how good is it to take action $a$ in state $s$, and follow $\pi$ afterward?"
+
+These two are related by averaging the Q-function over the policy's own action distribution:
+
+$$
+V^\pi(s) = \sum_{a} \pi(a \mid s) \, Q^\pi(s, a).
+$$
+
+## Derivation: The Bellman Expectation Equation
+
+The key structural fact about the return is that it's defined **recursively**: the return from time $t$ is the first reward plus $\gamma$ times the return from time $t+1$,
+
+$$
+G_t = R_{t+1} + \gamma \left( R_{t+2} + \gamma R_{t+3} + \cdots \right) = R_{t+1} + \gamma G_{t+1}.
+$$
+
+This one-line identity is the entire engine behind every value-based RL algorithm. Substitute it into the definition of $V^\pi$:
+
+$$
+V^\pi(s) = \mathbb{E}_\pi\left[ R_{t+1} + \gamma G_{t+1} \mid S_t = s \right].
+$$
+
+By linearity of expectation, split this into two terms:
+
+$$
+V^\pi(s) = \mathbb{E}_\pi\left[ R_{t+1} \mid S_t = s \right] + \gamma\, \mathbb{E}_\pi\left[ G_{t+1} \mid S_t = s \right].
+$$
+
+Now expand the expectation explicitly over the randomness in the problem: which action $a$ the policy picks ($\pi(a \mid s)$), and which next state $s'$ the environment transitions to ($P(s' \mid s, a)$). For the second term, note that $\mathbb{E}[G_{t+1} \mid S_{t+1} = s'] = V^\pi(s')$ by definition — this is where the Markov property is essential, since it lets us replace "expected return given the entire history up to $s'$" with "expected return given just $s'$." This gives the **Bellman expectation equation**:
+
+$$
+V^\pi(s) = \sum_{a} \pi(a \mid s) \sum_{s'} P(s' \mid s, a) \Big[ R(s,a,s') + \gamma V^\pi(s') \Big].
+$$
+
+In words: *the value of a state is the reward-weighted average, over your policy's action choices and the environment's transition randomness, of immediate reward plus the discounted value of wherever you end up.* The same derivation applied to the Q-function (conditioning additionally on the fixed action $a$) gives:
+
+$$
+Q^\pi(s, a) = \sum_{s'} P(s' \mid s, a) \left[ R(s,a,s') + \gamma \sum_{a'} \pi(a' \mid s') Q^\pi(s', a') \right].
+$$
+
+## Derivation: The Bellman Optimality Equation
+
+We don't just want *a* policy's value — we want the **best possible** policy. Define the optimal value function as the value achieved by the best policy in every state simultaneously:
+
+$$
+V^*(s) = \max_{\pi} V^\pi(s), \qquad Q^*(s,a) = \max_\pi Q^\pi(s,a).
+$$
+
+(It is a nontrivial but classical result that a single policy $\pi^*$ achieves this maximum in *every* state at once — there is always a deterministic optimal policy for a finite MDP.)
+
+To derive the Bellman optimality equation, start from the Bellman expectation equation for $V^\pi$ and reason about what an *optimal* policy must do. If $\pi^*$ is optimal, then in every state it must choose whichever action maximizes the right-hand side — there's no reason to average over actions if you know which single action is best. Formally, since $V^*(s) = \max_a Q^*(s,a)$ (the best you can do from $s$ is to take the best action available), substitute this into the Bellman equation for $Q^\pi$ evaluated at the optimal policy:
+
+$$
+Q^*(s,a) = \sum_{s'} P(s' \mid s, a) \Big[ R(s,a,s') + \gamma V^*(s') \Big] = \sum_{s'} P(s' \mid s, a) \Big[ R(s,a,s') + \gamma \max_{a'} Q^*(s', a') \Big].
+$$
+
+And correspondingly,
+
+$$
+V^*(s) = \max_a \sum_{s'} P(s' \mid s, a) \Big[ R(s,a,s') + \gamma V^*(s') \Big].
+$$
+
+This is the **Bellman optimality equation**. The crucial difference from the expectation equation is that the $\sum_a \pi(a\mid s)(\cdot)$ average has been replaced by a $\max_a(\cdot)$ — optimality means always taking the single best action rather than a policy-weighted mixture. Once you have $Q^*$, the optimal policy falls out immediately by acting greedily:
+
+$$
+\pi^*(s) = \arg\max_a Q^*(s, a).
+$$
+
+This equation is not, by itself, an algorithm — it's a fixed-point condition that $V^*$ and $Q^*$ must satisfy. [Q-Learning](/docs/machine-learning/reinforcement-learning/q-learning) turns it into an actual learning rule by treating it as a target to bootstrap toward via temporal-difference updates.
+
+<Mermaid chart={`
+graph LR
+  A["Agent"] -- "action a_t" --> E["Environment"]
+  E -- "state s_t+1, reward r_t+1" --> A
+  A -. "policy π(a|s)" .-> A
+`} />
+
+## Code Example: Exact Bellman Backup via Value Iteration
+
+Because the Bellman optimality equation is a fixed-point equation, one of the simplest ways to compute $V^*$ exactly (when $P$ and $R$ are fully known, i.e. "planning" rather than "learning") is to apply it repeatedly as an update rule — this is **value iteration**, and it's the deterministic ancestor of the stochastic Q-learning update.
+
+```python
+import numpy as np
+
+def value_iteration(P, R, gamma=0.99, theta=1e-8, max_iter=10_000):
+    """
+    P: array of shape [num_states, num_actions, num_states], P[s,a,s'] = transition prob
+    R: array of shape [num_states, num_actions], expected immediate reward
+    Returns V*: shape [num_states]
+    """
+    num_states, num_actions, _ = P.shape
+    V = np.zeros(num_states)
+
+    for _ in range(max_iter):
+        # Bellman optimality backup for every state at once
+        # Q[s, a] = R[s, a] + gamma * sum_s' P[s, a, s'] * V[s']
+        Q = R + gamma * np.einsum("san,n->sa", P, V)
+        V_new = Q.max(axis=1)  # V*(s) = max_a Q(s, a)
+
+        if np.max(np.abs(V_new - V)) < theta:
+            V = V_new
+            break
+        V = V_new
+
+    policy = Q.argmax(axis=1)  # pi*(s) = argmax_a Q*(s, a)
+    return V, policy
+```
+
+Each sweep of this loop is exactly one application of the Bellman optimality equation to every state simultaneously; convergence to $V^*$ is guaranteed because the Bellman optimality backup is a contraction mapping under the max-norm (a consequence of $\gamma < 1$).
+
+<ComparisonTable
+  headers={["Concept", "Definition", "Role"]}
+  rows={[
+    ["Bellman expectation equation", "V^π(s) = Σ_a π(a|s) Σ_s' P(s'|s,a)[R + γV^π(s')]", "Evaluates a *fixed* policy"],
+    ["Bellman optimality equation", "V*(s) = max_a Σ_s' P(s'|s,a)[R + γV*(s')]", "Characterizes the *best possible* policy"],
+    ["Value iteration", "Repeatedly apply the optimality backup to every state", "Exact planning when P, R are known"],
+    ["Q-learning", "Stochastic, sampled version of the optimality backup", "Learning when P, R are unknown"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "The Markov property (next state depends only on current state and action) is what makes value functions well-defined as functions of the current state alone, rather than of full history.",
+  "The Bellman expectation equation is just the recursive identity G_t = R_{t+1} + γG_{t+1}, rewritten in expectation.",
+  "The Bellman optimality equation replaces the policy-weighted average over actions with a max over actions — this max is the mathematical seed of every greedy/ε-greedy policy improvement step in RL.",
+  "V* and Q* are related by V*(s) = max_a Q*(s,a), and the optimal policy is simply argmax_a Q*(s,a).",
+  "Value iteration is exact planning (P, R known); Q-learning is the sampled, model-free analogue used when P and R are unknown.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Pitfalls to avoid">
+  - **Confusing $V^\pi$ and $V^*$.** $V^\pi$ evaluates one specific policy; $V^*$ is the supremum over all policies. They coincide only when $\pi = \pi^*$.
+  - **Forgetting the Markov property is an assumption, not a law.** If your state representation doesn't capture everything relevant (e.g. you drop velocity from a physics state, keeping only position), the process is no longer Markovian and the Bellman equations no longer exactly hold — this is a common silent bug in RL environment design.
+  - **Treating the Bellman equation as an algorithm.** It's a consistency condition a value function must satisfy, not by itself a procedure to compute one — value iteration, policy iteration, and Q-learning are the actual algorithms that exploit it.
+  - **Mixing up reward and return.** Reward $R_{t+1}$ is the *immediate* scalar signal; return $G_t$ is the *discounted cumulative* sum the agent actually tries to maximize.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does the Markov property matter for defining the value function V(s) as a function of the current state alone?",
+    options: [
+      "It doesn't matter — value functions work regardless of history dependence",
+      "Because it guarantees that the expected future return depends only on the current state, so V(s) is well-defined without needing to track the full trajectory",
+      "It only matters for continuous state spaces",
+      "It's required so that rewards are always positive",
+    ],
+    answerIndex: 1,
+    explanation: "The Markov property (P(s_{t+1} | s_t, a_t, history) = P(s_{t+1} | s_t, a_t)) means the distribution over future trajectories — and hence expected return — depends only on the current state and action, not the path taken to reach it. This is exactly what lets us define V(s) as a function of s alone.",
+  },
+  {
+    question: "What is the key structural difference between the Bellman expectation equation and the Bellman optimality equation?",
+    options: [
+      "The optimality equation uses a discount factor while the expectation equation doesn't",
+      "The expectation equation averages over the policy's action distribution (Σ_a π(a|s)·), while the optimality equation takes a max over actions (max_a)",
+      "They are the same equation with different notation",
+      "The optimality equation only applies to deterministic environments",
+    ],
+    answerIndex: 1,
+    explanation: "The Bellman expectation equation evaluates a fixed policy by averaging over π(a|s); the Bellman optimality equation characterizes the best achievable value by replacing that average with max_a, since an optimal policy always takes the single best action rather than a mixture.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Reinforcement Learning: An Introduction (2nd ed.)", authors: "Sutton, R. S., & Barto, A. G.", venue: "MIT Press", year: 2018 },
+  { title: "A Markovian Decision Process", authors: "Bellman, R.", venue: "Journal of Mathematics and Mechanics", year: 1957 },
+  { title: "Dynamic Programming and Markov Processes", authors: "Howard, R. A.", venue: "MIT Press", year: 1960 },
+]} />

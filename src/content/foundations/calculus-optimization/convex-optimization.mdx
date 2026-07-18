@@ -1,0 +1,184 @@
+---
+title: "Convex Optimization"
+description: "Why convexity is the dividing line between optimization problems where 'found a local minimum' means 'found THE minimum,' and how to recognize it."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["optimization", "math", "convexity", "calculus"]
+prerequisites: ["Derivatives, gradients & Jacobians", "Gradient descent", "Linear algebra (eigenvalues)"]
+---
+
+## Intuition
+
+Most optimization problems can get stuck: a local search algorithm finds a valley, declares victory, but a better valley exists elsewhere on the surface. Convexity is the structural property that rules this out entirely — for a convex problem, *every* local minimum is automatically a *global* minimum. This single fact is why convex optimization has polynomial-time algorithms with strong guarantees, while general non-convex optimization (like training a deep network) has none.
+
+<Callout type="tip" title="The one idea that matters">
+  A function is convex if the line segment connecting any two points on its graph never dips below the graph itself. That geometric fact — no "hidden" dip below the chord — is exactly what prevents spurious local minima: any point that looks locally optimal is provably globally optimal.
+</Callout>
+
+## Formal Definitions
+
+### Convex sets
+
+A set $C \subseteq \mathbb{R}^n$ is **convex** if for all $x, y \in C$ and $\lambda \in [0,1]$:
+
+$$
+\lambda x + (1-\lambda) y \in C
+$$
+
+i.e., the line segment between any two points in $C$ stays inside $C$. Examples: half-spaces, balls, the positive orthant, the set of positive semidefinite matrices. A union of two disjoint balls is *not* convex.
+
+### Convex functions
+
+$f: \mathbb{R}^n \to \mathbb{R}$ is **convex** on a convex domain if for all $x, y$ and $\lambda \in [0,1]$:
+
+$$
+f(\lambda x + (1-\lambda) y) \le \lambda f(x) + (1-\lambda) f(y)
+$$
+
+$f$ is **strictly convex** if the inequality is strict for $x \ne y$, $\lambda \in (0,1)$ — this rules out flat segments and guarantees a *unique* minimizer if one exists. $f$ is **strongly convex** with parameter $\mu > 0$ if $f(x) - \frac{\mu}{2}\|x\|^2$ is convex — a quantitative strengthening that also drives the linear convergence rate of gradient descent (see [Gradient Descent — Derivation & Variants](/docs/foundations/calculus-optimization/gradient-descent)).
+
+### First- and second-order characterizations
+
+If $f$ is differentiable, convexity is equivalent to the **first-order condition**: the tangent line/plane at any point lies entirely below the graph.
+
+$$
+f(y) \ge f(x) + \nabla f(x)^\top (y - x) \quad \text{for all } x, y
+$$
+
+If $f$ is twice differentiable, convexity is equivalent to the **second-order condition**: the Hessian is positive semidefinite everywhere.
+
+$$
+\nabla^2 f(x) \succeq 0 \quad \text{for all } x
+$$
+
+**Why these are equivalent (sketch).** If $\nabla^2 f \succeq 0$ everywhere, then for any $x, y$, Taylor's theorem with the Lagrange remainder gives $f(y) = f(x) + \nabla f(x)^\top(y-x) + \frac{1}{2}(y-x)^\top \nabla^2 f(\xi) (y-x)$ for some $\xi$ on the segment $[x,y]$. Since $\nabla^2 f(\xi) \succeq 0$, the quadratic remainder term is $\ge 0$, giving exactly the first-order condition above. The converse direction follows by taking $y \to x$ and examining the second-order behavior of the first-order inequality.
+
+## Derivation: Why Every Local Minimum Is Global
+
+**Claim:** If $f$ is convex and $x^*$ is a local minimum, then $x^*$ is a global minimum.
+
+**Proof.** Suppose not: there exists $y$ with $f(y) < f(x^*)$. Consider the segment $x_\lambda = \lambda y + (1-\lambda) x^*$ for $\lambda \in (0,1)$. By convexity:
+
+$$
+f(x_\lambda) \le \lambda f(y) + (1-\lambda) f(x^*) < \lambda f(x^*) + (1-\lambda) f(x^*) = f(x^*)
+$$
+
+So $f(x_\lambda) < f(x^*)$ for every $\lambda \in (0,1)$, however small. But as $\lambda \to 0^+$, $x_\lambda \to x^*$, meaning points *arbitrarily close* to $x^*$ have strictly lower value than $f(x^*)$ — contradicting that $x^*$ is a local minimum (which requires $f(x^*) \le f(x)$ for all $x$ in some neighborhood). $\blacksquare$
+
+This is the entire reason convex optimization is tractable: local search (gradient descent, Newton's method) cannot get trapped, because there is nothing to be trapped in other than the single global basin.
+
+### Stationarity is sufficient, not just necessary
+
+For general (non-convex) smooth $f$, $\nabla f(x^*) = 0$ is only *necessary* for a local minimum (it also holds at saddle points and local maxima). For convex $f$, it is also *sufficient* for a global minimum: by the first-order condition, $f(y) \ge f(x^*) + \nabla f(x^*)^\top(y-x^*) = f(x^*)$ for all $y$, since $\nabla f(x^*) = 0$. This collapses "necessary condition" and "sufficient condition" into one clean criterion — solve $\nabla f(x) = 0$ and you are done.
+
+<Mermaid chart={`
+graph TD
+  A["f is convex"] --> B["First-order condition: tangent plane lies below graph everywhere"]
+  A --> C["Second-order condition: Hessian PSD everywhere"]
+  B --> D["nabla f(x*) = 0 implies f(y) >= f(x*) for ALL y"]
+  D --> E["Stationary point = global minimum"]
+  A --> F["Any local min is global min (proof by contradiction along a chord)"]
+`} />
+
+## Worked Example: Recognizing Convexity
+
+Consider logistic regression's negative log-likelihood for one example, $\ell(\theta) = \log(1 + e^{-y \, \theta^\top x})$ with $y \in \{-1, +1\}$.
+
+Let $z = -y\,\theta^\top x$ and $g(z) = \log(1 + e^z)$ (the softplus function). Compute:
+
+$$
+g'(z) = \frac{e^z}{1+e^z} = \sigma(z), \qquad g''(z) = \sigma(z)(1-\sigma(z)) \ge 0 \text{ for all } z
+$$
+
+since $\sigma(z) \in (0,1)$. So $g$ is convex in $z$. Since $z = -y\,\theta^\top x$ is an affine (linear) function of $\theta$, and **convexity is preserved under composition with an affine map** (a standard convexity-preserving rule: if $g$ is convex and $z(\theta) = A\theta + b$, then $g(z(\theta))$ is convex in $\theta$), $\ell(\theta)$ is convex in $\theta$. Summing convex functions over the dataset preserves convexity, so the full logistic regression loss is convex — which is exactly why logistic regression, unlike a neural network, has no local-minimum problem: gradient descent finds *the* global optimum.
+
+## Code Example
+
+```python
+import numpy as np
+
+def is_psd(H, tol=1e-8):
+    """Check positive semidefiniteness via eigenvalues (second-order convexity check)."""
+    eigvals = np.linalg.eigvalsh(H)
+    return np.all(eigvals >= -tol)
+
+def softplus_hessian(theta, X, y):
+    """Hessian of the logistic regression loss sum_i log(1+exp(-y_i * theta^T x_i))."""
+    z = -y * (X @ theta)
+    p = 1 / (1 + np.exp(-z))          # sigma(z)
+    w = p * (1 - p)                    # sigma(z)(1-sigma(z)) >= 0, always
+    return X.T @ (w[:, None] * X)      # X^T diag(w) X is PSD whenever w >= 0
+
+X = np.random.randn(200, 5)
+y = np.random.choice([-1, 1], size=200)
+theta = np.random.randn(5)
+
+H = softplus_hessian(theta, X, y)
+print(is_psd(H))  # True at every theta -- confirms global convexity, not just at this point
+```
+
+## Complexity
+
+| Problem class | Guaranteed global optimum? | Typical solver | Iteration complexity |
+| --- | --- | --- | --- |
+| Convex, smooth, $L$-smooth | Yes | Gradient descent | $O(L/\epsilon)$ to reach $\epsilon$-suboptimality |
+| Convex, smooth, $\mu$-strongly convex | Yes, unique | Gradient descent | $O(\kappa \log(1/\epsilon))$, $\kappa = L/\mu$ |
+| Convex, non-smooth (e.g. with $\ell_1$ terms) | Yes | Subgradient / proximal methods | $O(1/\epsilon^2)$ (subgradient), $O(1/\epsilon)$ (proximal) |
+| Non-convex (e.g. deep neural nets) | No guarantee | SGD, Adam | No polynomial-time global guarantee in general |
+
+<KeyTakeaways items={[
+  "Convexity means every local minimum is a global minimum — proved by contradiction: a lower point elsewhere would force a strictly lower chord arbitrarily close to the supposed local minimum.",
+  "For convex differentiable functions, ∇f(x*) = 0 is both necessary AND sufficient for global optimality — a much stronger guarantee than in the general smooth case.",
+  "Convexity is preserved under composition with affine maps and under summation, which is how you prove practical losses (logistic regression, linear SVM, ridge/lasso regression) are convex without checking the Hessian directly.",
+  "Non-convexity (as in deep networks) doesn't mean optimization fails in practice — it means there is no polynomial-time guarantee of reaching the global optimum, and empirically SGD tends to find good enough local minima or saddle-avoiding paths.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Convex problems have certificate-backed optimality (KKT conditions, duality gaps) that let you verify a solution is optimal, not just 'good.'",
+    "Polynomial-time algorithms (interior-point methods, first-order methods with known rates) exist with provable convergence guarantees.",
+  ]}
+  cons={[
+    "Assuming a sum of convex functions with a nonlinear (non-affine) inner transformation stays convex — convexity is preserved under composition with an AFFINE map, not an arbitrary nonlinear one (e.g., sigmoid(convex function) is not generally convex).",
+    "Confusing 'convex loss' with 'convex optimization landscape for the whole training pipeline' — e.g., L2-regularized logistic regression is convex in θ, but the same is not true once you compose it with a nonlinear feature extractor like a neural network.",
+    "Treating positive semidefinite Hessian at a single point as proof of global convexity — the second-order condition must hold at EVERY point in the domain.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does convexity guarantee that any local minimum is also a global minimum?",
+    options: [
+      "Because convex functions are always monotonic",
+      "Because if a strictly lower point existed elsewhere, convexity would force points arbitrarily close to the supposed local minimum (along the connecting chord) to also have strictly lower value, contradicting local optimality",
+      "Because convex functions have no critical points other than the global minimum",
+      "This is only true for strictly convex functions, not convex functions in general",
+    ],
+    answerIndex: 1,
+    explanation: "The proof is by contradiction: assume a lower point y exists; convexity along the segment from the local min to y produces points arbitrarily close to the local min with strictly lower value, contradicting the definition of a local minimum. Note the claim (local min = global min) holds for convex, not just strictly convex, functions — strict convexity additionally guarantees uniqueness.",
+  },
+  {
+    question: "Which of these correctly uses composition rules to argue that L2-regularized logistic regression loss is convex, without directly computing eigenvalues of the full Hessian?",
+    options: [
+      "Softplus(z) is convex in z (its second derivative σ(z)(1-σ(z)) ≥ 0); z = -y·θᵀx is affine in θ; convexity is preserved under composition with an affine map and under summation, so the total loss plus the convex L2 penalty ‖θ‖² is convex",
+      "Any function of θ used in machine learning is automatically convex",
+      "Because logistic regression uses gradient descent, it must be optimizing a convex function",
+      "The sigmoid function is convex everywhere, which directly implies the loss is convex",
+    ],
+    answerIndex: 0,
+    explanation: "The correct chain is: softplus is convex in its scalar argument (verified via its second derivative being nonnegative everywhere), the argument is an affine function of θ, affine composition preserves convexity, and sums of convex functions (including the convex L2 penalty) are convex. The sigmoid itself is NOT convex everywhere (it's convex for z<0 and concave for z>0) — it's the softplus (the loss, i.e. the integral of sigmoid) that is convex.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Convex Optimization", authors: "Stephen Boyd, Lieven Vandenberghe", venue: "Cambridge University Press", year: 2004 },
+  { title: "Numerical Optimization", authors: "Jorge Nocedal, Stephen J. Wright", venue: "Springer", year: 2006 },
+  { title: "Lectures on Convex Optimization", authors: "Yurii Nesterov", venue: "Springer", year: 2018 },
+]} />

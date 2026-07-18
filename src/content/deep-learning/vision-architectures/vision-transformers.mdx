@@ -1,0 +1,162 @@
+---
+title: "Vision Transformers (ViT)"
+description: "How chopping an image into patches turns 'apply a Transformer to pixels' from absurd into the current state of the art — and the price paid for giving up the biases CNNs get for free."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "computer-vision", "transformers", "vit", "attention"]
+prerequisites: ["The Transformer Architecture", "Convolutional Neural Networks"]
+---
+
+<Prerequisites items={["The Transformer Architecture", "Convolutional Neural Networks"]} />
+
+## Intuition
+
+A Transformer encoder operates on a *sequence of tokens* — that's the entire interface (see [The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture)). Applying self-attention to every individual pixel of even a modest $224\times224$ image would mean a sequence of 50,176 tokens, and self-attention's $O(n^2)$ cost makes that completely impractical. ViT's move is almost embarrassingly simple: don't tokenize pixels — tokenize small square **patches** of the image instead, treating each patch as one "word" in a visual sentence.
+
+<Callout type="tip" title="The one-sentence idea">
+  Split the image into a grid of fixed-size patches, flatten and linearly project each patch into a token embedding, prepend a position embedding and a learnable [CLS] token, and feed the whole sequence into a standard Transformer encoder — an image becomes a sequence, and everything downstream is identical to a text Transformer.
+</Callout>
+
+## Patch Embedding — Turning an Image into a Sequence
+
+Given an image $x \in \mathbb{R}^{H \times W \times C}$, ViT partitions it into a grid of $N$ non-overlapping patches of size $P \times P$, where $N = \frac{H \times W}{P^2}$. Each patch is flattened into a vector of length $P^2 \cdot C$, then linearly projected (a single learned matrix $E$, shared across all patches — this is a convolution with kernel size $P$ and stride $P$, in effect) into a $D$-dimensional embedding:
+
+$$
+z_0 = [\,x_{\text{class}};\ x_p^1 E;\ x_p^2 E;\ \ldots;\ x_p^N E\,] + E_{\text{pos}}
+$$
+
+where $x_p^i$ is the flattened $i$-th patch, $x_{\text{class}}$ is a learnable token prepended to the sequence (analogous to BERT's `[CLS]`, whose final-layer representation is used for classification), and $E_{\text{pos}}$ is a learned positional embedding added to every token — necessary because, exactly as in a text Transformer, self-attention itself has no notion of position, and patch order/location must be injected explicitly.
+
+The resulting sequence of $N+1$ vectors is fed directly into a standard pre-norm Transformer encoder — the same multi-head self-attention and feed-forward blocks used for text, entirely unmodified. The final [CLS] token representation is passed through a small MLP head for classification. This is the whole architecture: no convolutions anywhere except the (mathematically equivalent-to-linear) patch projection.
+
+<Mermaid chart={`
+graph TD
+  Img["Input image (H x W x C)"] --> Split["Split into N non-overlapping P x P patches"]
+  Split --> Flat["Flatten each patch, linearly project to D dims"]
+  Flat --> Seq["Sequence of N patch tokens"]
+  CLS["Learnable [CLS] token"] --> Seq2["Prepend to sequence"]
+  Seq --> Seq2
+  Seq2 --> Pos["Add learned positional embeddings"]
+  Pos --> TFEnc["Standard Transformer encoder (multi-head self-attention + FFN, L layers)"]
+  TFEnc --> ClsOut["Final [CLS] token representation"]
+  ClsOut --> MLP["MLP classification head"]
+`} />
+
+## Why ViT Needs More Data or Regularization Than CNNs
+
+A CNN's convolutional structure builds in two **inductive biases** for free, purely from the architecture, before any training happens:
+
+- **Locality**: a filter only ever looks at a small local patch, encoding the assumption that nearby pixels are related.
+- **Translation equivariance**: the same filter is applied everywhere (parameter sharing, see [Convolutional Neural Networks](/docs/deep-learning/vision-architectures/cnn)), encoding the assumption that a pattern means the same thing regardless of where it appears.
+
+A ViT has neither bias architecturally. Self-attention lets every patch attend to every other patch from the very first layer, uniformly — there's no built-in notion that nearby patches are more likely to be related, and the shared linear patch projection provides some translation equivariance for the token embeddings themselves, but the attention mechanism that mixes tokens together has to *learn*, from data, whatever locality or spatial structure happens to be useful. This makes ViT strictly more flexible (it isn't restricted to only ever learning local, translation-equivariant functions) but also means it must learn from data something a CNN gets for free from its architecture.
+
+The empirical consequence reported in the original paper: trained on a mid-sized dataset like ImageNet-1k alone, ViT underperforms comparable ResNets, because it hasn't seen enough examples to learn locality and spatial structure on its own and has no architectural shortcut supplying it. Trained on much larger datasets (e.g. JFT-300M, hundreds of millions of images) or with strong data augmentation/regularization, ViT matches or exceeds CNN performance — with enough data, the flexibility to learn *whatever* attention pattern the task actually needs (not necessarily local, not necessarily translation-only) becomes an advantage rather than a liability. This is the same "biases help with less data, hurt the ceiling with enough data" trade-off that shows up whenever an inductive bias is compared against a more general, less-constrained model class.
+
+<ComparisonTable
+  headers={["Property", "CNN", "ViT"]}
+  rows={[
+    ["Locality bias", "Built in architecturally (small filters see only local regions)", "None built in — every patch attends to every other patch from layer 1; locality must be learned"],
+    ["Translation equivariance", "Built in via parameter sharing across spatial positions", "Partial (patch projection is shared), but attention weights are learned per-input, not tied to position"],
+    ["Data efficiency", "Performs well from smaller datasets, thanks to built-in biases", "Needs large-scale pretraining data (or strong augmentation/regularization) to match CNN accuracy"],
+    ["Receptive field growth", "Grows gradually with depth (each layer only sees a local neighborhood further)", "Global receptive field from the very first layer (self-attention connects all patches immediately)"],
+    ["Compute scaling", "Roughly linear in image size for a fixed filter size", "Quadratic in the number of patches (attention's O(n²) cost) — fewer, larger patches trade resolution for tractable compute"],
+  ]}
+/>
+
+## Code Sketch
+
+```python
+import torch
+import torch.nn as nn
+
+class PatchEmbedding(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, in_channels=3, embed_dim=768):
+        super().__init__()
+        self.num_patches = (img_size // patch_size) ** 2
+        # A conv with kernel = stride = patch_size implements "flatten patch, project"
+        self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+
+    def forward(self, x):
+        x = self.proj(x)                     # (batch, embed_dim, H/P, W/P)
+        x = x.flatten(2).transpose(1, 2)      # (batch, num_patches, embed_dim)
+        return x
+
+class ViT(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, embed_dim=768, depth=12, num_heads=12, num_classes=1000):
+        super().__init__()
+        self.patch_embed = PatchEmbedding(img_size, patch_size, 3, embed_dim)
+        num_patches = self.patch_embed.num_patches
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+
+        encoder_layer = nn.TransformerEncoderLayer(embed_dim, num_heads, dim_feedforward=embed_dim * 4)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+        self.head = nn.Linear(embed_dim, num_classes)
+
+    def forward(self, x):
+        x = self.patch_embed(x)                          # (batch, N, D)
+        cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
+        x = torch.cat([cls_tokens, x], dim=1)             # prepend [CLS]
+        x = x + self.pos_embed                            # inject position information
+        x = self.encoder(x)
+        return self.head(x[:, 0])                         # classify from [CLS] token
+```
+
+<KeyTakeaways items={[
+  "ViT tokenizes an image by splitting it into fixed-size patches and linearly projecting each into an embedding — equivalent to a single non-overlapping convolution — then hands the resulting sequence to an unmodified Transformer encoder.",
+  "Positional embeddings are essential: self-attention is permutation-invariant, and without them ViT couldn't distinguish patch arrangements — the same requirement as text Transformers.",
+  "CNNs get locality and translation equivariance for free from their architecture; ViT has to learn (or approximate) these from data, which is why it underperforms CNNs on smaller datasets but matches or surpasses them at large enough pretraining scale.",
+  "Self-attention gives ViT a global receptive field from its very first layer, unlike a CNN's receptive field which grows gradually with depth.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Global receptive field from layer one lets ViT model long-range spatial relationships that a CNN would need many layers of depth to reach.",
+    "Removing hand-designed locality/translation biases means ViT can, given enough data, learn whatever spatial structure is actually useful for the task — not constrained to only local, position-invariant patterns.",
+    "The identical Transformer block used for text lets vision and language models share tooling, pretraining recipes, and (in multimodal models like CLIP) a common architecture for both modalities.",
+  ]}
+  cons={[
+    "Assuming ViT will outperform a CNN on a small or medium dataset without large-scale pretraining or heavy augmentation — the original paper's headline result was that it does *not*, absent that scale.",
+    "Forgetting that self-attention cost is quadratic in the *number of patches*, not the image's raw pixel count — halving patch size quadruples the sequence length and roughly quadruples-to-more compute.",
+    "Treating positional embeddings as optional or a minor detail — without them the model cannot distinguish a shuffled arrangement of patches from the correct one.",
+    "Fine-tuning at a different image resolution than pretraining without interpolating the positional embeddings to match the new (different) number of patches.",
+  ]}
+/>
+
+<Quiz questions={[
+  {
+    question: "What is the core mechanism by which ViT converts a 2D image into a form a standard Transformer encoder can process?",
+    options: [
+      "It runs a full CNN backbone and feeds the final feature map's individual pixels as tokens",
+      "It splits the image into fixed-size non-overlapping patches, flattens and linearly projects each patch into an embedding, and treats the resulting sequence of patch embeddings (plus a class token and positional embeddings) exactly like a token sequence in a text Transformer",
+      "It converts the image to grayscale and treats each row of pixels as one token",
+      "It uses recurrence to process the image row by row before applying attention",
+    ],
+    answerIndex: 1,
+    explanation: "ViT's patch embedding (equivalent to a single conv with kernel size and stride equal to the patch size) is what makes an image tractable for the Transformer's O(n^2) self-attention — a modest number of patch tokens (e.g. 196 for 16x16 patches on a 224x224 image), rather than tens of thousands of individual pixels.",
+  },
+  {
+    question: "Why does the original ViT paper report that Vision Transformers underperform comparable CNNs when trained only on mid-sized datasets like ImageNet-1k?",
+    options: [
+      "ViT has strictly fewer parameters than comparable CNNs",
+      "ViT lacks the locality and translation-equivariance inductive biases that are built into a CNN's architecture, so it must learn any useful spatial structure entirely from data — which requires more training examples than a CNN needs",
+      "Self-attention cannot represent spatial relationships between patches at all",
+      "ViT requires labeled segmentation masks that ImageNet-1k does not provide",
+    ],
+    answerIndex: 1,
+    explanation: "A CNN's convolutional filters encode locality and translation equivariance as architectural constraints, effectively giving the model useful assumptions for free. ViT has no such built-in bias — every patch can attend to every other patch uniformly from layer one — so it must learn spatial structure purely from data, which only becomes sufficient at large pretraining scale (or with strong augmentation/regularization).",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale", authors: "Dosovitskiy, A. et al.", venue: "ICLR", year: 2020, url: "https://arxiv.org/abs/2010.11929" },
+  { title: "Attention Is All You Need", authors: "Vaswani, A. et al.", venue: "NeurIPS", year: 2017, url: "https://arxiv.org/abs/1706.03762" },
+  { title: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding", authors: "Devlin, J. et al.", venue: "NAACL", year: 2019, url: "https://arxiv.org/abs/1810.04805" },
+]} />

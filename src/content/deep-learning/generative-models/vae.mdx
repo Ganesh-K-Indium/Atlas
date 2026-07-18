@@ -1,0 +1,196 @@
+---
+title: "Variational Autoencoders (VAEs)"
+description: "How maximizing a tractable lower bound on log-likelihood — the ELBO — turns 'learn a generative model of the data' into two competing, differentiable objectives."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "generative-models", "vae", "bayesian-deep-learning"]
+prerequisites: ["Probability basics (KL divergence, Bayes' rule)", "Gradient descent / backpropagation", "Gaussian distributions"]
+---
+
+## Intuition
+
+A generative model tries to learn $p(x)$ — the distribution the training data was drawn from — well enough to sample new, plausible data from it. The natural way to build this is to posit a simple latent variable $z$ (say, a standard Gaussian) and a decoder network $p_\theta(x \mid z)$ that maps latents to data. Then $p(x) = \int p_\theta(x \mid z) p(z)\, dz$.
+
+The problem is that integral is intractable for any decoder expressive enough to matter — you cannot enumerate every $z$ that could plausibly have produced a given $x$. A **Variational Autoencoder (VAE)** sidesteps this by learning a second network, an **encoder** $q_\phi(z \mid x)$, that approximates the true (also intractable) posterior $p_\theta(z \mid x)$. Training both networks jointly to maximize a tractable *lower bound* on $\log p(x)$ — rather than $\log p(x)$ itself — is the entire trick.
+
+<Callout type="tip" title="The one-sentence idea">
+  Instead of maximizing the intractable log-likelihood directly, a VAE maximizes a tractable lower bound on it (the ELBO), which decomposes into "reconstruct the input well" plus "keep the encoder's latent distribution close to a simple prior" — and a clever reparameterization keeps the whole thing differentiable despite the sampling step in the middle.
+</Callout>
+
+## Deriving the ELBO from Jensen's Inequality
+
+Start from the quantity we actually want to maximize: the log marginal likelihood of the data, $\log p_\theta(x)$. Introduce the approximate posterior $q_\phi(z \mid x)$ by multiplying and dividing inside the integral (a standard trick):
+
+$$
+\log p_\theta(x) = \log \int p_\theta(x, z)\, dz = \log \int q_\phi(z \mid x) \frac{p_\theta(x, z)}{q_\phi(z \mid x)}\, dz = \log \, \mathbb{E}_{q_\phi(z \mid x)}\!\left[\frac{p_\theta(x, z)}{q_\phi(z \mid x)}\right]
+$$
+
+Now apply **Jensen's inequality**. Because $\log$ is a concave function, $\log \mathbb{E}[Y] \geq \mathbb{E}[\log Y]$ for any random variable $Y$. Applying this with $Y = p_\theta(x,z) / q_\phi(z \mid x)$:
+
+$$
+\log p_\theta(x) \geq \mathbb{E}_{q_\phi(z \mid x)}\!\left[\log \frac{p_\theta(x, z)}{q_\phi(z \mid x)}\right] \triangleq \mathcal{L}(\theta, \phi; x)
+$$
+
+This lower bound $\mathcal{L}$ is the **Evidence Lower BOund (ELBO)** — "evidence" being another name for $\log p_\theta(x)$. Because it's a lower bound, maximizing it pushes $\log p_\theta(x)$ up too (though not necessarily to its maximum — the bound has slack, discussed below).
+
+**Decomposing the ELBO.** Expand $p_\theta(x,z) = p_\theta(x \mid z)\, p(z)$ and split the expectation:
+
+$$
+\mathcal{L}(\theta, \phi; x) = \underbrace{\mathbb{E}_{q_\phi(z\mid x)}\big[\log p_\theta(x \mid z)\big]}_{\text{reconstruction term}} \;-\; \underbrace{D_{KL}\big(q_\phi(z \mid x)\,\|\,p(z)\big)}_{\text{KL-to-prior term}}
+$$
+
+**How much slack is in the bound?** It's exact: $\log p_\theta(x) - \mathcal{L}(\theta,\phi;x) = D_{KL}\big(q_\phi(z\mid x) \,\|\, p_\theta(z \mid x)\big) \geq 0$. So the gap between the true log-likelihood and the ELBO is precisely the KL divergence between the approximate posterior and the true (intractable) posterior — the better $q_\phi$ approximates $p_\theta(z\mid x)$, the tighter the bound, and maximizing the ELBO over $\phi$ simultaneously tightens the bound and improves the approximate posterior.
+
+## What the Two Terms Enforce
+
+- **Reconstruction term** $\mathbb{E}_{q_\phi(z\mid x)}[\log p_\theta(x\mid z)]$: sample a latent $z$ from the encoder's distribution for input $x$, then ask the decoder to assign high likelihood to reconstructing $x$ from that $z$. In practice this is implemented as a reconstruction loss (mean-squared error for Gaussian decoders, cross-entropy for Bernoulli/categorical decoders). It pulls the model toward faithfully encoding-then-decoding each training point.
+- **KL-to-prior term** $D_{KL}(q_\phi(z\mid x) \| p(z))$: penalizes the encoder's output distribution for straying from the prior $p(z)$ (typically $\mathcal{N}(0, I)$). This is what makes the latent space usable for *generation* — without it, the encoder could map each $x$ to an arbitrary, disjoint region of latent space (perfect reconstruction, useless prior), and sampling $z \sim p(z)$ at generation time would land in regions the decoder never saw during training. The KL term forces every input's encoded distribution to overlap with — and collectively tile — the same prior region, so sampling from the prior at generation time produces latents the decoder has actually learned to decode.
+
+These two terms are in direct tension: perfect reconstruction wants a unique, spread-out code per input (minimizing overlap, hence information loss); the KL term wants every code compressed toward the same prior. The balance between them is literally what makes the latent space both *informative* (reconstruction) and *generative* (samplable from the prior).
+
+## The Reparameterization Trick
+
+The encoder outputs the parameters of a distribution, typically $q_\phi(z \mid x) = \mathcal{N}(\mu_\phi(x), \sigma_\phi^2(x))$, and training requires sampling $z \sim q_\phi(z \mid x)$ to evaluate the reconstruction term, then backpropagating gradients of the loss with respect to $\phi$ (the encoder's parameters, which produced $\mu$ and $\sigma$).
+
+**Why direct sampling breaks differentiation:** the sampling operation $z \sim \mathcal{N}(\mu, \sigma^2)$ is a stochastic node in the computation graph. There is no way to write $\partial z / \partial \mu$ or $\partial z / \partial \sigma$ for a sample drawn from a distribution parameterized by $\mu, \sigma$ — the randomness is injected in a way that has no defined derivative with respect to the parameters that generated it. Autodiff has nothing to differentiate through.
+
+**The fix:** rewrite the sampling as a deterministic, differentiable function of the parameters plus an *independent* noise source:
+
+$$
+z = \mu_\phi(x) + \sigma_\phi(x) \odot \epsilon, \qquad \epsilon \sim \mathcal{N}(0, I)
+$$
+
+Sampling $\epsilon$ from a fixed, parameter-free standard normal is still stochastic, but it no longer depends on $\phi$ — so it can be treated as an external input, like a data augmentation. Given a sampled $\epsilon$, $z$ is now an ordinary differentiable function of $\mu_\phi(x)$ and $\sigma_\phi(x)$: $\partial z/\partial \mu = 1$ and $\partial z/\partial \sigma = \epsilon$, both well-defined. Gradients now flow from the reconstruction loss, through $z$, into $\mu_\phi$ and $\sigma_\phi$, and into every upstream encoder weight — exactly like a normal feedforward layer, just with one extra additive noise input.
+
+This is the whole trick: move the source of randomness *outside* the parameterized part of the graph so the parameterized part is a deterministic, differentiable transformation.
+
+## Architecture
+
+<Mermaid chart={`
+graph TD
+  X["Input x"] --> Enc["Encoder q_phi(z|x)"]
+  Enc --> Mu["mu(x)"]
+  Enc --> Sigma["sigma(x)"]
+  Eps["epsilon ~ N(0, I)"] --> Reparam["z = mu + sigma * epsilon"]
+  Mu --> Reparam
+  Sigma --> Reparam
+  Reparam --> Dec["Decoder p_theta(x|z)"]
+  Dec --> Xhat["Reconstruction x_hat"]
+  Xhat --> ReconLoss["Reconstruction loss"]
+  X --> ReconLoss
+  Mu --> KL["KL(q_phi(z|x) || p(z))"]
+  Sigma --> KL
+  ReconLoss --> Total["Total loss = ReconLoss + KL"]
+  KL --> Total
+`} />
+
+## Implementation Sketch
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class VAE(nn.Module):
+    def __init__(self, input_dim, hidden_dim, latent_dim):
+        super().__init__()
+        self.enc = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU())
+        self.to_mu = nn.Linear(hidden_dim, latent_dim)
+        self.to_logvar = nn.Linear(hidden_dim, latent_dim)
+        self.dec = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, input_dim), nn.Sigmoid(),
+        )
+
+    def encode(self, x):
+        h = self.enc(x)
+        return self.to_mu(h), self.to_logvar(h)
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)          # noise sampled OUTSIDE the parameterized path
+        return mu + std * eps                # differentiable w.r.t. mu, logvar
+
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        x_hat = self.dec(z)
+        return x_hat, mu, logvar
+
+def vae_loss(x_hat, x, mu, logvar):
+    recon = F.binary_cross_entropy(x_hat, x, reduction="sum")
+    # closed-form KL between N(mu, sigma^2) and N(0, I)
+    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    return recon + kl
+```
+
+The KL term against a standard normal prior has a closed form (no sampling needed to estimate it), which is one reason the Gaussian prior/posterior pairing is the default choice — it makes that half of the loss exact and cheap.
+
+<ComparisonTable
+  headers={["Model", "Training signal", "Sample quality (typical)", "Latent space usable for interpolation/editing?", "Training stability"]}
+  rows={[
+    ["VAE", "ELBO (likelihood-based)", "Often blurrier than GAN/diffusion", "Yes — explicit, structured, smooth latent space", "Stable — single well-posed optimization"],
+    ["GAN", "Adversarial minimax game", "Sharp, high-frequency detail", "Less structured by default", "Can be unstable (see GAN page)"],
+    ["Diffusion", "Denoising score-matching / weighted ELBO", "State of the art on most benchmarks", "Latent diffusion models add a learned latent space", "Stable but many sampling steps at inference"],
+  ]}
+/>
+
+See [Generative Adversarial Networks](/docs/deep-learning/generative-models/gan) and [Diffusion Models](/docs/deep-learning/generative-models/diffusion-models) for the other two major generative paradigms this table contrasts.
+
+<KeyTakeaways items={[
+  "The ELBO is a tractable lower bound on the intractable log-likelihood, derived via Jensen's inequality on the concave log function.",
+  "The gap between the ELBO and the true log-likelihood equals the KL divergence between the approximate and true posteriors — a tighter approximate posterior directly tightens the bound.",
+  "The ELBO decomposes into a reconstruction term (fit the data) and a KL-to-prior term (keep the latent distribution close to a samplable prior) — the tension between them is what makes the latent space both informative and generative.",
+  "The reparameterization trick moves the randomness outside the parameterized computation (z = mu + sigma * epsilon, with epsilon sampled independently of the encoder's parameters), which is what makes end-to-end backpropagation possible through a sampling step.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Explicit, tractable training objective (no adversarial game, no min-max instability) — training is a standard gradient-descent optimization.",
+    "Produces a smooth, structured latent space that supports meaningful interpolation between points and, often, disentangled attributes.",
+    "Provides an explicit (lower-bound) estimate of data likelihood, useful for anomaly detection and model comparison.",
+  ]}
+  cons={[
+    "Reconstructions are often blurrier than GAN or diffusion samples — commonly attributed to the pixel-wise reconstruction loss averaging over plausible outputs, plus the bound's looseness when q_phi is a poor approximation.",
+    "Choosing the wrong prior/posterior family (e.g., a unimodal Gaussian posterior for a genuinely multimodal true posterior) limits how tight the ELBO can get.",
+    "The KL term can dominate early in training and collapse the latent code to the prior (\"posterior collapse\"), especially with a powerful decoder that can ignore z — a known failure mode requiring techniques like KL annealing.",
+  ]}
+/>
+
+Another frequent mistake: forgetting that the reparameterization trick requires the noise source to be independent of the parameters being optimized — sampling $\epsilon$ from a distribution that itself depends on $\phi$ would reintroduce the exact non-differentiability the trick is meant to remove.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does maximizing the ELBO instead of the true log-likelihood log p(x) still make sense as a training objective?",
+    options: [
+      "Because the ELBO equals log p(x) exactly for any choice of q_phi",
+      "Because the ELBO is a valid lower bound derived from Jensen's inequality, and the gap between it and log p(x) is a KL divergence (always >= 0) that shrinks as q_phi better approximates the true posterior — so maximizing the ELBO pushes up a quantity that tracks the true likelihood",
+      "Because log p(x) is undefined for continuous data",
+      "Because the ELBO is only used at test time, not during training",
+    ],
+    answerIndex: 1,
+    explanation: "Jensen's inequality on the concave log function gives log p(x) >= ELBO, with equality gap D_KL(q_phi(z|x) || p_theta(z|x)). Since this gap is always nonnegative, the ELBO is a genuine lower bound, and jointly optimizing theta and phi both raises the bound and tightens it by improving the approximate posterior.",
+  },
+  {
+    question: "In the reparameterization z = mu + sigma * epsilon, why must epsilon be sampled from a fixed distribution independent of the encoder's parameters, rather than, say, N(0, sigma) directly?",
+    options: [
+      "It doesn't matter — any equivalent-in-distribution sampling scheme works identically for gradients",
+      "Because if epsilon's distribution depended on phi (e.g., its own scale depended on sigma_phi), the sampling step would once again be a stochastic function of phi with no defined gradient, undoing the entire purpose of the reparameterization",
+      "Because epsilon must be discrete for autodiff to work",
+      "Because sigma is not actually a learned parameter in a VAE",
+    ],
+    answerIndex: 1,
+    explanation: "The whole point of the trick is to isolate randomness in a source that carries no dependency on the parameters being trained. z = mu_phi(x) + sigma_phi(x) * epsilon is differentiable w.r.t. mu_phi and sigma_phi precisely because epsilon ~ N(0, I) is sampled independently of phi — its gradient contribution is zero, so all the gradient signal flows cleanly through mu and sigma.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Auto-Encoding Variational Bayes", authors: "Kingma, D. P. & Welling, M.", venue: "ICLR", year: 2013, url: "https://arxiv.org/abs/1312.6114" },
+]} />

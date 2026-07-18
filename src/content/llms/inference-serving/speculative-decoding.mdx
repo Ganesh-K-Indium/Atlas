@@ -1,0 +1,178 @@
+---
+title: "Speculative Decoding"
+description: "How a small draft model proposing several tokens ahead, verified in one parallel pass by the large model, speeds up generation without changing a single sampled token's distribution."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "inference", "speculative-decoding", "sampling", "latency"]
+prerequisites: ["Autoregressive decoding and KV caching", "Sampling from a probability distribution", "Basic probability (rejection sampling intuition)"]
+---
+
+<Prerequisites items={[
+  "Autoregressive decoding and why it's inherently sequential (see KV Cache)",
+  "Sampling from a categorical probability distribution (e.g. temperature sampling)",
+  "Basic intuition for rejection sampling",
+]} />
+
+## Intuition
+
+Autoregressive decoding generates one token per forward pass through the full model, and that forward pass is memory-bandwidth bound: streaming the weights (and KV cache) from HBM dominates the time, while the actual arithmetic for one token is cheap relative to the GPU's compute capacity. That means a single large-model forward pass has *slack* — it could verify many candidate tokens in parallel for roughly the same wall-clock cost as verifying one, because the bottleneck is memory traffic, not compute.
+
+Speculative decoding exploits that slack: use a small, fast "draft" model to *guess* several tokens ahead cheaply, then hand all of those guesses to the large "target" model in a *single* parallel forward pass, which checks them all at once and accepts however many of the guesses turn out to agree with what the target model would have generated on its own. The clever part is the acceptance rule — it's designed so that, whatever fraction of guesses get accepted or rejected, the final output token's probability distribution is mathematically identical to sampling directly from the target model alone. Speedup comes from doing more useful work (verifying multiple tokens) per expensive (large-model) forward pass, not from any relaxation of output quality.
+
+<Callout type="tip" title="The one-sentence idea">
+  A cheap draft model proposes a few tokens ahead; the expensive target model verifies all of them in one parallel pass, accepting the longest correct prefix and resampling only from the first point of disagreement — this amortizes the target model's cost across multiple accepted tokens while leaving its output distribution exactly unchanged.
+</Callout>
+
+## Why This Preserves the Exact Target Distribution
+
+Let $p(x)$ be the target model's distribution over the next token and $q(x)$ the draft model's distribution, both conditioned on the same prefix. The draft proposes a token $x \sim q$. The verification rule:
+
+$$
+\text{Accept } x \text{ with probability } \min\!\left(1, \frac{p(x)}{q(x)}\right)
+$$
+
+If $x$ is rejected, resample a token from the **residual distribution**:
+
+$$
+p_{\text{residual}}(x) = \frac{\max(0,\ p(x) - q(x))}{\sum_{x'} \max(0,\ p(x') - q(x'))}
+$$
+
+This is a modified-rejection-sampling scheme: it can be shown that the marginal distribution of the accepted-or-resampled token is *exactly* $p(x)$ — the target model's own distribution — regardless of how good or bad the draft model is. A better draft model only changes the *acceptance rate* (how often draft tokens survive verification, and therefore how much speedup you get); it never changes the distribution of the final output. This guarantee is what makes speculative decoding safe to use in production without altering generation quality: it's a pure latency optimization, not an approximation.
+
+## The Mechanism, Step by Step
+
+1. **Draft phase.** Starting from the current context, the small draft model autoregressively generates $K$ candidate tokens (e.g., $K = 4$–$8$), each drafted using its own (cheap) forward pass. This is fast because the draft model is much smaller than the target.
+2. **Verification phase.** The target model runs a **single forward pass** over the original context plus all $K$ drafted tokens simultaneously (this is possible because, given the tokens, computing each position's logits in parallel is exactly what a Transformer does during training-style teacher forcing — no autoregression is needed for a fixed sequence). This produces, for every drafted position, the target model's true conditional distribution $p(x_i \mid \text{context}, x_{<i})$.
+3. **Accept/reject, left to right.** Walk through the $K$ drafted tokens in order. For each, apply the acceptance test comparing $p(x_i)$ and $q(x_i)$. Accept tokens as long as the test passes; stop at the **first rejection**.
+4. **Resample at the rejection point.** At the first token that fails the test (or after all $K$ are accepted), sample one new token from either the residual distribution $p_{\text{residual}}$ (if a draft token was rejected) or directly from $p$ (if all $K$ drafts were accepted, in which case a "bonus" token is sampled to make use of the target model's already-computed extra logits).
+5. **Advance and repeat.** The accepted prefix (however long — anywhere from 1 to $K+1$ tokens) is appended to the context, the KV caches of both models are updated accordingly, and the process repeats from step 1.
+
+Because step 2 verifies all $K$ tokens in one target-model forward pass, the *number of expensive target-model passes* needed to generate $n$ tokens drops from $n$ (one per token, standard decoding) to roughly $n / (\text{expected accepted length})$ — the speedup scales directly with how often the draft model's guesses agree with what the target model would have produced.
+
+<Mermaid chart={`
+graph TD
+  Ctx["Current context"] --> Draft["Draft model: generate K candidate tokens (K cheap forward passes)"]
+  Draft --> Verify["Target model: ONE parallel forward pass over context + all K candidates"]
+  Verify --> Accept["Walk left to right: accept while p(x)/q(x) test passes"]
+  Accept --> Reject{"First rejection (or all K accepted)?"}
+  Reject -->|Rejected at position i| Resample["Resample 1 token from residual distribution at position i"]
+  Reject -->|All K accepted| Bonus["Sample 1 bonus token from target's next-position logits"]
+  Resample --> Advance["Append accepted prefix + new token to context, update both KV caches"]
+  Bonus --> Advance
+  Advance --> Ctx
+`} />
+
+## Code Sketch
+
+```python
+# Simplified speculative decoding loop (conceptual — real implementations
+# handle batching, KV cache management, and vectorized accept/reject checks).
+
+def speculative_decode_step(target_model, draft_model, context, k=4):
+    # 1. Draft: cheap model proposes k tokens autoregressively
+    draft_tokens, draft_probs = [], []
+    ctx = context
+    for _ in range(k):
+        q_dist = draft_model.next_token_dist(ctx)     # q(x | ctx)
+        x = sample(q_dist)
+        draft_tokens.append(x)
+        draft_probs.append(q_dist[x])
+        ctx = ctx + [x]
+
+    # 2. Verify: ONE forward pass over context + all k drafted tokens
+    target_dists = target_model.next_token_dists_parallel(context, draft_tokens)
+    # target_dists[i] = p(x | context, draft_tokens[:i]) for i in 0..k
+
+    accepted = []
+    for i, x in enumerate(draft_tokens):
+        p_x = target_dists[i][x]
+        q_x = draft_probs[i]
+        accept_prob = min(1.0, p_x / q_x)
+        if random.random() < accept_prob:
+            accepted.append(x)
+        else:
+            # Resample from the residual distribution p - q (clipped, renormalized)
+            residual = clip_and_normalize(target_dists[i] - draft_probs_dist(i))
+            new_token = sample(residual)
+            return accepted + [new_token]
+
+    # All k drafts accepted — sample one bonus token from the target's
+    # already-computed extra logits (position k+1), for free.
+    bonus_token = sample(target_dists[k])
+    return accepted + [bonus_token]
+```
+
+## Complexity and Memory Analysis
+
+| Quantity | Standard decoding | Speculative decoding |
+| --- | --- | --- |
+| Target-model forward passes for $n$ tokens | $n$ | $\approx n / (\text{expected accepted length})$ |
+| Extra compute per verification pass | — | $O(K)$ tokens processed in parallel (cheap, since target pass is memory-bound anyway) |
+| Extra models to host in memory | None | Draft model (small) + target model (large) |
+| Output distribution | Exactly $p$ (target model) | Exactly $p$ (target model) — provably identical |
+| Best case | 1x (baseline) | Speedup bounded by draft/target agreement rate and $K$ |
+
+<ComparisonTable
+  headers={["Factor", "Effect on speedup"]}
+  rows={[
+    ["Draft-target agreement rate", "Higher agreement → longer accepted prefixes per verification pass → more speedup"],
+    ["Draft model size vs. target", "Smaller/faster draft reduces drafting overhead but often lowers agreement rate — there's a real trade-off to tune"],
+    ["K (tokens drafted per round)", "Larger K risks more wasted draft compute on tokens that get rejected early; too small K limits the maximum speedup"],
+    ["Task type", "Predictable text (code, repetitive patterns) sees higher acceptance rates than highly creative/uncertain generation"],
+  ]}
+/>
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Mathematically guarantees the exact same output distribution as standard sampling from the target model — a genuine free lunch on latency, not a quality/speed trade-off.",
+    "Exploits underused compute headroom in memory-bound decoding — the target model's forward pass was already 'wasting' compute capacity relative to its memory traffic.",
+    "Composable with other techniques (quantization, PagedAttention-based serving) since it doesn't change the model architecture, just the decoding loop.",
+  ]}
+  cons={[
+    "Requires hosting and maintaining a second (draft) model, adding engineering complexity and some fixed memory/compute overhead.",
+    "Speedup is workload-dependent — it can be small or even negative if the draft model's predictions rarely agree with the target model's.",
+    "Batching multiple concurrent requests, each with different accepted lengths per round, complicates scheduling relative to standard fixed-shape decoding — real serving systems need specialized kernels/schedulers to realize the theoretical speedup.",
+  ]}
+/>
+
+- Believing speculative decoding trades quality for speed — the acceptance/resampling rule is specifically constructed so it doesn't; any implementation that skips proper rejection sampling (e.g., just accepting drafts by simple equality) breaks this guarantee.
+- Assuming a bigger/better draft model is always better — a draft model that's nearly as expensive as the target model erodes the latency win, since drafting cost matters too.
+- Forgetting that this optimizes **latency per request**, primarily useful in low-batch-size or interactive settings — at very large batch sizes the target model's forward pass may already be compute-bound, shrinking the "free" verification capacity this technique relies on.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does speculative decoding produce output that is provably identical in distribution to standard sampling from the large target model, even though it uses a smaller, less accurate draft model?",
+    options: [
+      "Because the draft model is fine-tuned to exactly match the target model's outputs before deployment",
+      "Because the acceptance test min(1, p(x)/q(x)) combined with resampling from the residual distribution p_residual = max(0, p−q)/normalizer is a form of rejection sampling that yields marginal distribution p(x) regardless of q",
+      "Because only tokens where the draft and target models fully agree are ever used, so no distributional change is possible",
+      "Because the target model re-samples from scratch after seeing the draft tokens, effectively ignoring the draft model's output",
+    ],
+    answerIndex: 1,
+    explanation: "The accept/reject rule is a modified rejection sampling scheme. Accepting proposed token x with probability min(1, p(x)/q(x)) and, upon rejection, sampling from the residual distribution max(0, p(x)-q(x)) normalized, is mathematically guaranteed to produce a marginal distribution equal to p(x) — the target model's true distribution — no matter how well or poorly q approximates p. A poor draft model only lowers the acceptance rate (and thus the achieved speedup), not correctness.",
+  },
+  {
+    question: "Why is the target model's verification step able to check K drafted tokens in a single forward pass instead of needing K separate autoregressive passes?",
+    options: [
+      "Because the target model only checks the last drafted token and assumes the rest are correct",
+      "Because, given a fixed sequence of tokens (the draft output), computing each position's next-token logits is exactly the parallelizable, non-autoregressive computation Transformers do during training with teacher forcing — no sequential generation is required for a sequence that's already fixed",
+      "Because the draft model and target model share the same KV cache, eliminating redundant computation",
+      "Because the target model is quantized specifically for the verification step, making it faster than normal",
+    ],
+    answerIndex: 1,
+    explanation: "Autoregressive decoding is sequential only when you don't yet know the tokens you need to condition on. Once a candidate sequence exists (from the draft model), computing the target model's conditional distribution at every position within it is identical in structure to a training forward pass with teacher forcing — fully parallelizable in one pass, which is exactly the memory-bound 'slack' speculative decoding exploits.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Fast Inference from Transformers via Speculative Decoding", authors: "Leviathan, Y., Kalman, M., Matias, Y.", venue: "ICML", year: 2023, url: "https://arxiv.org/abs/2211.17192" },
+  { title: "Accelerating Large Language Model Decoding with Speculative Sampling", authors: "Chen, C. et al.", venue: "arXiv", year: 2023, url: "https://arxiv.org/abs/2302.01318" },
+  { title: "Efficient Memory Management for Large Language Model Serving with PagedAttention", authors: "Kwon, W. et al.", venue: "SOSP", year: 2023, url: "https://arxiv.org/abs/2309.06180" },
+]} />

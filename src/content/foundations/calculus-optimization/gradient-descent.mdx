@@ -1,0 +1,205 @@
+---
+title: "Gradient Descent — Derivation & Variants"
+description: "Why 'move opposite the gradient' is provably the best local descent direction, and how batch, stochastic, mini-batch, and momentum variants trade off noise, speed, and memory."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["calculus", "optimization", "deep-learning", "math"]
+prerequisites: ["Derivatives, gradients & Jacobians", "Basic linear algebra", "Convexity (intuitive level)"]
+---
+
+## Intuition
+
+You're standing on a hilly loss surface, fog everywhere, and you can only feel the slope right under your feet. The sanest strategy is: take a small step in whichever direction goes downhill the fastest, then repeat. That's gradient descent — an iterative, purely local algorithm that never needs a map of the whole surface, only what it can measure at the current point.
+
+<Callout type="tip" title="The one idea that matters">
+  The negative gradient is, by construction, the direction of steepest local descent. Gradient descent repeatedly takes a small step in that direction: $\theta \leftarrow \theta - \eta \nabla \mathcal{L}(\theta)$. Every variant (SGD, mini-batch, momentum, Adam) is a modification of *how the step is estimated or shaped*, not a departure from this core update.
+</Callout>
+
+## Formal Derivation: Why Move Opposite the Gradient?
+
+We want to choose a small step $h$ (with fixed length $\|h\| = \epsilon$) that decreases $\mathcal{L}$ as much as possible. First-order Taylor expansion:
+
+$$
+\mathcal{L}(\theta + h) \approx \mathcal{L}(\theta) + \nabla \mathcal{L}(\theta)^\top h
+$$
+
+We want to minimize $\nabla \mathcal{L}(\theta)^\top h$ subject to $\|h\| = \epsilon$. By the Cauchy–Schwarz inequality, $\nabla \mathcal{L}(\theta)^\top h \geq -\|\nabla \mathcal{L}(\theta)\| \|h\|$, with equality exactly when $h$ points opposite to $\nabla \mathcal{L}(\theta)$:
+
+$$
+h^* = -\epsilon \, \frac{\nabla \mathcal{L}(\theta)}{\|\nabla \mathcal{L}(\theta)\|}
+$$
+
+So among *all* directions of fixed length, $-\nabla \mathcal{L}(\theta)$ is provably the one that decreases the first-order approximation of $\mathcal{L}$ the most. Absorbing the step length into a learning rate $\eta > 0$ gives the update rule:
+
+$$
+\theta_{t+1} = \theta_t - \eta \, \nabla \mathcal{L}(\theta_t)
+$$
+
+**Why this only guarantees *local* improvement, and only for small $\eta$.** The derivation used a first-order (linear) approximation, which is only accurate near $\theta_t$. If $\eta$ is too large, the actual (nonlinear) loss can increase even though the linear model predicted a decrease — this is exactly the failure mode that motivates adaptive and line-search step sizes.
+
+### Convergence rate for convex, $L$-smooth losses
+
+If $\mathcal{L}$ is convex and $L$-smooth (gradient is $L$-Lipschitz: $\|\nabla \mathcal{L}(x) - \nabla \mathcal{L}(y)\| \le L\|x-y\|$), then gradient descent with $\eta = 1/L$ satisfies:
+
+$$
+\mathcal{L}(\theta_t) - \mathcal{L}(\theta^*) \le \frac{\|\theta_0 - \theta^*\|^2}{2\eta t} = O\!\left(\frac{1}{t}\right)
+$$
+
+If $\mathcal{L}$ is additionally $\mu$-strongly convex, the rate improves to linear (geometric) convergence:
+
+$$
+\|\theta_t - \theta^*\|^2 \le \left(1 - \frac{\mu}{L}\right)^t \|\theta_0 - \theta^*\|^2
+$$
+
+The ratio $\kappa = L/\mu$ (the **condition number**) controls the rate: poorly-conditioned problems ($\kappa \gg 1$, i.e., a loss surface shaped like a long narrow valley) converge slowly, which is precisely what momentum is designed to fix (see below).
+
+## Batch, Stochastic, and Mini-Batch Gradient Descent
+
+The loss over a dataset of $N$ examples is an average: $\mathcal{L}(\theta) = \frac{1}{N}\sum_{i=1}^N \ell_i(\theta)$, so $\nabla \mathcal{L}(\theta) = \frac{1}{N}\sum_i \nabla \ell_i(\theta)$.
+
+- **Batch (full-batch) gradient descent** computes the exact gradient using all $N$ examples every step. Exact, low-variance direction, but one step costs $O(N)$ gradient evaluations — infeasible for large $N$.
+- **Stochastic gradient descent (SGD)** estimates the gradient using a *single* randomly sampled example: $\hat{g}_t = \nabla \ell_{i_t}(\theta_t)$. This is an unbiased estimator ($\mathbb{E}[\hat{g}_t] = \nabla \mathcal{L}(\theta_t)$) but high-variance — the path is noisy, which paradoxically helps escape shallow local minima and saddle points.
+- **Mini-batch SGD** averages over a small batch $B$ of size $b$: $\hat{g}_t = \frac{1}{b}\sum_{i \in B} \nabla \ell_i(\theta_t)$. Variance of the estimator scales as $O(1/b)$, and batching lets hardware (GPU/TPU) parallelize the $b$ gradient computations — the practical default for essentially all deep learning training.
+
+<ComparisonTable
+  headers={["Variant", "Gradient estimate", "Variance", "Cost per step", "Typical use"]}
+  rows={[
+    ["Batch GD", "Exact, uses all N examples", "Zero", "O(N)", "Small datasets, convex problems, verifying convergence theory"],
+    ["SGD", "Single random example", "High", "O(1)", "Online learning, extremely large streaming data"],
+    ["Mini-batch SGD", "Random batch of size b", "O(1/b)", "O(b), parallelizable", "Standard deep learning training"],
+  ]}
+/>
+
+## Momentum
+
+Plain (mini-batch) SGD oscillates badly in narrow, curved valleys (high condition number $\kappa$) because the gradient's direction across the narrow axis dominates the useful signal along the shallow axis. **Momentum** accumulates a running (exponentially-weighted) average of past gradients, which reinforces consistent directions and damps oscillating ones:
+
+$$
+v_{t+1} = \beta v_t + \nabla \mathcal{L}(\theta_t), \qquad \theta_{t+1} = \theta_t - \eta \, v_{t+1}
+$$
+
+with $\beta \in [0, 1)$ (commonly $0.9$). Unrolling the recursion shows $v_t$ is a decaying weighted sum of *all* past gradients:
+
+$$
+v_t = \sum_{k=0}^{t} \beta^{t-k} \nabla \mathcal{L}(\theta_k)
+$$
+
+Along a direction where the gradient's sign flips every step (the oscillating, high-curvature axis), consecutive terms partially cancel, shrinking the effective step. Along a direction where the gradient is consistently the same sign (the shallow, low-curvature axis we actually want to move along), the terms reinforce, accelerating the effective step. This is why momentum provably improves the convergence rate for ill-conditioned convex quadratics from $O((\kappa-1)/(\kappa+1))^t$ (plain GD) to $O\big((\sqrt{\kappa}-1)/(\sqrt{\kappa}+1)\big)^t$ (Nesterov's accelerated gradient) — replacing $\kappa$ with $\sqrt{\kappa}$ in the convergence exponent.
+
+**Nesterov momentum** is a refinement that evaluates the gradient at the "look-ahead" point $\theta_t - \eta\beta v_t$ rather than at $\theta_t$ itself, effectively correcting the momentum step using information slightly ahead of the current position, which tightens the convergence guarantee further.
+
+<Mermaid chart={`
+graph TD
+  A["Compute gradient at theta_t"] --> B{"Variant?"}
+  B -->|"Batch GD"| C["Use full-dataset gradient"]
+  B -->|"SGD"| D["Use single-example gradient"]
+  B -->|"Mini-batch SGD"| E["Use averaged batch gradient"]
+  C --> F["v = beta*v_prev + grad"]
+  D --> F
+  E --> F
+  F --> G["theta_{t+1} = theta_t - eta*v"]
+  G --> A
+`} />
+
+This same update rule is exactly what plugs into the per-parameter gradients that [Backpropagation: Full Derivation](/docs/foundations/calculus-optimization/backpropagation-derivation) computes — backprop answers "what is $\nabla \mathcal{L}(\theta)$," and gradient descent (with whichever variant) answers "given that gradient, how do I update $\theta$."
+
+## Code Example
+
+```python
+import numpy as np
+
+def sgd_momentum(grad_fn, theta0, lr=0.01, beta=0.9, n_steps=200, batch_sampler=None):
+    """
+    grad_fn(theta, batch) -> gradient estimate at theta using `batch`.
+    batch_sampler() -> yields a mini-batch (or None for full-batch / exact gradient).
+    """
+    theta = theta0.copy()
+    v = np.zeros_like(theta)
+    history = [theta.copy()]
+
+    for t in range(n_steps):
+        batch = batch_sampler() if batch_sampler else None
+        g = grad_fn(theta, batch)
+        v = beta * v + g
+        theta = theta - lr * v
+        history.append(theta.copy())
+
+    return theta, history
+
+# Example: minimize an ill-conditioned quadratic f(x) = 0.5 * x^T A x
+A = np.array([[10.0, 0.0], [0.0, 1.0]])  # condition number kappa = 10
+grad_fn = lambda theta, batch: A @ theta
+
+theta_final, path = sgd_momentum(grad_fn, np.array([5.0, 5.0]), lr=0.05, beta=0.9, n_steps=100)
+print(theta_final)  # converges toward [0, 0]
+```
+
+## Complexity
+
+| Variant | Time per step | Gradient variance | Memory (beyond parameters) |
+| --- | --- | --- | --- |
+| Batch GD | $O(N \cdot d)$ | 0 | $O(d)$ |
+| SGD | $O(d)$ | High | $O(d)$ |
+| Mini-batch SGD (batch size $b$) | $O(b \cdot d)$, parallelizable across $b$ | $O(1/b)$ | $O(d)$ |
+| SGD with momentum | $O(b \cdot d)$ | $O(1/b)$ (smoothed further by averaging) | $O(2d)$ — must store velocity $v$ |
+
+where $d$ is the number of parameters and $N$ the dataset size.
+
+<KeyTakeaways items={[
+  "The negative gradient is provably the steepest local descent direction under a first-order Taylor approximation — this is why gradient descent moves opposite ∇L, not a heuristic choice.",
+  "Convergence rate depends on the condition number κ = L/μ of the loss; poorly-conditioned (long, narrow) loss surfaces make plain gradient descent slow.",
+  "Mini-batch SGD trades exactness for parallelism and cheaper steps — variance of the gradient estimate scales as O(1/b) with batch size b.",
+  "Momentum accumulates an exponentially-weighted average of past gradients, reinforcing consistent directions and canceling oscillations — improving the effective convergence exponent from κ to √κ.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Simple, memory-cheap, and scales to billions of parameters — the only broadly practical optimizer family for deep learning.",
+    "Mini-batching parallelizes trivially on modern accelerators, giving large wall-clock speedups over full-batch methods.",
+  ]}
+  cons={[
+    "Choosing the learning rate η is delicate: too large diverges (violates the local-linear-approximation assumption); too small converges too slowly to be practical.",
+    "Plain SGD provides no convergence guarantee for non-convex losses beyond 'reaches a stationary point' — it can stall at saddle points, which are actually more common than local minima in high dimensions.",
+    "Momentum's β and the learning rate interact — tuning them independently, rather than jointly, is a common source of unstable or slow training.",
+    "Treating gradient descent as scale-invariant: features on very different scales create an artificially ill-conditioned loss surface, which is why feature normalization matters even though it doesn't change the 'true' optimum.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does the gradient descent update θ ← θ - η∇L(θ) use the *negative* gradient specifically, rather than some other direction?",
+    options: [
+      "It's an arbitrary convention with no mathematical justification",
+      "Among all unit directions, -∇L(θ) is the one that (via Cauchy–Schwarz) maximizes the decrease predicted by the first-order Taylor expansion of L around θ",
+      "Because gradients are always negative for loss functions",
+      "Because it guarantees convergence to the global minimum",
+    ],
+    answerIndex: 1,
+    explanation: "Minimizing ∇L(θ)ᵀh over unit vectors h is solved by Cauchy–Schwarz exactly when h points opposite ∇L(θ) — this is a provable, not conventional, fact about first-order local descent, though it says nothing about global optimality for non-convex L.",
+  },
+  {
+    question: "Why does momentum help specifically on ill-conditioned (high condition number) loss surfaces?",
+    options: [
+      "It increases the effective learning rate uniformly in every direction",
+      "It accumulates an exponentially weighted sum of past gradients, which reinforces consistent gradient directions (the shallow, useful axis) while past gradients that alternate in sign (the oscillating, high-curvature axis) partially cancel",
+      "It replaces the gradient with the Hessian, giving second-order information",
+      "It only helps with stochastic gradients, not full-batch gradient descent",
+    ],
+    answerIndex: 1,
+    explanation: "Unrolling the momentum recursion shows v_t is a decaying sum of past gradients; oscillating components cancel while consistent-direction components reinforce, which is exactly the effect needed to speed up progress along a narrow valley's shallow axis.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Numerical Optimization", authors: "Jorge Nocedal, Stephen J. Wright", venue: "Springer", year: 2006 },
+  { title: "Convex Optimization", authors: "Stephen Boyd, Lieven Vandenberghe", venue: "Cambridge University Press", year: 2004 },
+  { title: "On the importance of initialization and momentum in deep learning", authors: "Sutskever, I., Martens, J., Dahl, G., & Hinton, G.", venue: "ICML", year: 2013 },
+  { title: "A method for solving the convex programming problem with convergence rate O(1/k^2)", authors: "Nesterov, Y.", venue: "Doklady AN USSR", year: 1983 },
+]} />

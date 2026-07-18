@@ -1,0 +1,191 @@
+---
+title: "Q-Learning & Value-Based Methods"
+description: "How to turn the Bellman optimality equation into a learning rule when the environment's dynamics are unknown, via temporal-difference updates and off-policy control."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["reinforcement-learning", "machine-learning", "q-learning", "temporal-difference-learning", "off-policy"]
+prerequisites: ["Markov Decision Processes", "Bellman equations", "Basic stochastic approximation / gradient descent intuition"]
+---
+
+<Prerequisites items={[
+  "Markov Decision Processes (states, actions, rewards, Bellman equations)",
+  "Basic stochastic approximation / gradient descent intuition",
+  "Expectation and sample averages",
+]} />
+
+<Callout type="note">
+  This page builds directly on [Markov Decision Processes](/docs/machine-learning/reinforcement-learning/markov-decision-processes), which derives the Bellman optimality equation for $Q^*$. Read that first if the notation below looks unfamiliar.
+</Callout>
+
+## Intuition
+
+The Bellman optimality equation tells us that $Q^*$ must satisfy a self-consistency condition: $Q^*(s,a)$ equals the immediate reward plus the discounted value of the best action in whatever state comes next. The catch is that this equation involves an expectation over the environment's transition distribution $P(s' \mid s, a)$ — and in most real problems, we don't know $P$. We can't compute the sum over $s'$ because we don't have the transition model.
+
+Q-learning's insight is: we don't need the model if we can *sample* from it. Instead of computing the exact expectation, take one real transition $(s, a, r, s')$ the agent actually experienced, treat $r + \gamma \max_{a'} Q(s', a')$ as a noisy, one-sample estimate of what the Bellman equation says $Q(s,a)$ should equal, and nudge the current estimate a small step toward that target. Repeat forever, and — under suitable conditions — the estimate converges to $Q^*$.
+
+<Callout type="tip" title="The one idea that matters">
+  Q-learning is stochastic approximation applied to the Bellman optimality equation: replace the exact expectation over next states with a single sampled transition, and take a small step toward the resulting "TD target" instead of jumping there in one shot. Averaging over many noisy samples recovers the true expectation over time.
+</Callout>
+
+## Formal Definition
+
+Recall the Bellman optimality equation for the action-value function:
+
+$$
+Q^*(s,a) = \mathbb{E}_{s' \sim P(\cdot \mid s,a)} \Big[ R(s,a,s') + \gamma \max_{a'} Q^*(s',a') \Big].
+$$
+
+Q-learning maintains a table (or function approximator) $Q(s,a)$ and updates it using experienced transitions $(s_t, a_t, r_{t+1}, s_{t+1})$ collected by acting in the environment, regardless of what policy generated those actions.
+
+## Derivation: From Bellman Optimality to the TD Update
+
+Define the **TD target** as a one-sample Monte Carlo estimate of the right-hand side of the Bellman optimality equation, using the single observed reward and next state in place of the full expectation over $P$:
+
+$$
+y_t = r_{t+1} + \gamma \max_{a'} Q(s_{t+1}, a').
+$$
+
+This is an unbiased estimate of $\mathbb{E}_{s'}[R + \gamma \max_{a'} Q^*(s', a')]$ *only if* $Q = Q^*$ already; while $Q$ is still being learned, $y_t$ is a biased "bootstrapped" estimate, since it uses the current (imperfect) $Q$ to estimate its own target. This bootstrapping is exactly what distinguishes **temporal-difference (TD) learning** from plain Monte Carlo estimation, which would instead wait for the full episode's actual return.
+
+Define the **TD error** as the discrepancy between this target and the current estimate:
+
+$$
+\delta_t = y_t - Q(s_t, a_t) = r_{t+1} + \gamma \max_{a'} Q(s_{t+1}, a') - Q(s_t, a_t).
+$$
+
+Stochastic approximation theory (Robbins–Monro) says: if you want to find the fixed point of an equation $Q = \mathcal{T}Q$ (here $\mathcal{T}$ is the Bellman optimality operator) but you can only observe noisy samples of $\mathcal{T}Q$, you can still converge to the fixed point by taking small steps in the direction of the sampled error, with a learning rate that decays appropriately:
+
+$$
+Q(s_t, a_t) \leftarrow Q(s_t, a_t) + \alpha \, \delta_t = Q(s_t, a_t) + \alpha \Big[ r_{t+1} + \gamma \max_{a'} Q(s_{t+1}, a') - Q(s_t, a_t) \Big].
+$$
+
+This is the **Q-learning update rule**. Each update moves $Q(s_t, a_t)$ a fraction $\alpha$ of the way toward the sampled Bellman target, exactly the way a running average moves a fraction of the way toward each new data point. Under standard conditions — every state-action pair visited infinitely often, and a learning rate schedule satisfying $\sum_t \alpha_t = \infty$, $\sum_t \alpha_t^2 < \infty$ — this procedure provably converges to $Q^*$ (Watkins & Dayan, 1992).
+
+## On-Policy vs. Off-Policy
+
+Look closely at the target: it uses $\max_{a'} Q(s_{t+1}, a')$ — the value of the *best* action in the next state, regardless of which action the agent actually takes next. This makes Q-learning **off-policy**: the policy used to select actions during learning (the "behavior policy," typically $\epsilon$-greedy, to ensure exploration) can be completely different from the policy whose value is being learned (the "target policy," which is always the greedy policy $\arg\max_a Q$).
+
+Contrast this with **SARSA**, an *on-policy* TD control method whose update uses the action the agent *actually* takes next, $a_{t+1} \sim \pi$, instead of a max:
+
+$$
+Q(s_t, a_t) \leftarrow Q(s_t, a_t) + \alpha \Big[ r_{t+1} + \gamma Q(s_{t+1}, a_{t+1}) - Q(s_t, a_t) \Big] \quad \text{(SARSA, on-policy)}.
+$$
+
+SARSA learns the value of the policy it's actually following (including its exploratory mistakes), so it tends to learn safer, more conservative behavior in risky environments; Q-learning learns the value of the optimal policy directly, even while behaving exploratorily, which can make it learn a more aggressive policy that occasionally suffers during exploration (the classic illustration is the "Cliff Walking" gridworld, where Q-learning learns the optimal but risky path along the cliff edge, while SARSA learns a safer, longer path).
+
+<ComparisonTable
+  headers={["Property", "Q-Learning", "SARSA"]}
+  rows={[
+    ["Policy type", "Off-policy", "On-policy"],
+    ["TD target", "r + γ·max_a' Q(s',a')", "r + γ·Q(s',a') for the action actually taken"],
+    ["Learns value of", "The greedy (optimal) policy", "The policy actually being followed (e.g. ε-greedy)"],
+    ["Behavior in risky environments", "Can learn optimal but risky policies", "Tends to learn safer, more conservative policies"],
+  ]}
+/>
+
+## Exploration vs. Exploitation: $\epsilon$-Greedy
+
+Q-learning's convergence guarantee requires every state-action pair to be visited infinitely often — but if the agent always acts greedily ($\arg\max_a Q$), it will quickly lock onto whatever action looks best early on and may never revisit alternatives that were actually better but under-sampled. This is the **exploration-exploitation tradeoff**: exploit current knowledge to get reward now, or explore to potentially discover better actions and improve future reward.
+
+$\epsilon$-greedy is the simplest resolution: with probability $1-\epsilon$, take the greedy action $\arg\max_a Q(s,a)$ (exploitation); with probability $\epsilon$, take a uniformly random action (exploration). $\epsilon$ is typically annealed toward 0 over training, so the policy exploits more as $Q$ becomes more reliable.
+
+<Mermaid chart={`
+graph TD
+  S["Observe state s_t"] --> C{"With prob ε?"}
+  C -- "Yes (explore)" --> R["Random action"]
+  C -- "No (exploit)" --> G["argmax_a Q(s_t, a)"]
+  R --> T["Take action, observe r, s'"]
+  G --> T
+  T --> U["Q(s,a) += α[r + γ·max Q(s',·) - Q(s,a)]"]
+  U --> S
+`} />
+
+## Code Example: Tabular Q-Learning
+
+```python
+import numpy as np
+
+def q_learning_update(Q, s, a, r, s_next, alpha=0.1, gamma=0.99):
+    """One Q-learning update step (tabular case).
+    Q: array [num_states, num_actions]
+    """
+    td_target = r + gamma * np.max(Q[s_next])       # sampled Bellman-optimality target
+    td_error = td_target - Q[s, a]
+    Q[s, a] += alpha * td_error
+    return Q, td_error
+
+def epsilon_greedy(Q, s, epsilon, num_actions):
+    if np.random.rand() < epsilon:
+        return np.random.randint(num_actions)        # explore
+    return np.argmax(Q[s])                            # exploit
+
+def train_q_learning(env, num_states, num_actions, num_episodes=5000,
+                      alpha=0.1, gamma=0.99, epsilon_start=1.0, epsilon_end=0.05):
+    Q = np.zeros((num_states, num_actions))
+    for ep in range(num_episodes):
+        epsilon = max(epsilon_end, epsilon_start * (1 - ep / num_episodes))
+        s = env.reset()
+        done = False
+        while not done:
+            a = epsilon_greedy(Q, s, epsilon, num_actions)
+            s_next, r, done, _ = env.step(a)
+            Q, _ = q_learning_update(Q, s, a, r, s_next, alpha, gamma)
+            s = s_next
+    return Q
+```
+
+Note that the behavior policy (`epsilon_greedy`) and the target used in the update (`np.max(Q[s_next])`, i.e. the greedy policy) are different — this is off-policy learning made concrete in code.
+
+<KeyTakeaways items={[
+  "Q-learning is stochastic approximation applied to the Bellman optimality equation: it replaces the true expectation over next states with a single sampled transition.",
+  "The TD target r + γ·max_a' Q(s',a') bootstraps off the current Q estimate, which is what distinguishes TD learning from Monte Carlo methods that wait for the full episode return.",
+  "Q-learning is off-policy: the behavior policy (e.g. ε-greedy, for exploration) can differ from the target policy (always greedy) whose value is being learned.",
+  "ε-greedy resolves the exploration-exploitation tradeoff by exploiting the current best estimate most of the time while still exploring randomly with probability ε.",
+  "Convergence to Q* requires every (state, action) pair to be visited infinitely often and a decaying learning rate satisfying the Robbins-Monro conditions.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Pitfalls to avoid">
+  - **Setting ε to 0 too early.** If exploration stops before Q has converged, the agent can get stuck exploiting a suboptimal policy forever, since state-action pairs it never revisits can't be corrected.
+  - **Confusing Q-learning's off-policy target with the behavior policy.** The max in the update is *not* the action the agent will actually take next — that's a common source of confusion with SARSA's update, which looks almost identical but uses the actually-taken next action.
+  - **Ignoring maximization bias.** Because the target uses max_a' Q(s',a'), and Q is a noisy estimate, the max operator systematically overestimates true values (it's more likely to pick an action whose value is overestimated by noise than one that's underestimated). Double Q-learning addresses this by decoupling action selection from action evaluation using two separate Q-tables.
+  - **Using a constant, too-large learning rate.** Without decay, Q-learning's updates can oscillate around the true value rather than converging tightly to it.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is Q-learning classified as an off-policy algorithm?",
+    options: [
+      "Because it doesn't use a policy at all during training",
+      "Because its TD target uses max_a' Q(s', a') — the value of the best possible next action — regardless of which action the behavior policy actually takes next",
+      "Because it only works in continuous action spaces",
+      "Because it requires a known transition model",
+    ],
+    answerIndex: 1,
+    explanation: "Q-learning's update target bootstraps off the greedy action's value (max_a' Q(s',a')), which is independent of the exploratory behavior policy (e.g. ε-greedy) used to actually select actions. This decoupling of 'policy being learned' from 'policy generating data' is the definition of off-policy learning.",
+  },
+  {
+    question: "What is the 'TD target' in the Q-learning update, and why is it described as a biased, bootstrapped estimate during training?",
+    options: [
+      "It's the true expected return computed by averaging over many episodes; it's unbiased by construction",
+      "It's r + γ·max_a' Q(s', a'), a one-sample estimate of the Bellman-optimality right-hand side that uses the current (imperfect) Q to estimate its own target, making it biased until Q converges to Q*",
+      "It's simply the immediate reward r, with no dependence on future states",
+      "It's the average reward over the entire training run so far",
+    ],
+    answerIndex: 1,
+    explanation: "The TD target r + γ·max_a' Q(s',a') replaces the exact Bellman expectation over next states with one sampled transition, and uses the current, not-yet-converged Q-values to estimate the target for updating Q itself — this bootstrapping introduces bias early in training, which vanishes as Q approaches Q*.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Reinforcement Learning: An Introduction (2nd ed.)", authors: "Sutton, R. S., & Barto, A. G.", venue: "MIT Press", year: 2018 },
+  { title: "Q-learning", authors: "Watkins, C. J. C. H., & Dayan, P.", venue: "Machine Learning", year: 1992 },
+  { title: "Learning from Delayed Rewards (PhD thesis, origin of Q-learning)", authors: "Watkins, C. J. C. H.", venue: "University of Cambridge", year: 1989 },
+  { title: "Deep Reinforcement Learning with Double Q-learning", authors: "van Hasselt, H., Guez, A., & Silver, D.", venue: "AAAI", year: 2016 },
+]} />

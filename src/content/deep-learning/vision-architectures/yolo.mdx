@@ -1,0 +1,156 @@
+---
+title: "YOLO Object Detection Family"
+description: "Why treating detection as a single regression problem over a grid — instead of proposing regions and then classifying them — turned real-time object detection into a solved problem."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "computer-vision", "object-detection", "yolo"]
+prerequisites: ["Convolutional Neural Networks"]
+---
+
+<Prerequisites items={["Convolutional Neural Networks"]} />
+
+## Intuition
+
+Object detection needs two things at once: *where* are the objects (bounding boxes), and *what* are they (class labels) — for a variable, unknown number of objects per image. The natural-seeming approach is to do this in two stages: first propose candidate regions that might contain an object, then run a classifier on each proposed region. That works, but running a full classification pass over hundreds or thousands of candidate regions per image is slow — nowhere near fast enough for real-time video.
+
+YOLO's ("You Only Look Once") bet: skip the separate proposal stage entirely. Look at the whole image *once*, and have a single CNN forward pass directly output every bounding box and class prediction simultaneously, framed as one big regression problem.
+
+<Callout type="tip" title="The one-sentence idea">
+  Divide the image into an S x S grid, and have one forward pass through a single CNN predict, for every grid cell, a fixed number of candidate bounding boxes plus class probabilities — turning detection into one regression problem over a fixed-size output tensor, instead of a separate propose-then-classify pipeline run over a variable number of region proposals.
+</Callout>
+
+## Single-Shot Detection Mechanism
+
+YOLO divides the input image into an $S \times S$ grid. Each grid cell is made responsible for detecting any object whose center falls inside it. For every cell, the network predicts, in a single forward pass:
+
+- $B$ candidate bounding boxes, each parameterized as $(x, y, w, h, \text{confidence})$ — $(x, y)$ the box center relative to the cell, $(w, h)$ width/height relative to the whole image, and confidence an estimate of $\Pr(\text{object}) \times \text{IoU}_{\text{pred, truth}}$ (how likely a box is to contain an object, scaled by how well it would overlap the ground truth if so).
+- $C$ conditional class probabilities $\Pr(\text{class}_i \mid \text{object})$, shared across the boxes predicted by that cell.
+
+The entire output is one tensor of shape $S \times S \times (B \cdot 5 + C)$, produced by one CNN forward pass over the whole image — there is no separate stage that first crops out candidate regions and re-runs a network on each one. The network is trained end-to-end with a multi-part regression loss (localization error on box coordinates, confidence error, classification error), all computed directly against this fixed-size grid tensor.
+
+<Mermaid chart={`
+graph TD
+  Img["Input image"] --> CNN["Single CNN backbone (one forward pass)"]
+  CNN --> Grid["S x S grid of cells"]
+  Grid --> Pred["Each cell predicts: B boxes (x, y, w, h, confidence) + C class probabilities"]
+  Pred --> Tensor["Output tensor: S x S x (B*5 + C)"]
+  Tensor --> NMS["Non-Max Suppression"]
+  NMS --> Final["Final set of detected boxes, one per object"]
+`} />
+
+## Two-Stage vs. One-Stage Detectors
+
+Two-stage detectors (e.g. the R-CNN family) split the problem explicitly: stage one, a **region proposal** mechanism (originally external algorithms like selective search, later a learned Region Proposal Network in Faster R-CNN) generates a set of candidate boxes likely to contain an object, without yet knowing what class; stage two, each proposed region is cropped, resized, and passed through a classifier (plus a box-refinement regressor) to assign a class label and adjust the box. This is more accurate (proposals let the classifier focus compute on promising regions, and box refinement happens twice), but requires running the classification stage once per proposal — hundreds of forward passes over cropped regions per image — which is why two-stage detectors historically ran far slower than YOLO's single forward pass over the whole image.
+
+<ComparisonTable
+  headers={["Property", "Two-stage (e.g. R-CNN family)", "One-stage (YOLO)"]}
+  rows={[
+    ["Pipeline", "Region proposal stage, then a separate classification + box-refinement stage per proposal", "One CNN forward pass predicts all boxes and classes directly over a fixed grid"],
+    ["Speed", "Slower — cost scales with the number of region proposals classified", "Much faster — cost is a single fixed-size forward pass, enabling real-time video detection"],
+    ["Accuracy on small/overlapping objects", "Generally stronger, especially historically, since proposals can be refined independently", "Original YOLO struggled more with small objects and objects clustered close together (limited boxes per grid cell); later YOLO versions and one-stage successors substantially closed this gap"],
+    ["End-to-end trainability", "Historically trained in stages (proposal network and classifier tuned somewhat separately, though Faster R-CNN made this closer to end-to-end)", "Trained end-to-end as a single regression + classification loss from the start"],
+  ]}
+/>
+
+## Non-Max Suppression
+
+Because every one of the $S \times S$ cells (and every one of its $B$ boxes) makes an independent prediction, a single real object very often gets multiple overlapping candidate boxes — nearby cells frequently all "notice" the same object and each propose a box for it. Left alone, this would report the same object multiple times. **Non-max suppression (NMS)** cleans this up:
+
+1. Discard all boxes below a confidence threshold.
+2. Take the remaining box with the highest confidence score; keep it as a final detection.
+3. Compute Intersection-over-Union (IoU) between that box and every other remaining box *of the same predicted class*; suppress (discard) any box whose IoU with it exceeds a threshold (e.g. 0.5) — these are judged to be duplicate detections of the same object.
+4. Repeat from step 2 with the remaining boxes, until none are left.
+
+The IoU threshold is what distinguishes "this is a second, genuinely separate nearby object" (low IoU with the kept box — retained) from "this is a duplicate detection of the object we already kept" (high IoU — suppressed). Without NMS, a single-shot detector's raw output would contain many redundant, overlapping boxes per real object, since nothing in the grid-based prediction mechanism inherently prevents that.
+
+## Code Sketch
+
+```python
+import torch
+
+def non_max_suppression(boxes, scores, classes, iou_threshold=0.5):
+    """boxes: (N, 4) as (x1, y1, x2, y2); scores, classes: (N,)"""
+    keep = []
+    order = scores.argsort(descending=True)
+    while order.numel() > 0:
+        i = order[0].item()
+        keep.append(i)
+        if order.numel() == 1:
+            break
+        rest = order[1:]
+        # only compare boxes of the same predicted class
+        same_class = classes[rest] == classes[i]
+        ious = compute_iou(boxes[i], boxes[rest])           # (len(rest),)
+        suppress = (ious > iou_threshold) & same_class
+        order = rest[~suppress]
+    return keep
+
+class YOLOHead(torch.nn.Module):
+    """Predicts the S x S x (B*5 + C) output tensor from backbone features."""
+    def __init__(self, in_channels, grid_size=7, num_boxes=2, num_classes=20):
+        super().__init__()
+        self.S, self.B, self.C = grid_size, num_boxes, num_classes
+        out_channels = grid_size * grid_size * (num_boxes * 5 + num_classes)
+        self.fc = torch.nn.Linear(in_channels, out_channels)
+
+    def forward(self, features):
+        out = self.fc(features)
+        return out.view(-1, self.S, self.S, self.B * 5 + self.C)
+```
+
+<KeyTakeaways items={[
+  "YOLO reframes detection as one regression problem: divide the image into an S x S grid, and predict boxes + class probabilities for every cell in a single forward pass, rather than proposing regions and classifying each one separately.",
+  "This single-shot design trades some accuracy (especially historically on small or tightly clustered objects) for a large speed advantage, which is what made real-time detection practical.",
+  "Non-max suppression is necessary precisely because independent per-cell predictions produce multiple overlapping boxes for the same object — it greedily keeps the highest-confidence box and removes others that overlap it too much (same class, high IoU).",
+  "The core trade-off between one-stage and two-stage detectors — speed vs. localization accuracy on hard cases — is a direct consequence of whether a dedicated proposal stage is used before classification.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Single forward pass over the whole image makes YOLO dramatically faster than proposal-based detectors, enabling real-time video and embedded/edge deployment.",
+    "Seeing the entire image at once (rather than cropped regions in isolation) lets the model use global context, which reduces certain false positives that region-local classifiers are prone to.",
+    "End-to-end training as a single loss simplifies the training pipeline relative to multi-stage detectors.",
+  ]}
+  cons={[
+    "Each grid cell predicts only a limited, fixed number of boxes, which historically limited the original YOLO's ability to detect many small or tightly clustered objects within the same cell.",
+    "Choosing too coarse a grid (small S) limits localization precision; too fine a grid increases compute and can fragment a single large object across cells.",
+    "Setting the NMS IoU threshold poorly — too low suppresses genuinely separate nearby objects as 'duplicates'; too high leaves redundant boxes for the same object undetected as duplicates.",
+    "Assuming NMS compares boxes across all classes — standard NMS only suppresses overlapping boxes predicted as the *same* class, not all overlapping boxes regardless of class.",
+  ]}
+/>
+
+<Quiz questions={[
+  {
+    question: "What is the fundamental architectural difference between YOLO's single-shot detection and a two-stage detector like the R-CNN family?",
+    options: [
+      "YOLO uses a larger CNN backbone than two-stage detectors",
+      "YOLO predicts all bounding boxes and class probabilities directly from one CNN forward pass over a fixed grid, whereas two-stage detectors first generate region proposals and then run a separate classification/refinement pass on each proposed region",
+      "YOLO does not use convolutional layers at all",
+      "Two-stage detectors cannot be trained end-to-end under any circumstances",
+    ],
+    answerIndex: 1,
+    explanation: "YOLO's defining design choice is eliminating the separate region-proposal stage: a single forward pass produces a fixed-size S x S x (B*5+C) tensor with every box and class prediction at once. Two-stage detectors instead classify each of potentially hundreds of proposed regions individually, which is more compute but historically gave stronger localization accuracy.",
+  },
+  {
+    question: "Why is non-max suppression necessary after a single-shot detector produces its raw predictions?",
+    options: [
+      "To increase the model's confidence scores across the board",
+      "Because independent predictions from multiple grid cells (and multiple boxes per cell) frequently produce several overlapping candidate boxes for the same real object, and NMS greedily keeps the highest-confidence box while removing other same-class boxes that overlap it above an IoU threshold",
+      "To convert class probabilities into bounding box coordinates",
+      "To increase the grid resolution after training",
+    ],
+    answerIndex: 1,
+    explanation: "Since every grid cell predicts boxes independently, nearby cells commonly all detect the same object and each emit a box for it. NMS removes this redundancy: it keeps the most confident box for an object and suppresses other boxes of the same predicted class whose IoU with the kept box exceeds a threshold, since those are judged to be duplicate detections rather than separate objects.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "You Only Look Once: Unified, Real-Time Object Detection", authors: "Redmon, J., Divvala, S., Girshick, R., Farhadi, A.", venue: "CVPR", year: 2015, url: "https://arxiv.org/abs/1506.02640" },
+  { title: "Faster R-CNN: Towards Real-Time Object Detection with Region Proposal Networks", authors: "Ren, S., He, K., Girshick, R., Sun, J.", venue: "NeurIPS", year: 2015, url: "https://arxiv.org/abs/1506.01497" },
+  { title: "Rich Feature Hierarchies for Accurate Object Detection and Semantic Segmentation (R-CNN)", authors: "Girshick, R., Donahue, J., Darrell, T., Malik, J.", venue: "CVPR", year: 2014, url: "https://arxiv.org/abs/1311.2524" },
+]} />

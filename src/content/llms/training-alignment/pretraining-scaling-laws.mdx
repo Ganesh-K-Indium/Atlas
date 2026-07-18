@@ -1,0 +1,152 @@
+---
+title: "Pretraining Objectives & Scaling Laws"
+description: "Why next-token prediction alone produces general capability, and how the Kaplan and Chinchilla scaling laws changed how compute gets split between model size and data."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "pretraining", "scaling-laws", "chinchilla"]
+prerequisites: ["Cross-entropy loss", "Gradient descent", "Log-log plots / power laws"]
+---
+
+## Intuition
+
+The pretraining objective behind essentially every modern LLM is almost embarrassingly simple: given a sequence of tokens, predict the next one. Repeated across trillions of tokens of internet-scale text, this single objective — with no task-specific labels, no human annotation — turns out to force the model to implicitly learn grammar, facts, reasoning patterns, and style, because predicting the next token well requires modeling all of that.
+
+The harder question pretraining raises isn't "what objective to use" (that part is settled) but "given a fixed compute budget, how big should the model be, and how much data should it see?" A bigger model can extract more from the same data; more data can make a smaller model perform better — scaling laws are the empirical answer to how to split a fixed compute budget between the two.
+
+<Callout type="tip" title="The one-sentence idea">
+  Pretraining loss falls as a smooth, predictable power law in model size, dataset size, and compute — which means you can extrapolate from small, cheap experiments to decide how large a model to train and how much data to feed it, before ever running the expensive full-scale job.
+</Callout>
+
+## The Causal Language Modeling Objective
+
+Given a corpus, the model is trained to maximize the probability it assigns to the actual next token at every position, conditioned only on the tokens that came before it (never tokens that come after — this causal, left-to-right constraint is what makes the objective usable for autoregressive generation at inference time):
+
+$$
+\mathcal{L}(\theta) = -\sum_{t=1}^{T} \log p_\theta(x_t \mid x_1, \ldots, x_{t-1})
+$$
+
+This is standard cross-entropy loss, applied at every token position in every training sequence, averaged over the whole corpus. Nothing about the objective is task-specific — there's no notion of "question answering" or "summarization" built in. Downstream capability emerges because accurately predicting the next token across a sufficiently broad and large corpus requires implicitly encoding an enormous amount of world knowledge and reasoning structure.
+
+## Scaling Laws: Loss as a Function of Scale
+
+Kaplan et al. (2020) trained several hundred Transformer language models across a wide range of sizes and found that pretraining loss, as a function of model size ($N$, non-embedding parameters), dataset size ($D$, tokens), or compute ($C$), each follows a **power law** when the other two are not the bottleneck:
+
+$$
+L(N) \approx \left(\frac{N_c}{N}\right)^{\alpha_N}, \qquad L(D) \approx \left(\frac{D_c}{D}\right)^{\alpha_D}, \qquad L(C) \approx \left(\frac{C_c}{C}\right)^{\alpha_C}
+$$
+
+The practically important qualitative findings from that paper:
+
+- Loss decreases **smoothly and predictably** across many orders of magnitude of scale — no evidence of a plateau within the ranges they tested — which is what makes extrapolation from small experiments to large ones a reasonable practice at all.
+- Within the regime Kaplan et al. studied, they found it was more compute-efficient to train **very large models on a comparatively modest amount of data and stop before convergence**, rather than training a smaller model to convergence. This specific conclusion — favoring large models trained on relatively little data — is exactly the part later work overturned.
+
+## Chinchilla: The Compute-Optimal Correction
+
+Hoffmann et al. (2022) revisited the same question with a wider and more carefully controlled set of training runs and reached a different practical conclusion: for a fixed compute budget, model size and training-token count should be scaled **at roughly equal rates** — doubling the compute budget means doubling both the model size and the data seen, not disproportionately favoring one over the other. Their headline result, the Chinchilla model, was trained at roughly **20 tokens per parameter** and, at 70B parameters, outperformed the much larger 175B-parameter, ~300B-token GPT-3 (a ratio of under 2 tokens per parameter) despite using similar total training compute — evidence that many earlier large models were significantly **under-trained on data** relative to their parameter count.
+
+$$
+N_{\text{opt}}(C) \propto C^{a}, \qquad D_{\text{opt}}(C) \propto C^{b}, \qquad a \approx b \approx 0.5
+$$
+
+(Hoffmann et al.'s fitted exponents put $N_{\text{opt}}$ and $D_{\text{opt}}$ growing at very close to the same rate as compute increases — the "roughly equal scaling" conclusion — though the exact fitted constants differ slightly across the three estimation methods used in the paper.)
+
+<Mermaid chart={`
+graph TD
+  A["Fixed compute budget C"] --> B{"How to split between model size N and data D?"}
+  B -->|"Kaplan et al. 2020: favor larger N, less D"| C["Large under-trained models (e.g. GPT-3 style)"]
+  B -->|"Hoffmann et al. 2022 (Chinchilla): scale N and D together"| D["Smaller, more data-trained models — better loss per unit compute"]
+  D --> E["Chinchilla: 70B params, ~1.4T tokens, ~20 tokens/param"]
+`} />
+
+<Callout type="warning" title="Why the two papers disagreed">
+  The discrepancy came primarily from experimental design, not a contradiction in the underlying physics of scaling: Kaplan et al. used a fixed, relatively short warmup/learning-rate schedule across model sizes and didn't always train models to the point their learning-rate schedule intended, which biased their fitted compute-optimal frontier toward favoring parameter count over data. Chinchilla's larger, more carefully controlled sweep (with learning-rate schedules matched to each run's actual token budget) produced the corrected, roughly-equal-scaling conclusion that the field adopted afterward.
+</Callout>
+
+## Practical Consequences
+
+Scaling laws turn "how big should I train?" from a guess into an extrapolation problem: run a series of much smaller/cheaper models, fit the power-law curve to their loss, and use the fit to predict the loss (and choose the size/data split) for the full-scale run before committing the budget for it. This is standard practice at major labs precisely because a full pretraining run can cost millions of dollars — nobody wants to discover the wrong size ratio only after the run finishes.
+
+It's worth noting what compute-optimal *doesn't* mean: it minimizes training loss per unit of training compute, but says nothing about inference cost. A model trained well past the "Chinchilla-optimal" token count for its size (often called "overtraining" relative to that ratio) can still be the better choice in practice if it will be served at massive inference volume, since a smaller, more heavily-trained model that reaches similar quality is cheaper to run for the rest of its life — many widely deployed open-weight models are deliberately trained on far more than 20 tokens per parameter for exactly this reason.
+
+## Code Sketch: Fitting a Simple Scaling Law
+
+```python
+import numpy as np
+from scipy.optimize import curve_fit
+
+# Loss observed for a handful of cheap small-scale training runs
+N = np.array([1e7, 3e7, 1e8, 3e8, 1e9])       # non-embedding parameters
+loss = np.array([3.7, 3.3, 2.9, 2.6, 2.3])     # measured pretraining loss
+
+def power_law(N, Nc, alpha):
+    return (Nc / N) ** alpha
+
+params, _ = curve_fit(power_law, N, loss, p0=[1e12, 0.08])
+Nc_fit, alpha_fit = params
+
+# Extrapolate to a much larger, not-yet-trained model size
+N_target = 7e10
+predicted_loss = power_law(N_target, Nc_fit, alpha_fit)
+print(f"Predicted loss at N={N_target:.0e}: {predicted_loss:.3f}")
+```
+
+This is a toy version of the real methodology: labs fit these curves on dozens of runs spanning several orders of magnitude, then use the fit to choose the size and data budget for the one expensive run that actually matters.
+
+<KeyTakeaways items={[
+  "The causal language modeling objective (next-token prediction via cross-entropy) is task-agnostic — general capability emerges as a side effect of optimizing it at scale, not from any explicit multi-task design.",
+  "Kaplan et al. (2020) established that loss follows smooth, predictable power laws in model size, data size, and compute — enabling extrapolation from small experiments.",
+  "Hoffmann et al. (2022, Chinchilla) corrected Kaplan et al.'s practical recommendation: compute-optimal training scales model size and data roughly together, not model size at data's expense — their Chinchilla model used roughly 20 tokens per parameter.",
+  "Many earlier large models (like GPT-3) were, in retrospect, undertrained on data relative to their parameter count given the compute they consumed.",
+  "'Compute-optimal' (Chinchilla) and 'inference-optimal' are different objectives — models deliberately trained past the Chinchilla ratio can still be the right choice when inference volume dominates lifetime cost.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Next-token prediction requires no labeled data — pretraining scales with however much raw text can be collected and cleaned.",
+    "Scaling laws let teams predict full-scale training outcomes from small, cheap experiments, avoiding wasted multi-million-dollar runs.",
+    "The Chinchilla correction meaningfully improved compute efficiency across the field — better loss for the same training FLOPs by rebalancing the size/data split.",
+  ]}
+  cons={[
+    "A common mistake: treating the ~20-tokens-per-parameter Chinchilla ratio as a universal rule rather than a compute-optimal-for-training-loss finding — it says nothing about inference cost, and many production models are intentionally trained on far more tokens per parameter than that.",
+    "Extrapolating scaling-law fits far beyond the range of the small experiments they were fit on carries real risk — power-law fits can and have broken down or shifted at new scales as data quality, architecture, or training recipe changes.",
+    "Confusing pretraining loss (what scaling laws predict) with downstream task performance — the two are correlated but not identical, and some capabilities emerge more discontinuously than the smooth loss curve would suggest.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What was the key practical disagreement between Kaplan et al. (2020) and Hoffmann et al. (2022, Chinchilla) regarding compute-optimal training?",
+    options: [
+      "Kaplan et al. denied that scaling laws existed at all",
+      "Kaplan et al.'s fitted frontier favored allocating most additional compute to larger model size over more training data; Chinchilla's more carefully controlled sweep found model size and data should scale at roughly equal rates instead",
+      "Chinchilla argued smaller models are always better regardless of data",
+      "The two papers used identical methodology and reached identical conclusions",
+    ],
+    answerIndex: 1,
+    explanation: "Kaplan et al.'s experimental setup (in particular, learning-rate schedules not matched to each run's actual token budget) biased their fitted compute-optimal frontier toward favoring parameter count. Hoffmann et al.'s corrected methodology found that compute-optimal training scales model size and data together at roughly equal rates — their Chinchilla model (70B params, ~20 tokens/param) outperformed the much larger, less-data-trained GPT-3 at similar compute.",
+  },
+  {
+    question: "Why might a lab deliberately train a model on far more tokens per parameter than the Chinchilla-optimal ratio suggests?",
+    options: [
+      "It's always a mistake and never a deliberate choice",
+      "Because Chinchilla-optimal minimizes loss per unit of training compute, not total cost of ownership — a smaller model trained on more data can be cheaper to serve at high inference volume even if it wasn't the training-compute-optimal choice",
+      "Because more tokens per parameter always produces a smaller model regardless of parameter count",
+      "Because the Chinchilla paper only applies to models under 1B parameters",
+    ],
+    answerIndex: 1,
+    explanation: "Chinchilla scaling laws optimize loss for a given training compute budget — they say nothing about inference cost. If a model will be served at enormous volume, minimizing its parameter count (even at the cost of training past the Chinchilla-optimal token ratio) can reduce total lifetime cost more than following the training-optimal ratio would.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Scaling Laws for Neural Language Models", authors: "Kaplan, J., McCandlish, S., Henighan, T., Brown, T. B., Chess, B., Child, R., Gray, S., Radford, A., Wu, J., & Amodei, D.", venue: "arXiv:2001.08361", year: 2020, url: "https://arxiv.org/abs/2001.08361" },
+  { title: "Training Compute-Optimal Large Language Models", authors: "Hoffmann, J., Borgeaud, S., Mensch, A., Buchatskaya, E., Cai, T., Rutherford, E., et al.", venue: "arXiv:2203.15556", year: 2022, url: "https://arxiv.org/abs/2203.15556" },
+  { title: "Language Models are Few-Shot Learners (GPT-3)", authors: "Brown, T. B. et al.", venue: "NeurIPS", year: 2020, url: "https://arxiv.org/abs/2005.14165" },
+]} />

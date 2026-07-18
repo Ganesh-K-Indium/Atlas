@@ -1,0 +1,166 @@
+---
+title: "Tokenizers: BPE, WordPiece, SentencePiece"
+description: "How raw text becomes a fixed-size vocabulary of subword units — and why the merge criterion each algorithm uses determines everything downstream."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "tokenization", "bpe", "wordpiece", "sentencepiece"]
+prerequisites: ["Basic string/character encoding", "Frequency counting", "Greedy algorithms"]
+---
+
+## Intuition
+
+A neural network doesn't consume text — it consumes a sequence of integers, each one an index into a fixed vocabulary. The question a tokenizer answers is: what should the *units* of that vocabulary be?
+
+Whole words are the obvious choice, but language has an unbounded number of them (misspellings, rare names, morphological variants, code identifiers, other languages) — a whole-word vocabulary either explodes in size or drowns in "unknown token" fallbacks. Individual characters or bytes solve the coverage problem completely (there are only so many bytes) but produce very long sequences and force the model to relearn word structure from scratch.
+
+Subword tokenization is the compromise that won: build a vocabulary of frequently occurring *character chunks*, so common words stay whole (one token), rare words decompose into a handful of familiar pieces, and truly novel strings can always fall back to bytes or characters — so nothing is ever literally unrepresentable.
+
+<Callout type="tip" title="The one-sentence idea">
+  Start from individual characters (or bytes) as the only guaranteed-covered vocabulary, then greedily merge whichever adjacent pair appears most often in the training corpus — repeating this thousands of times builds a vocabulary that spans from single characters up to whole common words, with everything in between assembled from the merges that mattered most.
+</Callout>
+
+## Byte-Pair Encoding (BPE), Derived Step by Step
+
+BPE is an old compression algorithm (Gage, 1994) repurposed for tokenization (Sennrich et al., 2015). The training procedure:
+
+1. **Initialize the vocabulary with the base alphabet.** Every distinct character (or, in the byte-level variant used by GPT-2 and onward, every one of the 256 possible byte values) is a token. Every word in the training corpus starts as a sequence of these base symbols, usually with an end-of-word marker so the tokenizer can tell "est" in "highest" apart from "est" in "establish".
+2. **Count all adjacent symbol pairs across the corpus.** For example, if the corpus (as symbol sequences) contains `l o w`, `l o w e r`, `n e w e s t`, `w i d e s t`, count how often each pair like `(l, o)`, `(o, w)`, `(e, s)`, `(s, t)` appears, weighted by word frequency.
+3. **Merge the single most frequent pair into a new symbol.** Say `(e, s)` is most frequent — it becomes a new token `es`, and every occurrence of adjacent `e s` in the corpus is replaced by `es`. This merge rule is recorded, in order, in a **merge table**.
+4. **Repeat steps 2–3** on the now-updated corpus (which contains the new merged symbols as candidates for further pairing) for a fixed number of merges — this merge count is chosen ahead of time and directly determines the final vocabulary size (base alphabet size + number of merges).
+5. **Stop when the merge budget is exhausted.** The final vocabulary is the base alphabet plus every merged symbol created along the way; the ordered merge table itself becomes the tokenizer.
+
+**At inference time**, tokenizing new text means applying the learned merges *in the same order they were learned*: split the input into base characters/bytes, then repeatedly apply the earliest-learned applicable merge until no more merges from the table apply. This is why BPE is deterministic and fast — it's a fixed greedy replay of a lookup table, not a search.
+
+$$
+\text{merge}^* = \arg\max_{(a,b)} \; \text{count}(a, b) \quad \text{over all adjacent symbol pairs in the corpus}
+$$
+
+<Mermaid chart={`
+graph TD
+  A["Corpus as character sequences: l o w, l o w e r, n e w e s t, w i d e s t"] --> B["Count all adjacent pairs"]
+  B --> C["Merge most frequent pair -> new token, e.g. (e,s) -> es"]
+  C --> D["Replace all occurrences in corpus"]
+  D --> E{"Merge budget reached?"}
+  E -->|No| B
+  E -->|Yes| F["Final vocabulary = base alphabet + ordered merge table"]
+`} />
+
+## WordPiece: Likelihood Instead of Raw Frequency
+
+WordPiece (used by BERT) follows the same iterative-merge skeleton as BPE but changes the criterion in step 3. Instead of merging whichever pair is simply most *frequent*, WordPiece merges whichever pair most increases the **likelihood of the training corpus** under a unigram language model built from the current vocabulary:
+
+$$
+\text{score}(a, b) = \frac{\text{count}(a, b)}{\text{count}(a) \cdot \text{count}(b)}
+$$
+
+This scores a candidate merge by how much more often the pair co-occurs than you'd expect if the two symbols were statistically independent — effectively favoring merges that fuse symbols which are unusually "glued together" in the data, rather than merges that are frequent only because their *constituent* symbols happen to be common (like merging two extremely common individual letters into a pair that isn't actually a meaningful unit). In practice this tends to produce slightly different, often more linguistically coherent, subword boundaries than raw-frequency BPE, though the two algorithms are close cousins.
+
+## SentencePiece: Tokenizing the Raw Stream
+
+Both BPE and WordPiece as described above assume a **pre-tokenization** step already happened — the text was already split into words (typically on whitespace) before the merge algorithm ever sees it. That assumption quietly bakes in a specific notion of "word boundary" that doesn't transfer to languages without whitespace-delimited words (Japanese, Chinese, Thai), and it also throws away the information of *where* whitespace occurred, which matters for faithfully reconstructing (detokenizing) the original string.
+
+SentencePiece (Kudo & Richardson, 2018) removes this assumption by treating the input as a **raw, uninterrupted stream of Unicode characters**, whitespace included — it typically encodes the space character itself as an ordinary symbol (visualized as `▁`, U+2581) rather than treating it as a delimiter to strip. BPE or a unigram-language-model algorithm (SentencePiece supports both as the underlying merge/segmentation method) then runs directly on this raw stream. Because whitespace is just another character in the stream, the resulting tokenization is:
+
+- **Language-agnostic** — no assumption that "words" are separated by spaces, so it works uniformly for English, Chinese, and everything in between.
+- **Perfectly reversible** — detokenization is just concatenating the token strings and mapping `▁` back to a space, with no heuristics needed to decide where spaces "should" go.
+
+<Callout type="note">
+  SentencePiece is a tokenization *framework*, not a competing merge criterion — it can run either the BPE merge algorithm or a probabilistic unigram segmentation algorithm internally. Its distinguishing contribution is the raw-stream input representation, not a new way of scoring merges.
+</Callout>
+
+## BPE vs. WordPiece vs. SentencePiece
+
+<ComparisonTable
+  headers={["Aspect", "BPE", "WordPiece", "SentencePiece"]}
+  rows={[
+    ["Merge criterion", "Raw pair frequency", "Pair co-occurrence likelihood (pointwise mutual information-like score)", "Frameworkable: BPE or unigram-LM segmentation"],
+    ["Requires pre-tokenization (whitespace split)?", "Typically yes (classic BPE); byte-level GPT-2 variant relaxes this somewhat", "Yes", "No — operates on the raw character/byte stream directly"],
+    ["Handles languages without whitespace well?", "Poorly, without adaptation", "Poorly, without adaptation", "Yes, by design"],
+    ["Reversible / lossless detokenization?", "Not guaranteed by design", "Not guaranteed by design", "Yes — whitespace is preserved as a token"],
+    ["Used by", "GPT-2/3/4 family (byte-level BPE), Llama (via SentencePiece's BPE mode)", "BERT, DistilBERT", "T5, Llama, XLNet, ALBERT, many multilingual models"],
+  ]}
+/>
+
+## Code Sketch: Training a Small BPE Tokenizer
+
+```python
+from tokenizers import Tokenizer, models, trainers, pre_tokenizers
+
+# Byte-level BPE, the scheme used by GPT-2/GPT-3/GPT-4-style models
+tokenizer = Tokenizer(models.BPE())
+tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+
+trainer = trainers.BpeTrainer(
+    vocab_size=32000,          # base alphabet (256 bytes) + this many merges
+    min_frequency=2,           # ignore pairs seen fewer than 2 times
+    special_tokens=["<pad>", "<bos>", "<eos>", "<unk>"],
+)
+
+files = ["corpus.txt"]
+tokenizer.train(files, trainer)
+
+encoded = tokenizer.encode("The tokenizer's merges determine everything downstream.")
+print(encoded.tokens)
+# e.g. ['The', 'Ġtoken', 'izer', "'s", 'Ġmerges', 'Ġdetermine', ...]
+```
+
+The `Ġ` (or `▁` in SentencePiece) marks a token that begins a new word, preserving the whitespace information that a naive character split would lose — this is exactly the detail that lets detokenization reconstruct the original string exactly.
+
+<KeyTakeaways items={[
+  "All three algorithms solve the same problem — bounded vocabulary, full coverage — by building subword units from characters/bytes upward.",
+  "BPE merges greedily by raw frequency; WordPiece merges by a likelihood/co-occurrence score, which can prefer meaningfully 'glued' units over merely common ones.",
+  "SentencePiece's core contribution is treating whitespace as part of the raw input stream, removing the whitespace-pre-tokenization assumption entirely — this is what makes it language-agnostic and perfectly reversible.",
+  "The merge table learned during training is applied deterministically and in order at inference time — tokenization of new text is a lookup replay, not a fresh optimization.",
+  "Vocabulary size is a hyperparameter chosen before training (via the merge budget) and directly trades off sequence length against embedding-table size.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Subword tokenization guarantees full coverage — any string can be represented, down to individual bytes if nothing else matches.",
+    "Common words remain single tokens (efficient), while rare/novel words decompose gracefully instead of becoming <unk>.",
+    "Fixed, deterministic vocabulary size makes embedding table size and softmax output size predictable at model design time.",
+  ]}
+  cons={[
+    "A common mistake: assuming a tokenizer trained on one language/domain transfers cleanly to another — vocabulary efficiency (tokens per word) degrades badly on out-of-distribution text, inflating sequence length and cost.",
+    "Forgetting that merge order matters at inference: manually splitting text 'by hand' before feeding a pretrained tokenizer, instead of letting it re-tokenize from raw text, can silently produce a different (wrong) token sequence than what the model saw during training.",
+    "Treating tokenization as purely a preprocessing detail — token boundaries affect arithmetic (digit grouping), code (whitespace/indentation), and multilingual fairness (some languages segment into far more tokens per word than others), all of which have measurable downstream effects on model behavior and cost.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "In BPE training, why does the algorithm start from individual characters or bytes rather than starting from whole words?",
+    options: [
+      "Characters train faster on GPUs",
+      "Starting from the smallest guaranteed-covered unit ensures every possible string can be represented, even ones never seen during training, since anything can be decomposed down to the base alphabet",
+      "It's required by the BPE compression algorithm's original 1994 specification",
+      "Whole words would make the vocabulary too small",
+    ],
+    answerIndex: 1,
+    explanation: "The base alphabet (all characters, or all 256 byte values) is finite and guaranteed to cover any input, however unusual. Building upward from there via merges means the tokenizer never truly fails on unseen text — it can always fall back to smaller, already-known pieces.",
+  },
+  {
+    question: "What is the key practical difference between WordPiece's merge criterion and BPE's, and what problem does it address?",
+    options: [
+      "WordPiece uses a neural network to score merges instead of counting",
+      "WordPiece merges by co-occurrence likelihood (normalized by each symbol's individual frequency) rather than raw pair frequency, which avoids favoring merges that are frequent merely because their individual pieces are common",
+      "There is no real difference — WordPiece is BPE renamed",
+      "WordPiece never merges symbols that appear at word boundaries",
+    ],
+    answerIndex: 1,
+    explanation: "Raw frequency merging can be dominated by pairs involving very common individual symbols even if the pair itself isn't a meaningful unit. WordPiece's likelihood-based score divides out each symbol's individual frequency, prioritizing pairs that co-occur more than chance would predict — a proxy for the pair forming a more meaningful subword.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Neural Machine Translation of Rare Words with Subword Units", authors: "Sennrich, R., Haddow, B., & Birch, A.", venue: "arXiv:1508.07909", year: 2015, url: "https://arxiv.org/abs/1508.07909" },
+  { title: "SentencePiece: A simple and language independent subword tokenizer and detokenizer for Neural Text Processing", authors: "Kudo, T. & Richardson, J.", venue: "arXiv:1808.06226", year: 2018, url: "https://arxiv.org/abs/1808.06226" },
+  { title: "Japanese and Korean Voice Search (WordPiece origin)", authors: "Schuster, M. & Nakajima, K.", venue: "ICASSP", year: 2012, url: "https://static.googleusercontent.com/media/research.google.com/en//pubs/archive/37842.pdf" },
+]} />

@@ -1,0 +1,202 @@
+---
+title: "Singular Value Decomposition (SVD)"
+description: "The one factorization that works for every matrix, square or not — and the mathematical engine behind PCA, recommender systems, and low-rank model compression."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["linear-algebra", "math", "svd", "dimensionality-reduction"]
+prerequisites: ["Eigenvalues & Eigenvectors", "Matrices & Matrix Operations", "Orthogonality"]
+---
+
+## Intuition
+
+Eigendecomposition is powerful, but it has a restrictive requirement: the matrix must be square, and even then it isn't guaranteed to have a full set of real eigenvectors. The **Singular Value Decomposition** fixes both problems. It says something remarkable: *any* matrix at all — square, rectangular, singular, whatever — can be broken down into a rotation, a scaling along orthogonal axes, and another rotation.
+
+<Callout type="tip" title="One-sentence definition">
+  Every matrix $A$ can be written as $A = U\Sigma V^\top$: rotate the input space ($V^\top$), stretch along orthogonal axes by nonnegative amounts ($\Sigma$), then rotate into the output space ($U$).
+</Callout>
+
+Think of $A$ as a machine that takes a unit sphere in the input space and maps it to an ellipse (or ellipsoid) in the output space. SVD identifies exactly that ellipsoid: $V$'s columns are the input directions that map to the ellipsoid's axes, $U$'s columns are those axes' directions in the output space, and $\Sigma$'s diagonal entries are the axes' lengths. This geometric fact — "every linear map takes spheres to ellipsoids" — is the entire content of the theorem.
+
+## Formal Definition
+
+For any real matrix $A \in \mathbb{R}^{m \times n}$, there exist orthogonal matrices $U \in \mathbb{R}^{m \times m}$, $V \in \mathbb{R}^{n \times n}$ and a diagonal (rectangular) matrix $\Sigma \in \mathbb{R}^{m \times n}$ such that:
+
+$$
+A = U \Sigma V^\top
+$$
+
+- $U = [u_1, \ldots, u_m]$ has orthonormal columns ($U^\top U = I_m$) called **left singular vectors**.
+- $V = [v_1, \ldots, v_n]$ has orthonormal columns ($V^\top V = I_n$) called **right singular vectors**.
+- $\Sigma$ has nonnegative entries $\sigma_1 \ge \sigma_2 \ge \cdots \ge \sigma_r > 0$ on its diagonal (where $r = \text{rank}(A)$) and zeros elsewhere — the **singular values**.
+
+Equivalently, in outer-product form:
+
+$$
+A = \sum_{i=1}^r \sigma_i\, u_i v_i^\top
+$$
+
+— $A$ is a sum of $r$ rank-1 matrices, each weighted by a singular value, ordered by decreasing importance. This form is exactly what makes low-rank approximation possible: truncate the sum after $k < r$ terms and you get the best possible rank-$k$ approximation to $A$ (in the least-squares sense — the **Eckart–Young theorem**).
+
+### Connection to Eigendecomposition
+
+SVD and eigendecomposition are related but distinct: SVD exists for *any* matrix (even non-square, even singular), while eigendecomposition requires a square matrix and isn't always available in real form.
+
+The connection: consider $A^\top A \in \mathbb{R}^{n \times n}$, which is always symmetric positive semi-definite. Substituting $A = U\Sigma V^\top$:
+
+$$
+A^\top A = (U\Sigma V^\top)^\top (U\Sigma V^\top) = V \Sigma^\top U^\top U \Sigma V^\top = V \Sigma^\top \Sigma V^\top = V (\Sigma^\top \Sigma) V^\top
+$$
+
+using $U^\top U = I$. This is exactly the eigendecomposition of $A^\top A$: the columns of $V$ are its eigenvectors, and $\Sigma^\top\Sigma$'s diagonal entries ($\sigma_i^2$) are its eigenvalues. Symmetrically, the columns of $U$ are the eigenvectors of $AA^\top$. So:
+
+$$
+\sigma_i = \sqrt{\lambda_i(A^\top A)}, \qquad v_i = \text{eigenvector of } A^\top A, \qquad u_i = \text{eigenvector of } AA^\top
+$$
+
+For a symmetric positive semi-definite matrix specifically, the SVD and the eigendecomposition coincide exactly ($U = V$, $\Sigma = \Lambda$) — see [Eigenvalues & Eigenvectors](/docs/foundations/linear-algebra/eigenvalues-eigenvectors) for why symmetric matrices guarantee real eigenvalues and orthogonal eigenvectors in the first place.
+
+## Derivation: SVD of a 2×3 Matrix
+
+Let $A = \begin{pmatrix} 3 & 0 & 0 \\ 0 & 0 & 2 \end{pmatrix}$.
+
+**Step 1 — compute $A A^\top$ (2×2, gives $U$ and $\Sigma^2$):**
+
+$$
+AA^\top = \begin{pmatrix} 3 & 0 & 0 \\ 0 & 0 & 2 \end{pmatrix}\begin{pmatrix} 3 & 0 \\ 0 & 0 \\ 0 & 2 \end{pmatrix} = \begin{pmatrix} 9 & 0 \\ 0 & 4 \end{pmatrix}
+$$
+
+This is already diagonal, so its eigenvalues are $9$ and $4$ with eigenvectors $e_1 = (1,0)^\top$ and $e_2 = (0,1)^\top$. So $U = I_2$ and singular values $\sigma_1 = 3, \sigma_2 = 2$ (already sorted descending).
+
+**Step 2 — compute $A^\top A$ (3×3, gives $V$):**
+
+$$
+A^\top A = \begin{pmatrix} 3 & 0 \\ 0 & 0 \\ 0 & 2 \end{pmatrix}\begin{pmatrix} 3 & 0 & 0 \\ 0 & 0 & 2 \end{pmatrix} = \begin{pmatrix} 9 & 0 & 0 \\ 0 & 0 & 0 \\ 0 & 0 & 4 \end{pmatrix}
+$$
+
+Eigenvalues $9, 4, 0$ with eigenvectors $(1,0,0)^\top$, $(0,0,1)^\top$, $(0,1,0)^\top$ respectively. Ordering by descending eigenvalue: $v_1 = (1,0,0)^\top$, $v_2 = (0,0,1)^\top$, $v_3 = (0,1,0)^\top$ (the third, for $\sigma=0$, spans the null space of $A$).
+
+**Step 3 — assemble.**
+
+$$
+U = \begin{pmatrix} 1 & 0 \\ 0 & 1 \end{pmatrix}, \quad
+\Sigma = \begin{pmatrix} 3 & 0 & 0 \\ 0 & 2 & 0 \end{pmatrix}, \quad
+V^\top = \begin{pmatrix} 1 & 0 & 0 \\ 0 & 0 & 1 \\ 0 & 1 & 0 \end{pmatrix}
+$$
+
+**Check:** $U\Sigma V^\top = \begin{pmatrix}1&0\\0&1\end{pmatrix}\begin{pmatrix}3&0&0\\0&2&0\end{pmatrix}\begin{pmatrix}1&0&0\\0&0&1\\0&1&0\end{pmatrix} = \begin{pmatrix}3&0&0\\0&2&0\end{pmatrix}\begin{pmatrix}1&0&0\\0&0&1\\0&1&0\end{pmatrix} = \begin{pmatrix}3&0&0\\0&0&2\end{pmatrix} = A$ ✓
+
+<Mermaid chart={`
+graph LR
+  X["Input sphere (unit vectors in R^n)"] -->|"rotate: V^T"| Y["Aligned axes"]
+  Y -->|"stretch: Σ (singular values)"| Z["Ellipsoid axes scaled"]
+  Z -->|"rotate: U"| W["Output ellipsoid in R^m"]
+`} />
+
+## Low-Rank Approximation (Eckart–Young)
+
+Truncating the sum $A = \sum_i \sigma_i u_i v_i^\top$ to the top $k$ terms gives:
+
+$$
+A_k = \sum_{i=1}^k \sigma_i u_i v_i^\top
+$$
+
+The Eckart–Young theorem states $A_k$ is the best rank-$k$ approximation to $A$ under both the Frobenius norm and the spectral (operator) norm:
+
+$$
+A_k = \underset{\text{rank}(B) \le k}{\arg\min} \|A - B\|_F
+$$
+
+with approximation error $\|A - A_k\|_F = \sqrt{\sum_{i=k+1}^r \sigma_i^2}$. This is precisely why truncated SVD is used for compression: keep only the largest singular values/vectors and discard the rest, with a *provably* minimal loss for that rank budget.
+
+## Code Example
+
+```python
+import numpy as np
+
+A = np.array([[3.0, 0.0, 0.0],
+              [0.0, 0.0, 2.0]])
+
+U, s, Vt = np.linalg.svd(A, full_matrices=True)
+print("U:\n", U)
+print("singular values:", s)      # [3. 2.]
+print("Vt:\n", Vt)
+
+# Reconstruct A from the factors
+Sigma = np.zeros_like(A)
+np.fill_diagonal(Sigma, s)
+A_reconstructed = U @ Sigma @ Vt
+print(np.allclose(A, A_reconstructed))  # True
+
+# Rank-k truncated SVD for low-rank approximation / compression
+def truncated_svd(A, k):
+    U, s, Vt = np.linalg.svd(A, full_matrices=False)
+    return U[:, :k] @ np.diag(s[:k]) @ Vt[:k, :]
+
+A_rank1 = truncated_svd(A, k=1)
+print(A_rank1)  # best rank-1 approximation of A
+```
+
+## Complexity
+
+| Operation | Time complexity | Space |
+| --- | --- | --- |
+| Full SVD, dense $m \times n$ (via bidiagonalization + QR-like iteration) | $O(mn \cdot \min(m,n))$ | $O(mn)$ |
+| Truncated SVD (top-$k$, via randomized algorithms) | $O(mn\,k)$ approximately | $O((m+n)k)$ |
+| Reconstructing $A$ from top-$k$ factors | $O(mnk)$ | $O((m+n)k)$ |
+
+<KeyTakeaways items={[
+  "SVD exists for every real (or complex) matrix, no matter the shape or rank — unlike eigendecomposition, which requires a square matrix.",
+  "The singular values of A are the square roots of the eigenvalues of A^T A (equivalently AA^T); V's columns are eigenvectors of A^T A, U's columns are eigenvectors of AA^T.",
+  "A = sum of sigma_i * u_i * v_i^T, ordered by decreasing sigma_i — truncating this sum gives the provably-optimal low-rank approximation (Eckart-Young theorem).",
+  "For a symmetric positive semi-definite matrix, SVD and eigendecomposition are literally the same decomposition (U = V, Sigma = Lambda).",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Using SVD (not eigendecomposition) whenever the matrix is non-square or you need guaranteed real, nonnegative scaling factors.",
+    "Reaching for truncated/randomized SVD for large matrices instead of computing the full decomposition when only the top-k components are needed.",
+  ]}
+  cons={[
+    "Confusing singular values with eigenvalues in general — they coincide only for symmetric PSD matrices; for a general matrix, eigenvalues can even be negative or complex while singular values are always real and nonnegative.",
+    "Assuming U and V are the same matrix — they're generally different, living in different spaces (R^m and R^n respectively) unless A is square and symmetric PSD.",
+    "Forgetting that the 'thin'/'economy' SVD (only the first r or k columns of U and V) is what libraries return by default in some conventions — always check whether full_matrices is True or False.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why are the singular values of A always real and nonnegative, even when A itself has negative or complex eigenvalues?",
+    options: [
+      "Because A is always symmetric",
+      "Because singular values are defined as sqrt(lambda_i(A^T A)), and A^T A is always symmetric positive semi-definite, so its eigenvalues are always real and non-negative, making the square root well-defined and real",
+      "Because SVD only applies to matrices that already have real eigenvalues",
+      "Singular values can be negative; this is a common misconception",
+    ],
+    answerIndex: 1,
+    explanation: "A^T A is symmetric for any A (since (A^T A)^T = A^T A) and positive semi-definite (since x^T A^T A x = ||Ax||^2 >= 0 for all x). By the spectral theorem, symmetric matrices have real eigenvalues, and PSD matrices have non-negative ones — so sqrt(lambda_i) is always real and non-negative, regardless of what A's own eigenvalues look like.",
+  },
+  {
+    question: "What guarantee does the Eckart-Young theorem give about the truncated SVD A_k = sum_{i=1}^k sigma_i u_i v_i^T?",
+    options: [
+      "A_k is guaranteed to have the same rank as A",
+      "A_k is the best possible rank-k approximation to A, minimizing the Frobenius (and spectral) norm of the reconstruction error among ALL rank-k matrices, not just other SVD truncations",
+      "A_k always perfectly reconstructs A regardless of k",
+      "The theorem only applies to square matrices",
+    ],
+    answerIndex: 1,
+    explanation: "Eckart-Young proves that among every possible rank-k matrix B (not just SVD-derived ones), the truncated SVD A_k minimizes ||A - B||_F, with error exactly sqrt(sum of the discarded squared singular values). This optimality is what justifies using truncated SVD for compression and denoising.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Introduction to Linear Algebra", authors: "Gilbert Strang", venue: "Wellesley-Cambridge Press", year: 2023 },
+  { title: "Matrix Computations", authors: "Gene H. Golub, Charles F. Van Loan", venue: "Johns Hopkins University Press", year: 2013 },
+  { title: "Numerical Linear Algebra", authors: "Lloyd N. Trefethen, David Bau III", venue: "SIAM", year: 1997 },
+]} />

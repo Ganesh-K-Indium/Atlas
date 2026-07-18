@@ -1,0 +1,229 @@
+---
+title: "Dimensionality Reduction (t-SNE, UMAP)"
+description: "How two nonlinear embedding algorithms turn pairwise similarity into a 2-D picture — and why the neighborhoods they preserve are trustworthy but the distances between clusters usually aren't."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["machine-learning", "unsupervised-learning", "dimensionality-reduction", "t-sne", "umap", "visualization"]
+prerequisites: ["Probability distributions (Gaussian)", "KL divergence", "Gradient descent", "Eigenvalues & Eigenvectors"]
+---
+
+<Prerequisites items={[
+  "KL divergence and basic information theory",
+  "Gradient-based optimization",
+  "Nearest-neighbor graphs",
+  "Eigenvalues & Eigenvectors (helpful for contrasting with PCA)",
+]} />
+
+## Intuition
+
+Linear methods like PCA project high-dimensional data onto the directions of largest variance — but they can only ever produce a linear "shadow" of the data. If your data lies on a curved manifold (imagine a Swiss roll), a linear projection tangles points that were actually far apart along the manifold. t-SNE and UMAP instead try to preserve *local neighborhood structure*: the goal is that points which were close together in the original high-dimensional space stay close together in the 2-D or 3-D embedding, even if that requires drastically distorting global distances and angles to make it fit.
+
+<Callout type="tip" title="One-sentence core idea">
+  Both t-SNE and UMAP convert pairwise distances into a notion of "neighborhood probability" in high dimensions, then search for a low-dimensional layout whose induced neighborhood probabilities match as closely as possible — t-SNE by minimizing KL divergence between probability distributions, UMAP by minimizing cross-entropy between fuzzy set memberships.
+</Callout>
+
+## Formal Definition / Theory
+
+### t-SNE: probabilities over neighbors
+
+**High-dimensional similarities.** For each point $x_i$, t-SNE defines a conditional probability that $x_j$ would be picked as $x_i$'s neighbor, using a Gaussian centered at $x_i$:
+
+$$
+p_{j|i} = \frac{\exp(-\lVert x_i - x_j \rVert^2 / 2\sigma_i^2)}{\sum_{k \neq i} \exp(-\lVert x_i - x_k \rVert^2 / 2\sigma_i^2)}
+$$
+
+The bandwidth $\sigma_i$ is chosen *per point* (via binary search) so that the resulting distribution has a fixed **perplexity**, an information-theoretic proxy for "effective number of neighbors":
+
+$$
+\text{Perp}(P_i) = 2^{H(P_i)}, \qquad H(P_i) = -\sum_j p_{j|i} \log_2 p_{j|i}
+$$
+
+Perplexity (typically 5–50) directly trades off local vs. global structure: low perplexity makes $\sigma_i$ small, focusing on very close neighbors and revealing fine-grained clusters; high perplexity widens the effective neighborhood and can merge or blur small clusters. It is the single most important t-SNE hyperparameter, and results can change qualitatively across its range — always try several values.
+
+The conditional probabilities are symmetrized into a joint distribution: $p_{ij} = \frac{p_{j|i} + p_{i|j}}{2n}$.
+
+**Low-dimensional similarities.** In the embedding space, t-SNE defines similarities with a **Student-t distribution with one degree of freedom** (heavier tails than a Gaussian) instead of a Gaussian:
+
+$$
+q_{ij} = \frac{(1 + \lVert y_i - y_j \rVert^2)^{-1}}{\sum_{k \neq l} (1 + \lVert y_k - y_l \rVert^2)^{-1}}
+$$
+
+The heavy tail is deliberate: it solves the **crowding problem** — in high dimensions there is exponentially more "room" at moderate distances than in 2-D, so a Gaussian in the embedding would force moderately-distant high-D points to be crushed together. The Student-t's heavier tail lets moderately dissimilar points be placed farther apart in the embedding without paying a large cost, freeing up space for genuinely close points to cluster tightly.
+
+**Objective.** t-SNE minimizes the KL divergence between the two joint distributions, over the embedding coordinates $\{y_i\}$:
+
+$$
+C = \mathrm{KL}(P \| Q) = \sum_{i \neq j} p_{ij} \log \frac{p_{ij}}{q_{ij}}
+$$
+
+This asymmetric objective heavily penalizes placing points close in $Q$ when they were far in $P$ (small $q_{ij}$, large $p_{ij}$ blows up the term) but only mildly penalizes the reverse — which is why t-SNE preserves local neighborhoods faithfully but is notoriously unreliable for interpreting *global* distances between clusters or their relative sizes.
+
+### UMAP: fuzzy simplicial sets and cross-entropy
+
+UMAP is grounded in topological data analysis rather than probability theory directly, but the practical mechanism is comparable. For each point $x_i$, UMAP finds its $k$ approximate nearest neighbors and constructs a **fuzzy simplicial set** — essentially a weighted graph where the edge weight between $x_i$ and neighbor $x_j$ decays with distance, again governed by a per-point normalization (analogous in spirit to perplexity, controlled by the `n_neighbors` hyperparameter):
+
+$$
+w_{i}(x_i, x_j) = \exp\left(-\frac{\max(0, d(x_i,x_j) - \rho_i)}{\sigma_i}\right)
+$$
+
+where $\rho_i$ is the distance to the nearest neighbor (ensuring every point is connected to at least its closest neighbor with weight 1) and $\sigma_i$ is calibrated so the sum of weights equals $\log_2(\text{n\_neighbors})$. The directed graphs from $i \to j$ and $j \to i$ are symmetrized via a fuzzy-set union: $w_{ij} = w_i + w_j - w_i w_j$.
+
+**Low-dimensional side.** UMAP fits a smooth curve $\frac{1}{1 + a \lVert y_i - y_j \rVert^{2b}}$ (parameters $a, b$ fit to approximate a fixed target shape) as the low-dimensional edge weight — playing the same role as the Student-t kernel in t-SNE.
+
+**Objective.** Instead of KL divergence, UMAP minimizes the (fuzzy set) **cross-entropy** between high- and low-dimensional edge weights:
+
+$$
+C = \sum_{(i,j)} \left[ w_{ij} \log \frac{w_{ij}}{w'_{ij}} + (1 - w_{ij}) \log \frac{1 - w_{ij}}{1 - w'_{ij}} \right]
+$$
+
+Because cross-entropy includes a term for the *absence* of an edge ($1 - w_{ij}$ vs. $1 - w'_{ij}$), UMAP explicitly penalizes false negatives (points that should be far apart but end up close) as well as false positives, giving it a more balanced attraction/repulsion dynamic than t-SNE's KL divergence. In practice, this is optimized via stochastic gradient descent with negative sampling (only a subsample of non-neighbor pairs is used per step for the repulsive term), which is a major reason UMAP is markedly faster than t-SNE at scale.
+
+## Mechanism: what actually distinguishes them
+
+| Aspect | t-SNE | UMAP |
+| --- | --- | --- |
+| Underlying theory | Probability distributions (SNE family) | Riemannian geometry / fuzzy topology (simplicial sets) |
+| High-D kernel | Gaussian | Exponential decay from a smooth local metric |
+| Low-D kernel | Student-t (1 d.o.f., heavy-tailed) | Rational function fit to a target curve |
+| Loss | KL divergence (asymmetric) | Fuzzy cross-entropy (accounts for absent edges too) |
+| Optimization | Full gradient descent with early exaggeration | SGD with negative sampling — far fewer pairwise evaluations |
+| Global structure | Poor — cluster distances/sizes are not meaningful | Better preserved, though still not literal Euclidean distances |
+| Speed at scale | Slow, roughly quadratic without approximations (Barnes-Hut brings this to $O(n \log n)$) | Faster in practice due to approximate nearest-neighbor search + SGD |
+
+Both algorithms build a neighbor graph first (t-SNE conceptually via the Gaussian kernel bandwidth, UMAP explicitly via approximate k-NN), then optimize an embedding to reproduce that graph's structure at low dimension — the difference is the specific probabilistic/topological model of "neighborhood" and the loss function used to match it.
+
+<Mermaid chart={`
+graph TD
+  A["High-dimensional data X"] --> B["Build neighbor structure"]
+  B -->|t-SNE: Gaussian kernel, perplexity-calibrated bandwidth| C["Pairwise probabilities P"]
+  B -->|UMAP: k-NN graph, fuzzy simplicial set| D["Fuzzy edge weights W"]
+  C --> E["Initialize low-D embedding Y"]
+  D --> E
+  E --> F["Compute low-D similarities<br/>(Student-t for t-SNE, rational curve for UMAP)"]
+  F --> G["Minimize KL divergence (t-SNE)<br/>or cross-entropy (UMAP) via gradient descent"]
+  G --> H["2D/3D embedding"]
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+from sklearn.datasets import load_digits
+from sklearn.manifold import TSNE
+import umap  # pip install umap-learn
+
+X, y = load_digits(return_X_y=True)
+
+# t-SNE
+tsne = TSNE(n_components=2, perplexity=30, init="pca", random_state=42)
+X_tsne = tsne.fit_transform(X)
+
+# UMAP
+reducer = umap.UMAP(n_components=2, n_neighbors=15, min_dist=0.1, random_state=42)
+X_umap = reducer.fit_transform(X)
+```
+
+### Simplified t-SNE gradient step (conceptual NumPy sketch)
+
+```python
+import numpy as np
+
+def tsne_gradient_step(P, Y, learning_rate=200.0):
+    """One gradient-descent step of t-SNE given fixed P (n x n symmetric probs)."""
+    n = Y.shape[0]
+    # Pairwise squared distances in low-D space
+    sq_dists = np.sum((Y[:, None, :] - Y[None, :, :]) ** 2, axis=2)
+    inv_dists = 1.0 / (1.0 + sq_dists)
+    np.fill_diagonal(inv_dists, 0.0)
+    Q = inv_dists / inv_dists.sum()
+
+    # Gradient of KL(P || Q) w.r.t. each y_i (van der Maaten & Hinton, 2008)
+    PQ_diff = (P - Q)[:, :, None]                 # (n, n, 1)
+    diffs = Y[:, None, :] - Y[None, :, :]          # (n, n, d)
+    grad = 4 * np.sum(PQ_diff * diffs * inv_dists[:, :, None], axis=1)
+
+    Y_new = Y - learning_rate * grad
+    return Y_new
+```
+
+## Complexity
+
+| Method | Time complexity | Space complexity | Notes |
+| --- | --- | --- | --- |
+| t-SNE (naive) | $O(n^2)$ per iteration | $O(n^2)$ | Barnes-Hut approximation reduces to $O(n \log n)$; still typically capped around tens of thousands of points |
+| UMAP | $O(n^{1.14})$ empirically (approx. k-NN + SGD) | $O(n \cdot k)$ (sparse graph) | Scales to millions of points in practice |
+
+<ComparisonTable
+  headers={["Property", "t-SNE", "UMAP"]}
+  rows={[
+    ["Theoretical grounding", "Probability / information theory (SNE)", "Topological data analysis (fuzzy simplicial sets)"],
+    ["Preserves local structure", "Yes, strongly", "Yes, strongly"],
+    ["Preserves global structure", "Poor — cluster sizes/distances not meaningful", "Better, though still approximate"],
+    ["Speed on large datasets", "Slow (even with Barnes-Hut)", "Fast — scales to millions of points"],
+    ["Can embed new points (out-of-sample)", "No, must rerun (parametric variants exist separately)", "Yes, via `.transform()` on a fitted model"],
+    ["Key hyperparameter", "Perplexity (effective neighbor count)", "n_neighbors and min_dist"],
+    ["Deterministic given seed", "Yes", "Yes"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Both t-SNE and UMAP convert distances into neighbor probabilities/weights in high-D, then optimize a low-D layout to match those neighbor relationships — they are 'neighbor graph preservation' methods, not variance-preservation methods like PCA.",
+  "t-SNE uses a Gaussian kernel in high-D and a heavy-tailed Student-t kernel in low-D specifically to solve the 'crowding problem'; it minimizes asymmetric KL divergence, which is why local clusters look great but inter-cluster distances and sizes are not trustworthy.",
+  "UMAP builds an explicit approximate k-NN graph and fuzzy simplicial set, then minimizes a cross-entropy that penalizes both false-positive and false-negative neighbor relationships, giving somewhat better global structure preservation and much faster optimization via negative sampling.",
+  "Never read cluster sizes, densities, or inter-cluster distances literally off a t-SNE or UMAP plot — only the local neighborhood groupings are meaningful; always sanity-check with multiple perplexity/n_neighbors values before drawing conclusions.",
+]} />
+
+<ProsCons
+  pros={[
+    "t-SNE: excellent, well-established local structure preservation for visualization; strong track record in high-dimensional biological and NLP embedding visualization.",
+    "UMAP: much faster, scales to large datasets, supports transforming new/unseen points, often preserves more global structure than t-SNE.",
+  ]}
+  cons={[
+    "t-SNE: computationally expensive at scale, no native out-of-sample extension, results can vary significantly with the perplexity hyperparameter and even the random seed.",
+    "UMAP: more hyperparameters interact in less intuitive ways (n_neighbors, min_dist, metric); like t-SNE, it can still produce visually convincing but geometrically misleading cluster separations if over-interpreted.",
+  ]}
+/>
+
+## Common Mistakes
+
+- Interpreting distances *between* clusters in a t-SNE/UMAP plot as meaningful — both algorithms preserve local neighborhoods, not global metric structure, so two well-separated blobs in the plot are not necessarily "more different" than two nearby blobs.
+- Using a single perplexity or n_neighbors value and treating the resulting plot as ground truth — always run a small sweep, since apparent cluster count and shape can change qualitatively.
+- Running t-SNE/UMAP directly on very high-dimensional raw data (e.g. thousands of pixel features) without first reducing dimensionality with PCA — this is both slow and noisy; a common pipeline is PCA to ~50 dimensions, then t-SNE/UMAP to 2-D.
+- Forgetting to fix the random seed and then comparing two "different" plots as if they reflect a real change in structure, when it's just embedding-optimization stochasticity.
+- Using t-SNE output as features for a downstream supervised model — the embedding is optimized for visualization/local neighbor preservation, not for a well-behaved coordinate system, and distances are not meaningful outside the plot.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does t-SNE use a Student-t distribution (heavy-tailed) for similarities in the low-dimensional embedding but a Gaussian for the high-dimensional similarities?",
+    options: [
+      "It's an arbitrary choice with no mathematical justification",
+      "The Student-t distribution is faster to compute than a Gaussian",
+      "It solves the 'crowding problem': high-dimensional space has exponentially more room at moderate distances than 2-D/3-D space, so using a Gaussian in the embedding would force moderately dissimilar points to be crushed together; the heavy tail lets them sit farther apart at low cost, freeing space for truly close points to form tight clusters",
+      "Because the Student-t distribution guarantees convergence to the global optimum",
+    ],
+    answerIndex: 2,
+    explanation: "The crowding problem arises because volume grows much faster with distance in high dimensions than in 2 or 3 dimensions. If low-D similarities used a Gaussian too, there wouldn't be enough 'room' to represent all the moderate-distance relationships faithfully, causing points to collapse together. The Student-t's heavier tail assigns non-negligible similarity even at larger low-D distances, relieving this pressure.",
+  },
+  {
+    question: "A colleague concludes from a UMAP plot that 'Cluster A and Cluster B are twice as far apart as Cluster A and Cluster C, so A and B are twice as dissimilar.' What's wrong with this reasoning?",
+    options: [
+      "Nothing — UMAP explicitly preserves global Euclidean distances between clusters",
+      "UMAP (like t-SNE) is optimized to preserve local neighborhood relationships (via cross-entropy over a k-NN-based fuzzy graph), not literal global distances; inter-cluster gaps and their relative sizes in the embedding are an artifact of the layout optimization, not a calibrated dissimilarity measure",
+      "The reasoning is correct only if min_dist is set to zero",
+      "UMAP distances are meaningful, but only when using the cosine metric",
+    ],
+    answerIndex: 1,
+    explanation: "UMAP's objective focuses on making the embedding's local neighbor structure match the high-dimensional fuzzy graph — it does not calibrate global inter-cluster distances to any particular meaningful scale. While UMAP tends to preserve more of the coarse global layout than t-SNE, treating the absolute or relative distances between separated clusters as a quantitative dissimilarity measure is a common and unjustified over-interpretation.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Visualizing Data using t-SNE", authors: "Laurens van der Maaten, Geoffrey Hinton", venue: "Journal of Machine Learning Research (JMLR)", year: 2008, url: "https://www.jmlr.org/papers/v9/vandermaaten08a.html" },
+  { title: "UMAP: Uniform Manifold Approximation and Projection for Dimension Reduction", authors: "Leland McInnes, John Healy, James Melville", venue: "arXiv", year: 2018, url: "https://arxiv.org/abs/1802.03426" },
+  { title: "Accelerating t-SNE using Tree-Based Algorithms", authors: "Laurens van der Maaten", venue: "Journal of Machine Learning Research (JMLR)", year: 2014 },
+]} />

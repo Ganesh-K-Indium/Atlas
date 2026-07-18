@@ -1,0 +1,181 @@
+---
+title: "Word & Token Embeddings"
+description: "From one fixed vector per word to a vector that shifts with every sentence it appears in — how embeddings absorbed the context Transformers made available."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "embeddings", "word2vec", "glove", "representation-learning"]
+prerequisites: ["Vectors and dot products", "Basic neural network training", "Matrix factorization (helpful, not required)"]
+---
+
+## Intuition
+
+Underneath every embedding technique in this history is one idea, stated by linguist J.R. Firth in 1957: **"You shall know a word by the company it keeps."** This is the **distributional hypothesis** — words that tend to occur in similar contexts tend to have similar meanings. "Dog" and "cat" both appear near "pet," "vet," "leash," "food" far more often than either appears near "quantum" or "spreadsheet" — and that statistical pattern alone, with no dictionary definitions involved, is enough to learn that "dog" and "cat" are semantically related.
+
+Every method below is a different way of turning co-occurrence statistics into vectors, and the biggest split in the family tree is: does a word get **one fixed vector for all its uses**, or does its vector **change depending on the sentence it's in**?
+
+<Callout type="tip" title="The one-sentence idea">
+  Static embeddings (Word2Vec, GloVe) learn one vector per word type by exploiting which words co-occur across a whole corpus; contextual embeddings (BERT/GPT-style Transformers) compute a fresh vector per word token by letting it attend to its actual surrounding words at inference time — the same underlying distributional signal, captured at two different granularities.
+</Callout>
+
+## Static Embeddings: One Vector Per Word
+
+### Word2Vec: Predict Context from Word, or Word from Context
+
+Word2Vec (Mikolov et al., 2013) learns embeddings purely as a byproduct of a simple prediction task — the embeddings are the weights of a shallow network trained to solve it, not the direct target. Two variants:
+
+- **Skip-gram**: given the current word, predict each of its surrounding context words (within a fixed window). The objective, for a corpus of words $w_1, \ldots, w_T$ and context window size $c$:
+
+$$
+\mathcal{L}_{\text{skip-gram}} = \sum_{t=1}^{T} \sum_{-c \le j \le c,\, j \ne 0} \log p(w_{t+j} \mid w_t)
+$$
+
+- **CBOW (Continuous Bag of Words)**: the mirror image — given the surrounding context words, predict the current word.
+
+$$
+p(w_t \mid w_t) \; \text{modeled via} \; p(w_O \mid w_I) = \frac{\exp(v_{w_O}^\top v_{w_I})}{\sum_{w=1}^{V} \exp(v_w^\top v_{w_I})}
+$$
+
+Computing that softmax's denominator over the full vocabulary $V$ at every training step is expensive, so in practice Word2Vec is trained with **negative sampling**: instead of normalizing over the whole vocabulary, the model is trained to distinguish the true context word from a handful of randomly sampled "negative" words — turning a $V$-way classification into a small number of binary classifications per step, which is what actually makes training on billion-word corpora tractable.
+
+After training, the input-side weight matrix (the mapping from one-hot word to hidden vector) *is* the embedding table — each row is that word's static vector, and words that appeared in similar contexts end up with similar vectors purely because they had to make similar context predictions.
+
+### GloVe: Factorize the Co-occurrence Matrix Directly
+
+GloVe (Pennington, Socher & Manning, 2014) takes a more direct route to the same distributional signal. Instead of a prediction task, it explicitly builds a **word–word co-occurrence matrix** $X$, where $X_{ij}$ counts how often word $j$ appears in the context of word $i$ across the whole corpus, then learns vectors $w_i, w_j$ (and biases $b_i, b_j$) whose dot product approximates the *log* of that co-occurrence count:
+
+$$
+J = \sum_{i,j=1}^{V} f(X_{ij}) \left( w_i^\top \tilde{w}_j + b_i + \tilde{b}_j - \log X_{ij} \right)^2
+$$
+
+where $f(X_{ij})$ is a weighting function that down-weights extremely frequent pairs (like "the" with everything) so they don't dominate the loss. This is, in effect, a weighted low-rank matrix factorization of the log co-occurrence matrix — GloVe's embeddings are literally the factors of a global count statistic, whereas Word2Vec's are the incidental weights of a local prediction task. Empirically the two produce embeddings with broadly similar geometric properties (including the famous analogy arithmetic, e.g. king − man + woman ≈ queen).
+
+<Mermaid chart={`
+graph TD
+  A["Corpus"] --> B["Word2Vec: local prediction task (skip-gram / CBOW)"]
+  A --> C["GloVe: global co-occurrence matrix X"]
+  B --> D["Input-layer weights become static word vectors"]
+  C --> E["Factorize log(X) into vectors via weighted least squares"]
+  D --> F["One fixed vector per word type"]
+  E --> F
+`} />
+
+## The Ceiling of Static Embeddings
+
+A static embedding gives "bank" exactly one vector — the same vector whether it appears in "river bank" or "savings bank." Any polysemy (multiple meanings) or context-dependent nuance simply cannot be represented, because the vector is looked up from a fixed table indexed by word type, with no way to see the sentence around it.
+
+## Contextual Embeddings: A Vector Per Token, Computed From Its Context
+
+Transformer-based language models replace the fixed lookup table with a computation: each token starts from a static embedding (its row in an embedding table, just like before) but that vector is then repeatedly updated by self-attention layers that mix in information from every other token in the sequence. The final hidden state for "bank" in "I deposited money at the bank" and the final hidden state for "bank" in "I sat on the river bank" start from the same row of the embedding table but end up as different vectors, because they attended to different surrounding tokens.
+
+$$
+h_i^{(l)} = \text{TransformerLayer}\left(h_i^{(l-1)}, \{h_1^{(l-1)}, \ldots, h_n^{(l-1)}\}\right)
+$$
+
+This is still the distributional hypothesis at work — "you shall know a word by the company it keeps" — just applied at inference time to the *specific* company a token keeps in *this* sentence, rather than baked in once as an average over the entire training corpus.
+
+<Callout type="note">
+  Static embeddings didn't disappear inside modern LLMs — they're still the very first layer (the token embedding table that turns a token ID into an initial vector). What changed is that this is now only the *starting point*; the representation actually used for prediction is the output of many Transformer layers of context-mixing on top of it.
+</Callout>
+
+## Static vs. Contextual Embeddings
+
+<ComparisonTable
+  headers={["Aspect", "Static (Word2Vec / GloVe)", "Contextual (Transformer-based)"]}
+  rows={[
+    ["Vectors per word", "One, fixed after training", "One per occurrence — varies with surrounding context"],
+    ["Handles polysemy (bank/bank)?", "No — single vector averages all senses", "Yes — different sentences produce different vectors"],
+    ["Training signal", "Local context prediction (Word2Vec) or global co-occurrence factorization (GloVe)", "Next-token / masked-token prediction through self-attention over the full sequence"],
+    ["Inference cost to get a representation", "O(1) lookup", "A full forward pass through the network"],
+    ["Typical use today", "Lightweight baselines, some retrieval systems, interpretability research", "Virtually all modern LLMs and embedding models (e.g. sentence-embedding models built on top of Transformer encoders)"],
+  ]}
+/>
+
+## Code Sketch
+
+```python
+# Static: Word2Vec via gensim
+from gensim.models import Word2Vec
+
+sentences = [["the", "cat", "sat", "on", "the", "mat"], ["the", "dog", "sat", "on", "the", "rug"]]
+model = Word2Vec(sentences, vector_size=100, window=5, sg=1, negative=5, min_count=1)
+vec_cat = model.wv["cat"]                     # one fixed 100-d vector for "cat"
+model.wv.most_similar("cat")                  # neighbors by cosine similarity
+
+# Contextual: same word, two different vectors depending on sentence
+from transformers import AutoTokenizer, AutoModel
+import torch
+
+tok = AutoTokenizer.from_pretrained("bert-base-uncased")
+enc = AutoModel.from_pretrained("bert-base-uncased")
+
+def token_vector(sentence, word):
+    inputs = tok(sentence, return_tensors="pt")
+    with torch.no_grad():
+        hidden = enc(**inputs).last_hidden_state[0]     # [seq_len, hidden_dim]
+    idx = tok.convert_ids_to_tokens(inputs["input_ids"][0]).index(word)
+    return hidden[idx]
+
+v1 = token_vector("I deposited money at the bank", "bank")
+v2 = token_vector("I sat on the river bank", "bank")
+# v1 and v2 are different vectors — same token ID, different context
+```
+
+<KeyTakeaways items={[
+  "The distributional hypothesis — words are characterized by the contexts they occur in — underlies both static and contextual embeddings; only the mechanism for exploiting it differs.",
+  "Word2Vec learns embeddings as a byproduct of a local next-word-in-context prediction task (skip-gram/CBOW), made tractable at scale via negative sampling.",
+  "GloVe learns embeddings by directly factorizing a global word-word co-occurrence matrix in log-space, a more direct but conceptually equivalent route to the same distributional signal.",
+  "Static embeddings assign exactly one vector per word type, which caps their ability to represent polysemy or context-dependent meaning.",
+  "Contextual embeddings (Transformer hidden states) compute a fresh vector per token occurrence by mixing in the actual surrounding tokens via self-attention, resolving the polysemy limitation at the cost of requiring a full forward pass.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Static embeddings are cheap to compute and store (a single lookup table), useful when latency or memory budgets rule out running a full Transformer forward pass.",
+    "Contextual embeddings capture polysemy, negation, and long-range dependencies that static embeddings structurally cannot.",
+    "Both families are trained without labeled data — the supervision signal comes entirely from raw text structure (the distributional hypothesis in action).",
+  ]}
+  cons={[
+    "A common mistake: using a static embedding's nearest-neighbor list as evidence of 'true' meaning similarity — it reflects co-occurrence statistics, not semantics, so systematic corpus biases (including social biases) get baked directly into the vector geometry.",
+    "Assuming contextual embeddings from a specific layer are 'the' representation to use for a downstream task — different Transformer layers capture different levels of abstraction (more syntactic in early layers, more semantic in later ones for many models), and the best layer to probe is task-dependent, not fixed.",
+    "Comparing a static embedding's cosine similarity directly against a contextual model's token vector as if they're the same kind of object — contextual vectors are only meaningful in reference to the specific sentence they were computed from.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why can't a static embedding (Word2Vec or GloVe) represent the fact that 'bank' means something different in 'river bank' versus 'savings bank'?",
+    options: [
+      "Because the vocabulary size is too small to include both meanings",
+      "Because each word type is assigned exactly one fixed vector after training, looked up from a table with no access to the surrounding sentence — there's no mechanism for the vector to vary by context",
+      "Because negative sampling specifically prevents polysemous words from being learned",
+      "This is incorrect — static embeddings do handle polysemy correctly",
+    ],
+    answerIndex: 1,
+    explanation: "Static embeddings are a fixed lookup table indexed only by word identity. Once trained, 'bank' always retrieves the same row, which necessarily reflects some blend/average of all the contexts it appeared in during training — it structurally cannot shift per sentence, which is exactly the gap contextual embeddings close.",
+  },
+  {
+    question: "What is the key structural difference between how Word2Vec and GloVe each arrive at word vectors?",
+    options: [
+      "GloVe uses a neural network while Word2Vec uses linear algebra — the opposite of what's commonly claimed",
+      "Word2Vec's vectors emerge as the weights of a network trained on a local context-prediction task, while GloVe's vectors are learned by directly factorizing a global word-word co-occurrence matrix in log-space",
+      "There is no real difference; GloVe is just Word2Vec with a different name",
+      "Word2Vec requires labeled sentiment data while GloVe does not",
+    ],
+    answerIndex: 1,
+    explanation: "Word2Vec never explicitly builds a co-occurrence matrix — its vectors fall out incidentally from training a shallow predictor (skip-gram or CBOW). GloVe instead explicitly constructs the corpus-wide co-occurrence matrix and directly factorizes its log-counts into vectors via a weighted least-squares objective.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Efficient Estimation of Word Representations in Vector Space", authors: "Mikolov, T., Chen, K., Corrado, G., & Dean, J.", venue: "arXiv:1301.3781", year: 2013, url: "https://arxiv.org/abs/1301.3781" },
+  { title: "Distributed Representations of Words and Phrases and their Compositionality (negative sampling)", authors: "Mikolov, T., Sutskever, I., Chen, K., Corrado, G., & Dean, J.", venue: "NeurIPS", year: 2013, url: "https://arxiv.org/abs/1310.4546" },
+  { title: "GloVe: Global Vectors for Word Representation", authors: "Pennington, J., Socher, R., & Manning, C.", venue: "EMNLP", year: 2014, url: "https://nlp.stanford.edu/pubs/glove.pdf" },
+  { title: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding", authors: "Devlin, J., Chang, M., Lee, K., & Toutanova, K.", venue: "NAACL", year: 2019, url: "https://arxiv.org/abs/1810.04805" },
+]} />

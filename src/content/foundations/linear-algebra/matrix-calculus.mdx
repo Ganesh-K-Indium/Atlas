@@ -1,0 +1,240 @@
+---
+title: "Matrix Calculus"
+description: "The chain rule, generalized to vectors and matrices — the exact machinery backpropagation runs on, derived term by term instead of taken on faith."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["linear-algebra", "math", "calculus", "backpropagation"]
+prerequisites: ["Matrices & Matrix Operations", "Vectors & Vector Spaces", "Single-variable calculus"]
+---
+
+## Intuition
+
+Neural network training is, at its core, computing the derivative of a scalar loss with respect to thousands or billions of parameters arranged in vectors and matrices. Doing this one scalar partial derivative at a time would be hopeless — matrix calculus gives you a compact notation and a small set of identities that let you differentiate through entire layers at once, which is exactly what `loss.backward()` is executing under the hood.
+
+<Callout type="tip" title="One-sentence definition">
+  Matrix calculus organizes all the partial derivatives of a function into a vector, matrix, or higher-order array whose shape mirrors the function's inputs and outputs, and gives chain-rule identities for composing them — this *is* backpropagation's mathematical content.
+</Callout>
+
+## Formal Definitions
+
+### Gradient (scalar-valued function of a vector)
+
+For $f: \mathbb{R}^n \to \mathbb{R}$, the **gradient** is the vector of partial derivatives:
+
+$$
+\nabla_x f(x) = \begin{pmatrix} \partial f/\partial x_1 \\ \vdots \\ \partial f/\partial x_n \end{pmatrix} \in \mathbb{R}^n
+$$
+
+### Jacobian (vector-valued function of a vector)
+
+For $f: \mathbb{R}^n \to \mathbb{R}^m$, the **Jacobian** collects every partial derivative of every output with respect to every input:
+
+$$
+J = \frac{\partial f}{\partial x} \in \mathbb{R}^{m \times n}, \qquad J_{ij} = \frac{\partial f_i}{\partial x_j}
+$$
+
+The gradient is the special case $m=1$ (as a row vector; by convention it's usually written as a column, i.e. $J^\top$).
+
+### Key Identities (all derivable from first principles, definitions below)
+
+$$
+\nabla_x (a^\top x) = a \qquad \text{(linear form)}
+$$
+
+$$
+\nabla_x (x^\top A x) = (A + A^\top)x \quad\Big(\text{reduces to } 2Ax \text{ if } A \text{ symmetric}\Big) \qquad \text{(quadratic form)}
+$$
+
+$$
+\frac{\partial (Ax)}{\partial x} = A \qquad \text{(Jacobian of a linear map)}
+$$
+
+$$
+\nabla_x \|Ax - b\|^2 = 2A^\top(Ax - b) \qquad \text{(least-squares gradient)}
+$$
+
+**Matrix chain rule**, for a composition $z = g(f(x))$ where $x \to y=f(x) \to z=g(y)$:
+
+$$
+\frac{\partial z}{\partial x} = \frac{\partial z}{\partial y}\cdot\frac{\partial y}{\partial x}
+$$
+
+with shapes multiplying compatibly (this is exactly ordinary Jacobian matrix multiplication) — this single rule, applied layer by layer, is backpropagation.
+
+## Derivation 1: Gradient of a Quadratic Form
+
+Derive $\nabla_x(x^\top A x)$ for $A \in \mathbb{R}^{n\times n}$ from the definition (component-wise), to show the identity above isn't just asserted.
+
+**Step 1 — write the quadratic form as a double sum.**
+
+$$
+x^\top A x = \sum_{i=1}^n \sum_{j=1}^n A_{ij} x_i x_j
+$$
+
+**Step 2 — differentiate with respect to a single coordinate $x_k$.** Using the product rule, and noting $\partial x_i/\partial x_k = \delta_{ik}$ (1 if $i=k$, else 0):
+
+$$
+\frac{\partial}{\partial x_k}\left(\sum_{i,j} A_{ij}x_ix_j\right) = \sum_j A_{kj} x_j + \sum_i A_{ik} x_i
+$$
+
+(the first term arises from differentiating $x_i$ when $i=k$; the second from differentiating $x_j$ when $j=k$).
+
+**Step 3 — recognize the sums as matrix-vector products.** $\sum_j A_{kj}x_j = (Ax)_k$ and $\sum_i A_{ik} x_i = (A^\top x)_k$. So:
+
+$$
+\frac{\partial (x^\top A x)}{\partial x_k} = (Ax)_k + (A^\top x)_k
+$$
+
+**Step 4 — stack over all $k$.**
+
+$$
+\nabla_x(x^\top A x) = Ax + A^\top x = (A + A^\top)x
+$$
+
+If $A$ is symmetric ($A = A^\top$, as covariance and Hessian matrices always are), this simplifies to $2Ax$ — exactly the term that appears when differentiating the PCA objective $v^\top \Sigma v$ (see [PCA — Derivation](/docs/foundations/linear-algebra/pca-derivation)).
+
+## Derivation 2: Gradient of Least-Squares Loss
+
+The workhorse of linear regression: $L(x) = \|Ax - b\|^2$, minimize over $x$.
+
+**Step 1 — expand.**
+
+$$
+L(x) = (Ax-b)^\top(Ax-b) = x^\top A^\top A x - 2b^\top A x + b^\top b
+$$
+
+**Step 2 — differentiate term by term**, using the quadratic-form identity just derived (with the symmetric matrix $A^\top A$) and the linear-form identity:
+
+$$
+\nabla_x L = 2A^\top A x - 2A^\top b
+$$
+
+**Step 3 — set to zero for the closed-form solution.**
+
+$$
+2A^\top A x - 2A^\top b = 0 \implies A^\top A x = A^\top b \implies x^\star = (A^\top A)^{-1} A^\top b
+$$
+
+This is the **normal equations** solution to ordinary least squares, derived purely from matrix calculus rather than geometric projection arguments — and it's the same formula every linear regression library computes (or approximates numerically when $A^\top A$ is ill-conditioned).
+
+## Backpropagation as Repeated Chain Rule
+
+Consider a two-layer network $z = W_2 \, \sigma(W_1 x)$ with loss $L(z)$. Let $h = W_1 x$, $a = \sigma(h)$, $z = W_2 a$.
+
+$$
+\frac{\partial L}{\partial W_2} = \frac{\partial L}{\partial z}\cdot\frac{\partial z}{\partial W_2} = \frac{\partial L}{\partial z}\, a^\top
+$$
+
+$$
+\frac{\partial L}{\partial a} = W_2^\top \frac{\partial L}{\partial z}, \qquad
+\frac{\partial L}{\partial h} = \frac{\partial L}{\partial a} \odot \sigma'(h), \qquad
+\frac{\partial L}{\partial W_1} = \frac{\partial L}{\partial h}\, x^\top
+$$
+
+Each line is one application of the chain rule, propagating a gradient signal backward one layer at a time — the "backward pass" is literally this chain of matrix (and elementwise, for $\sigma'$) multiplications, evaluated in reverse order from the loss to the parameters.
+
+<Mermaid chart={`
+graph RL
+  L["dL/dz"] --> A["dL/da = W2^T (dL/dz)"]
+  A --> H["dL/dh = dL/da ⊙ σ'(h)"]
+  H --> W1["dL/dW1 = (dL/dh) x^T"]
+  L --> W2["dL/dW2 = (dL/dz) a^T"]
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+
+def numerical_gradient(f, x, eps=1e-6):
+    """Central-difference gradient check, used to validate analytic gradients."""
+    grad = np.zeros_like(x)
+    for i in range(len(x)):
+        x_plus, x_minus = x.copy(), x.copy()
+        x_plus[i] += eps
+        x_minus[i] -= eps
+        grad[i] = (f(x_plus) - f(x_minus)) / (2 * eps)
+    return grad
+
+np.random.seed(0)
+A = np.random.randn(5, 3)
+b = np.random.randn(5)
+x = np.random.randn(3)
+
+def loss(x):
+    return np.sum((A @ x - b) ** 2)
+
+analytic_grad = 2 * A.T @ (A @ x - b)         # derived above
+numeric_grad = numerical_gradient(loss, x)
+print(np.allclose(analytic_grad, numeric_grad, atol=1e-4))  # True
+
+# Closed-form least squares via the normal equations
+x_star = np.linalg.solve(A.T @ A, A.T @ b)
+print(x_star)
+```
+
+## Complexity
+
+| Operation | Time complexity | Space |
+| --- | --- | --- |
+| Gradient of quadratic form $x^\top A x$ ($n \times n$) | $O(n^2)$ | $O(n)$ |
+| Full Jacobian of $f:\mathbb{R}^n\to\mathbb{R}^m$ (forward-mode, naive) | $O(n)$ passes, each $O(\text{cost of } f)$ | $O(mn)$ to store |
+| Full Jacobian (reverse-mode / backprop) | $O(m)$ passes, each $O(\text{cost of }f)$ | $O(mn)$ to store |
+| Gradient of scalar loss via backprop ($m=1$) | 1 backward pass, $O(\text{cost of forward pass})$ | $O(\text{number of parameters})$ |
+
+<KeyTakeaways items={[
+  "The gradient of a quadratic form x^T A x is (A + A^T)x, reducing to 2Ax for symmetric A — this single identity underlies least-squares, ridge regression, and the PCA objective's derivative.",
+  "The matrix chain rule is literally ordinary Jacobian matrix multiplication applied layer by layer — that's the entire mathematical content of backpropagation.",
+  "Backprop (reverse-mode autodiff) computes a full gradient in one backward pass regardless of the number of parameters, which is why it's preferred over forward-mode for scalar losses with millions/billions of parameters.",
+  "The normal equations x* = (A^T A)^-1 A^T b for least squares fall directly out of setting the matrix-calculus gradient to zero.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Always checking whether a matrix in a quadratic form is symmetric before simplifying (A+A^T)x to 2Ax — the shortcut is invalid otherwise.",
+    "Validating analytic gradients with numerical (finite-difference) gradient checks when implementing custom layers, exactly as shown in the code example.",
+  ]}
+  cons={[
+    "Applying the 2Ax shortcut to a non-symmetric matrix — the correct general result is (A + A^T)x, and skipping this leads to silently wrong gradients.",
+    "Mixing up numerator-layout and denominator-layout convention for Jacobians (row vs. column gradient shape) when consulting different textbooks — always fix a convention and check shapes.",
+    "Forgetting the elementwise (Hadamard) product for nonlinearities in the chain rule — dL/dh = (dL/da) ⊙ σ'(h) is elementwise multiplication, not a matrix product, since σ is applied elementwise.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Derive: what is the gradient with respect to x of f(x) = x^T A x when A is NOT symmetric, and why can't you just write 2Ax?",
+    options: [
+      "It's still 2Ax; symmetry doesn't matter for this identity",
+      "It's (A + A^T)x; differentiating the double sum sum_i sum_j A_ij x_i x_j picks up a contribution from both A_kj x_j (row k) and A_ik x_i (column k) for each coordinate x_k, which only collapses to 2Ax when A = A^T",
+      "The gradient is undefined for non-symmetric A",
+      "It's A^T x only, ignoring the A x term",
+    ],
+    answerIndex: 1,
+    explanation: "Differentiating term-by-term shows the gradient always has two contributions, one from A appearing as rows and one as columns, giving Ax + A^Tx = (A+A^T)x in general. Only when A is symmetric do these two terms coincide, collapsing to 2Ax.",
+  },
+  {
+    question: "Why does reverse-mode automatic differentiation (backpropagation) compute a gradient for millions of parameters in roughly the same cost as a single forward pass, rather than scaling with the number of parameters?",
+    options: [
+      "It doesn't — cost scales linearly with the number of parameters",
+      "Because reverse mode propagates a single scalar loss's derivative backward through the computation graph via the chain rule, computing dL/d(every intermediate) in one backward sweep, so cost scales with the number of forward-pass operations, not the number of parameters being differentiated with respect to",
+      "GPUs make the parameter count irrelevant regardless of algorithm",
+      "It only works because most gradients are zero in practice",
+    ],
+    answerIndex: 1,
+    explanation: "Reverse-mode autodiff computes the vector-Jacobian product dL/dy * dy/dx layer by layer, backward from the scalar loss, reusing all shared intermediate computations. This means one backward pass yields gradients for every parameter simultaneously, at a cost proportional to the forward pass's cost (a small constant factor), independent of how many parameters there are — the key reason deep learning at scale is even possible.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "The Matrix Cookbook", authors: "Kaare Brandt Petersen, Michael Syskind Pedersen", venue: "Technical University of Denmark", year: 2012 },
+  { title: "Deep Learning", authors: "Ian Goodfellow, Yoshua Bengio, Aaron Courville", venue: "MIT Press", year: 2016 },
+  { title: "Convex Optimization", authors: "Stephen Boyd, Lieven Vandenberghe", venue: "Cambridge University Press", year: 2004 },
+]} />

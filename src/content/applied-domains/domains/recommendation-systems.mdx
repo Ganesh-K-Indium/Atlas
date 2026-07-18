@@ -1,0 +1,163 @@
+---
+title: "Recommendation Systems"
+description: "How a sparse matrix of who-liked-what gets factored into dense user and item embeddings — and what to do when a user or item has no history to factor at all."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["applied-ai", "recommendation-systems", "collaborative-filtering", "matrix-factorization"]
+prerequisites: ["Singular Value Decomposition", "Linear algebra basics", "Gradient descent"]
+---
+
+## Intuition
+
+A recommender system's core data is deceptively simple: a giant, mostly-empty table of users versus items, where each filled-in cell is some signal of preference — a star rating, a click, a purchase, a completed watch. The system's job is to fill in the empty cells: predict, for a user and an item they haven't interacted with, how much that user would like that item.
+
+The key insight that makes this tractable is that user preferences aren't arbitrary — they're driven by a much smaller number of underlying *factors* (genre preference, price sensitivity, aesthetic style) that both users and items can be described along. If you can discover those latent factors, you can describe every user and every item as a short vector in that shared factor space, and predict preference as simply how well a user's vector aligns with an item's vector — collapsing a huge sparse matrix into two small, dense ones.
+
+<Callout type="tip" title="The one-sentence idea">
+  Recommendation is the problem of explaining a huge, sparse user-item interaction matrix with a small number of shared latent factors — once you have those factors as vectors, recommending is just measuring alignment between a user vector and an item vector.
+</Callout>
+
+## Core Problem Formulations
+
+- **Collaborative filtering:** predict a user's preference for an item using patterns across *all* users' and items' interactions, without needing any explicit content description of the item itself — "users who behaved like you also liked this."
+- **Content-based filtering:** predict preference using explicit features of the items (genre, text description, image embeddings) and/or the user's profile, matching items to users by feature similarity rather than by collective behavior.
+- **Ranking:** most production recommenders care less about predicting an exact rating and more about ranking a candidate set of items correctly for a given user — a subtly different objective from minimizing rating prediction error, addressed by learning-to-rank losses (pairwise or listwise) rather than plain regression.
+- **Cold start:** predicting for a user or item with little or no interaction history — the point where collaborative filtering's core assumption (learn from past interactions) structurally breaks down.
+
+## Key Techniques and How They Connect
+
+**Matrix factorization** is the canonical collaborative filtering technique. Let $R \in \mathbb{R}^{m \times n}$ be the (mostly missing) user-item rating matrix for $m$ users and $n$ items. Matrix factorization approximates $R$ as the product of two low-rank matrices:
+
+$$
+R \approx U V^\top, \quad U \in \mathbb{R}^{m \times k}, \ V \in \mathbb{R}^{n \times k}
+$$
+
+where $k \ll \min(m, n)$ is the number of latent factors, each row $u_i$ of $U$ is user $i$'s embedding, and each row $v_j$ of $V$ is item $j$'s embedding. The predicted rating is simply the dot product $\hat{r}_{ij} = u_i^\top v_j$. Parameters are learned by minimizing squared error only over the *observed* entries, plus regularization to prevent overfitting on sparse data:
+
+$$
+\min_{U, V} \sum_{(i,j) \in \text{observed}} \left( r_{ij} - u_i^\top v_j \right)^2 + \lambda \left( \lVert U \rVert_F^2 + \lVert V \rVert_F^2 \right)
+$$
+
+This is conceptually a supervised, regularized cousin of the Singular Value Decomposition — SVD factors a *complete* matrix exactly into orthogonal components, while recommender-style matrix factorization learns an approximate factorization of an *incomplete* matrix by gradient-based optimization over only the observed entries. See [Singular Value Decomposition](/docs/foundations/linear-algebra/svd) for the exact, complete-matrix case this generalizes from. In practice, factorization is trained with alternating least squares (alternately fixing $U$ and solving for $V$, then vice versa, each a convex least-squares problem) or with stochastic gradient descent over observed ratings directly.
+
+**Content-based filtering** takes the opposite approach: instead of inferring latent factors purely from collective interaction patterns, it builds item representations directly from item features (text description embeddings, genre tags, image embeddings) and recommends items similar to ones a specific user has liked before, using only that user's own history. This sidesteps collaborative filtering's reliance on *other* users' data entirely, at the cost of never surfacing recommendations outside a user's already-expressed taste profile (a "filter bubble" effect).
+
+**Hybrid systems** combine both signals — collaborative filtering for the bulk of well-covered users/items where behavioral data is dense, content-based signals as a fallback or auxiliary feature where behavioral data is sparse — because the two approaches fail in largely non-overlapping situations, echoing the same principle that motivates hybrid dense/sparse retrieval in search.
+
+**Deep learning approaches** generalize matrix factorization's simple dot product into a learned neural function of user and item embeddings (or replace factorized embeddings entirely with representations derived from raw content, sequence-of-interactions models, or graph neural networks over the user-item interaction graph), capturing nonlinear interaction effects a plain dot product cannot.
+
+<Mermaid chart={`
+graph TD
+  R["Sparse user-item interaction matrix"] --> MF["Matrix factorization: R ~ U V^T"]
+  MF --> UEmb["User embeddings U"]
+  MF --> VEmb["Item embeddings V"]
+  UEmb --> Score["Predicted preference: dot product"]
+  VEmb --> Score
+  Content["Item content features"] --> CB["Content-based filtering"]
+  CB --> Score
+  Score --> Rank["Ranked recommendation list"]
+  ColdUser["New user, no history"] --> Cold["Cold-start strategy"]
+  ColdItem["New item, no interactions"] --> Cold
+  Cold --> Score
+`} />
+
+## The Cold-Start Problem
+
+Matrix factorization needs observed interactions to learn a user's or item's embedding at all — a brand-new user with zero interactions, or a brand-new item nobody has rated yet, has no row to factorize, so $u_i^\top v_j$ is undefined for them in any meaningful sense. This is the **cold-start problem**, and it comes in two flavors:
+
+- **New user cold start:** no interaction history to infer a preference embedding from.
+- **New item cold start:** no ratings/interactions yet to infer a content embedding from.
+
+Common mitigations include: falling back to **content-based filtering** using explicit item/user features when behavioral data is absent; using **popularity-based or demographic-based defaults** until enough interactions accumulate; explicitly asking new users for onboarding preferences (genre picks, a short survey) to bootstrap an initial embedding; and **exploration strategies** (showing a diverse or exploratory slate of items to new users specifically to *generate* the interaction data needed to later personalize).
+
+## Practical Trade-offs
+
+<ComparisonTable
+  headers={["Approach", "Needs", "Strength", "Weakness"]}
+  rows={[
+    ["Collaborative filtering (matrix factorization)", "Dense-enough interaction history across users/items", "Captures latent taste patterns without needing item content features", "Fails entirely on cold-start users/items"],
+    ["Content-based filtering", "Explicit item (and ideally user) features", "Works even for brand-new items with zero interactions", "Recommendations stay within a user's already-expressed taste profile"],
+    ["Hybrid", "Both interaction and content data where available", "Covers both dense-history and cold-start cases", "More components to build, tune, and maintain"],
+    ["Deep / neural recommenders", "Larger data volume, often sequential interaction logs", "Captures nonlinear interactions and sequential/contextual signals", "Higher infrastructure and tuning cost; less interpretable than a dot product"],
+  ]}
+/>
+
+## Practical Example
+
+```python
+import numpy as np
+
+def train_matrix_factorization(R_observed, mask, k=20, lr=0.01, reg=0.1, epochs=50):
+    m, n = R_observed.shape
+    U = np.random.normal(scale=0.1, size=(m, k))
+    V = np.random.normal(scale=0.1, size=(n, k))
+
+    users, items = np.nonzero(mask)  # only iterate over observed entries
+    for _ in range(epochs):
+        for i, j in zip(users, items):
+            err = R_observed[i, j] - U[i] @ V[j]
+            U[i] += lr * (err * V[j] - reg * U[i])
+            V[j] += lr * (err * U[i] - reg * V[j])
+    return U, V
+
+# Predicted preference for user i, item j after training:
+# score = U[i] @ V[j]
+```
+
+<KeyTakeaways items={[
+  "Matrix factorization approximates a sparse user-item matrix as the product of two dense low-rank embedding matrices, learned by minimizing error only over observed entries plus regularization.",
+  "Collaborative filtering needs no item content at all — it works purely off collective interaction patterns — but this is exactly why it structurally fails on cold-start users and items.",
+  "Content-based filtering solves cold start for new items/users but can't surface recommendations outside a user's already-observed taste.",
+  "Most production systems are hybrids, and increasingly layer a learned ranking model on top of factorization-style or embedding-based candidate generation.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Matrix factorization scales well and captures surprisingly rich latent taste structure from nothing but sparse interaction logs.",
+    "Content-based methods provide a natural, principled fallback exactly where collaborative filtering is weakest (cold start).",
+    "Hybrid systems let you deploy the strength of each approach where it individually works best.",
+  ]}
+  cons={[
+    "Optimizing purely for predicted-rating accuracy (e.g. RMSE) doesn't directly optimize for what most businesses actually care about — ranking quality, diversity, and engagement — and can produce technically accurate but practically unhelpful recommendations.",
+    "Ignoring the cold-start problem in a deployed system means new users get poor recommendations during exactly the period (early engagement) that most affects retention.",
+    "Over-relying on collaborative filtering without any exploration mechanism creates feedback loops — the system only recommends what's already popular, and never collects data on niche items that might otherwise be a great match ('filter bubble' / popularity bias).",
+    "Treating implicit feedback (clicks, views) with the same modeling assumptions as explicit ratings ignores that implicit signals are much noisier and one-sided (you rarely observe explicit 'I don't like this' signals).",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "In matrix factorization for recommendation, why is the loss computed only over the observed entries of the rating matrix rather than the whole matrix?",
+    options: [
+      "Computing the loss over all entries would be mathematically undefined",
+      "The vast majority of user-item pairs have no recorded interaction at all — there's no ground-truth rating to compare a prediction against for those cells, so only observed entries provide a valid training signal",
+      "It's purely a computational speed optimization with no other justification",
+      "Missing entries are always assumed to be zero and trained as such",
+    ],
+    answerIndex: 1,
+    explanation: "Most cells of a user-item interaction matrix represent pairs that were never observed — a user simply never interacted with that item — not a rating of zero or negative preference. Treating unobserved entries as errors to correct would confuse 'no data' with 'observed low preference,' so the loss is restricted to entries where a real rating or interaction was actually recorded.",
+  },
+  {
+    question: "A streaming service launches a new movie with zero ratings and wants to recommend it to the right users immediately. Why does a pure collaborative filtering (matrix factorization) approach fail here, and what's a standard mitigation?",
+    options: [
+      "Collaborative filtering never fails on new items; no mitigation is needed",
+      "The new item has no observed interactions to learn an embedding from, so its factorized representation is undefined — a standard mitigation is falling back to content-based features (genre, cast, description) until enough interactions accumulate to learn a collaborative embedding",
+      "The fix is to simply set the new item's embedding to the average of all other items, which fully solves the problem",
+      "This is only a problem for content-based filtering, not collaborative filtering",
+    ],
+    answerIndex: 1,
+    explanation: "This is the item cold-start problem: matrix factorization requires observed ratings/interactions to learn a meaningful embedding for an item, and a brand-new item has none. The standard mitigation is to use content-based features (metadata, descriptions, embeddings from the item's own content) to place the new item sensibly until real interaction data accumulates and a collaborative signal becomes available.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Matrix Factorization Techniques for Recommender Systems", authors: "Koren, Y., Bell, R., Volinsky, C.", venue: "IEEE Computer", year: 2009, url: "https://ieeexplore.ieee.org/document/5197422" },
+  { title: "Deep Learning", authors: "Goodfellow, I., Bengio, Y., Courville, A.", venue: "MIT Press", year: 2016, url: "https://www.deeplearningbook.org/" },
+]} />

@@ -1,0 +1,128 @@
+---
+title: "Computer Vision"
+description: "How machines turn pixel grids into structured understanding — from classifying an image to segmenting every pixel and grounding language in visual scenes."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["applied-ai", "computer-vision", "deep-learning", "image-processing"]
+prerequisites: ["Convolutional Neural Networks", "The Transformer Architecture", "Linear Algebra basics"]
+---
+
+## Intuition
+
+A digital image is nothing but a grid of numbers — pixel intensities across height, width, and color channels. There is no explicit concept of "edge," "cat," or "person" anywhere in that array. Computer vision is the applied field concerned with building models that map from this raw numerical grid to the kind of structured understanding a human gets instantly and effortlessly by looking: what objects are present, where they are, what they're doing, and how the scene is organized.
+
+What makes vision hard is not the mapping itself — deep networks are good function approximators — but the *invariances* the mapping must respect. The same cat is still a cat shifted three pixels to the left, rotated ten degrees, partially occluded by a couch, or lit differently. Decades of vision research, arguably summarized by the shift from hand-engineered features (edges, corners, SIFT descriptors) to learned convolutional filters to learned attention over image patches, is really the story of finding architectures whose inductive biases match these invariances well enough to generalize from finite labeled data.
+
+<Callout type="tip" title="The one-sentence idea">
+  Computer vision is the search for representations of pixel grids that are stable under the transformations that don't change meaning (translation, scale, lighting, minor occlusion) while remaining sensitive to the transformations that do (a different object, a different pose, a different scene).
+</Callout>
+
+## Core Problem Formulations
+
+Vision is not one task — it's a family of related tasks operating at different levels of spatial granularity, and most of what looks like "progress in vision" is really progress at pushing predictions to finer and finer spatial resolution:
+
+- **Image classification:** map an entire image to a single label (or label distribution) — "what is the dominant subject of this image?"
+- **Object detection:** predict a set of bounding boxes, each with a class label and confidence score — "what objects are present, and roughly where?"
+- **Semantic segmentation:** classify *every pixel* into a category, with no distinction between separate instances of the same class.
+- **Instance segmentation:** like semantic segmentation, but separates distinct object instances (two overlapping cars get two different masks, not one merged blob).
+- **Image generation / synthesis:** the inverse problem — mapping from a latent code, noise, or text description to a plausible image.
+- **Vision-language grounding:** joint tasks connecting pixels to natural language — image captioning, visual question answering, text-to-region retrieval.
+
+Formally, classification is a function $f_\theta: \mathbb{R}^{H \times W \times C} \to \Delta^{K-1}$ (a probability simplex over $K$ classes), while detection and segmentation are *structured prediction* problems — the output is a variable-size set of boxes or a dense per-pixel labeling, not a fixed-size vector, which is precisely why they need architectural machinery beyond a plain classifier head.
+
+## Key Techniques and How They Connect
+
+**Convolutional neural networks** are the foundational architecture of modern vision. A convolutional layer slides a small learned filter across the image, so the same weights are reused at every spatial location — this bakes in translation equivariance for free, which is why CNNs need far less data than a fully-connected network to learn "an edge is an edge wherever it appears." Stacking convolutions with pooling builds a hierarchy: early layers detect edges and textures, middle layers detect parts, deep layers detect whole objects. See [Convolutional Neural Networks](/docs/deep-learning/vision-architectures/cnn) for the full derivation of convolution, receptive fields, and classic architectures (LeNet through ResNet).
+
+**Vision Transformers (ViT)** split an image into fixed-size patches, linearly project each patch into a token embedding, and feed the resulting sequence through a standard Transformer encoder — treating an image exactly like a sentence of "patch tokens." This trades the convolution's built-in translation-equivariance prior for a much weaker one (attention can look anywhere from the start), which is why ViTs typically need larger pretraining datasets than CNNs to reach competitive accuracy, but often surpass CNNs once that data is available. See [Vision Transformers](/docs/deep-learning/vision-architectures/vision-transformers) (roadmap).
+
+**Object detection** architectures add machinery on top of a CNN or ViT backbone to produce a variable number of boxes. Two-stage detectors (e.g. Faster R-CNN) first propose candidate regions, then classify and refine each one. Single-stage detectors like the YOLO family instead divide the image into a grid and directly regress box coordinates and class probabilities per grid cell in one forward pass, trading a little accuracy for large speed gains — the reason YOLO variants dominate real-time detection. See [YOLO and Single-Stage Detectors](/docs/deep-learning/vision-architectures/yolo) (roadmap).
+
+**Segmentation** has recently been reshaped by promptable, foundation-model approaches: rather than training a fixed-class segmentation network per dataset, a model like Segment Anything is trained to take a point, box, or text prompt and produce a high-quality mask for the object being pointed at, generalizing zero-shot to object categories never seen during training. See [Segment Anything and Promptable Segmentation](/docs/deep-learning/vision-architectures/segment-anything) (roadmap).
+
+**Vision-language models** like CLIP jointly embed images and text captions into a shared vector space using a contrastive objective, so that an image and its matching caption end up close together while mismatched pairs are pushed apart. This shared embedding space underlies zero-shot image classification (score an image against a set of candidate label sentences), image-text retrieval, and is the visual backbone used inside many multimodal LLMs. See [CLIP and Contrastive Vision-Language Pretraining](/docs/deep-learning/vision-architectures/clip) (roadmap).
+
+<Mermaid chart={`
+graph TD
+  Img["Input image"] --> Backbone["Feature backbone: CNN or ViT"]
+  Backbone --> Cls["Classification head"]
+  Backbone --> Det["Detection head: boxes + classes"]
+  Backbone --> Seg["Segmentation head: per-pixel masks"]
+  Backbone --> VL["Joint embedding with text: CLIP-style"]
+  VL --> Zero["Zero-shot classification / retrieval"]
+  Det --> RT["Real-time single-stage: YOLO family"]
+`} />
+
+## Practical Trade-offs
+
+<ComparisonTable
+  headers={["Approach", "Best for", "Data / compute needs", "Key weakness"]}
+  rows={[
+    ["CNN (ResNet-style)", "Classification, smaller datasets, edge/mobile deployment", "Moderate — good inductive bias reduces data needs", "Limited long-range spatial reasoning without very deep stacks"],
+    ["Vision Transformer", "Large-scale pretraining, transfer learning, multimodal fusion", "High — needs large pretraining corpora or strong augmentation/distillation", "Weaker built-in locality prior; can overfit on small datasets"],
+    ["Two-stage detector (Faster R-CNN)", "High-accuracy detection where latency is not critical", "Higher inference cost", "Slower than single-stage alternatives"],
+    ["Single-stage detector (YOLO family)", "Real-time detection (video, robotics, edge devices)", "Lower inference cost", "Historically weaker on small or densely overlapping objects"],
+    ["Promptable segmentation (SAM-style)", "Zero-shot / interactive segmentation across arbitrary object categories", "Very high pretraining cost, cheap at inference", "Prompting still needed; no built-in semantic class names"],
+    ["CLIP-style contrastive VLM", "Zero-shot classification, retrieval, multimodal grounding", "Requires large paired image-text corpora", "Embedding is coarse; struggles with fine-grained spatial reasoning"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Vision tasks form a granularity ladder — classification (whole image), detection (boxes), segmentation (pixels) — and most architectures are extensions of a shared backbone with a task-specific head bolted on.",
+  "CNNs encode translation equivariance directly into the architecture; ViTs give up that prior in exchange for flexibility and scale, and need more data to compensate.",
+  "Real-time constraints (robotics, video, mobile) usually favor single-stage detectors over two-stage ones, even at some accuracy cost.",
+  "Foundation vision-language models (CLIP, SAM) shift the field from 'train a bespoke model per dataset' to 'prompt a pretrained model,' mirroring the trajectory NLP took with LLMs.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Transfer learning from ImageNet- or web-scale-pretrained backbones works extremely well even on small downstream datasets, dramatically lowering the labeled-data bar.",
+    "Data augmentation (crops, flips, color jitter, mixup) is cheap and consistently improves generalization because it directly encodes the invariances the task cares about.",
+    "Modern foundation vision models generalize zero-shot to categories never explicitly trained on.",
+  ]}
+  cons={[
+    "Evaluating only on overall accuracy hides severe class imbalance problems — a detector can score well in aggregate while missing every instance of a rare but critical class (e.g., a pedestrian at night).",
+    "Training/test distribution shift (different camera, lighting, geography) silently tanks real-world performance even when validation-set metrics look excellent.",
+    "Treating segmentation/detection purely as classification-with-more-steps ignores that these are structured prediction problems — box regression, non-max suppression, and mask coherence all introduce failure modes classification doesn't have.",
+    "Resizing/cropping preprocessing choices are easy to get inconsistent between training and inference, silently corrupting spatial predictions like bounding boxes.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why do Vision Transformers typically need larger pretraining datasets than CNNs to reach comparable accuracy?",
+    options: [
+      "ViTs have more parameters than any CNN, so they always need more data",
+      "CNNs bake in a translation-equivariance / locality inductive bias via convolution; ViT's self-attention has no such built-in spatial prior and must learn spatial structure from data instead",
+      "ViTs cannot use transfer learning at all",
+      "CNNs use a different loss function that requires less data",
+    ],
+    answerIndex: 1,
+    explanation: "Convolution's weight-sharing and local receptive fields directly encode the assumption that nearby pixels are related and patterns are translation-invariant. A ViT's attention mechanism starts with no such assumption — it can attend anywhere from layer one — so it must learn spatial locality patterns empirically, which takes more data (or stronger augmentation/regularization) to match a CNN's sample efficiency.",
+  },
+  {
+    question: "A team deploys an object detector that scores 95% mAP overall on their validation set, but field reports show it frequently misses pedestrians at night. What is the most likely explanation?",
+    options: [
+      "mAP is mathematically incapable of measuring detector performance",
+      "The aggregate metric averages over all classes and conditions, potentially masking poor performance on an underrepresented subgroup (nighttime pedestrians) that contributes little to the overall average",
+      "The model must have a bug in its bounding box regression head",
+      "Nighttime images cannot be processed by any CNN or ViT architecture",
+    ],
+    answerIndex: 1,
+    explanation: "Aggregate metrics like overall mAP can look excellent while hiding severe underperformance on a specific slice of the data — here, likely a rarer condition (nighttime, low light) that is underrepresented in the training/validation distribution. This is a classic case for slicing evaluation by condition/subgroup rather than trusting a single aggregate number, especially in safety-critical detection use cases.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Deep Learning", authors: "Goodfellow, I., Bengio, Y., Courville, A.", venue: "MIT Press", year: 2016, url: "https://www.deeplearningbook.org/" },
+  { title: "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale", authors: "Dosovitskiy, A. et al.", venue: "ICLR", year: 2021, url: "https://arxiv.org/abs/2010.11929" },
+  { title: "Learning Transferable Visual Models From Natural Language Supervision (CLIP)", authors: "Radford, A. et al.", venue: "ICML", year: 2021, url: "https://arxiv.org/abs/2103.00020" },
+  { title: "Segment Anything", authors: "Kirillov, A. et al.", venue: "arXiv", year: 2023, url: "https://arxiv.org/abs/2304.02643" },
+]} />

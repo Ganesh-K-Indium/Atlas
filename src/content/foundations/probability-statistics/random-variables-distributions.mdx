@@ -1,0 +1,215 @@
+---
+title: "Random Variables & Distributions"
+description: "How to turn raw outcomes into numbers you can compute with — and the handful of distributions that show up in nearly every ML model."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["probability", "statistics", "math", "distributions"]
+prerequisites: ["Probability Foundations"]
+---
+
+## Intuition
+
+An outcome like "the coin landed heads" or "the customer clicked" isn't a number — you can't take its expectation or plug it into a loss function. A **random variable** is the bridge: a function that maps outcomes to real numbers, so that all of calculus and linear algebra become available for reasoning about randomness. Once outcomes are numbers, a **distribution** is simply the complete description of how probability is spread across those numbers.
+
+<Callout type="tip" title="One-sentence definition">
+  A random variable maps outcomes to numbers; its distribution tells you exactly how likely each number (or range of numbers) is — everything a model predicts (a class probability, a regression mean, a token distribution) is a distribution over a random variable.
+</Callout>
+
+## Formal Definition
+
+A **random variable** $X$ is a measurable function $X: \Omega \to \mathbb{R}$ from the sample space to the reals. It is:
+
+- **Discrete** if it takes values in a countable set, described by a **probability mass function (PMF)** $p(x) = P(X = x)$, with $\sum_x p(x) = 1$.
+- **Continuous** if it takes values in an uncountable set (e.g. an interval), described by a **probability density function (PDF)** $f(x) \geq 0$ with $\int_{-\infty}^{\infty} f(x)\,dx = 1$. Crucially, $f(x)$ is *not* a probability — $P(X = x) = 0$ for any single point; only $P(a \leq X \leq b) = \int_a^b f(x)\,dx$ is meaningful.
+
+Both cases are unified by the **cumulative distribution function (CDF)**:
+
+$$
+F(x) = P(X \leq x)
+$$
+
+which always exists, is non-decreasing, and satisfies $F(-\infty) = 0$, $F(\infty) = 1$. For continuous $X$, $f(x) = F'(x)$.
+
+### Expectation and Variance
+
+$$
+\mathbb{E}[X] = \sum_x x\, p(x) \quad \text{(discrete)} \qquad \mathbb{E}[X] = \int_{-\infty}^{\infty} x\, f(x)\, dx \quad \text{(continuous)}
+$$
+
+$$
+\text{Var}(X) = \mathbb{E}[(X - \mathbb{E}[X])^2] = \mathbb{E}[X^2] - (\mathbb{E}[X])^2
+$$
+
+**Proof of the shortcut variance formula:** expand the square.
+
+$$
+\mathbb{E}[(X-\mu)^2] = \mathbb{E}[X^2 - 2\mu X + \mu^2] = \mathbb{E}[X^2] - 2\mu\,\mathbb{E}[X] + \mu^2 = \mathbb{E}[X^2] - 2\mu^2 + \mu^2 = \mathbb{E}[X^2] - \mu^2
+$$
+
+using linearity of expectation and $\mathbb{E}[X] = \mu$ by definition.
+
+## The Distributions That Actually Show Up in ML
+
+<ComparisonTable
+  headers={["Distribution", "Type", "PMF/PDF", "Where it appears in ML"]}
+  rows={[
+    ["Bernoulli(p)", "Discrete", "p^x(1-p)^(1-x), x∈{0,1}", "Binary classification output, dropout mask"],
+    ["Binomial(n,p)", "Discrete", "C(n,k)p^k(1-p)^(n-k)", "Counting successes over n independent trials"],
+    ["Categorical(p₁..pₖ)", "Discrete", "p_x for x∈{1..k}", "Softmax output over classes/tokens"],
+    ["Poisson(λ)", "Discrete", "λ^k e^-λ / k!", "Event counts (arrivals, rare-event modeling)"],
+    ["Gaussian/Normal(μ,σ²)", "Continuous", "(1/√(2πσ²)) exp(-(x-μ)²/2σ²)", "Weight initialization, noise models, VAEs' latent prior"],
+    ["Exponential(λ)", "Continuous", "λe^-λx, x≥0", "Waiting times, survival analysis"],
+    ["Beta(α,β)", "Continuous", "x^(α-1)(1-x)^(β-1)/B(α,β)", "Conjugate prior for Bernoulli/Binomial p"],
+    ["Dirichlet(α)", "Continuous", "generalizes Beta to simplex", "Conjugate prior for Categorical, topic models (LDA)"],
+  ]}
+/>
+
+## Derivation: Why the Gaussian's Normalizing Constant Is $\frac{1}{\sqrt{2\pi\sigma^2}}$
+
+This is worth deriving once because it explains where $\sqrt{2\pi}$ — one of the most-cited "mysterious" constants in ML — actually comes from.
+
+We want to show $\int_{-\infty}^{\infty} e^{-x^2/2}\,dx = \sqrt{2\pi}$ (the standard case $\mu=0, \sigma=1$; general $\sigma$ follows by substitution).
+
+**Step 1 — square the integral and convert to 2D.** Let $I = \int_{-\infty}^{\infty} e^{-x^2/2}\,dx$. Then:
+
+$$
+I^2 = \left(\int_{-\infty}^{\infty} e^{-x^2/2}dx\right)\left(\int_{-\infty}^{\infty} e^{-y^2/2}dy\right) = \iint_{\mathbb{R}^2} e^{-(x^2+y^2)/2}\,dx\,dy
+$$
+
+**Step 2 — switch to polar coordinates.** With $x = r\cos\theta$, $y = r\sin\theta$, $dx\,dy = r\,dr\,d\theta$, and $x^2+y^2 = r^2$:
+
+$$
+I^2 = \int_0^{2\pi}\int_0^\infty e^{-r^2/2}\, r\, dr\, d\theta
+$$
+
+**Step 3 — substitute $u = r^2/2$, $du = r\,dr$:**
+
+$$
+\int_0^\infty e^{-r^2/2} r\, dr = \int_0^\infty e^{-u}\,du = 1
+$$
+
+**Step 4 — the $\theta$ integral is trivial:**
+
+$$
+I^2 = \int_0^{2\pi} 1 \, d\theta = 2\pi \implies I = \sqrt{2\pi}
+$$
+
+So the density must be divided by $\sqrt{2\pi}$ (and by $\sigma$ after rescaling) to integrate to 1 — the normalizing constant isn't arbitrary, it's forced by this exact 2D polar-coordinates trick.
+
+## The Central Limit Theorem
+
+The reason the Gaussian dominates ML noise models isn't aesthetic — it's the **Central Limit Theorem (CLT)**: if $X_1, \ldots, X_n$ are i.i.d. with mean $\mu$ and finite variance $\sigma^2$, then as $n \to \infty$:
+
+$$
+\sqrt{n}\left(\frac{1}{n}\sum_{i=1}^n X_i - \mu\right) \xrightarrow{d} \mathcal{N}(0, \sigma^2)
+$$
+
+Regardless of the shape of the original distribution of $X_i$. This is why sums of many small, roughly-independent effects (measurement noise, aggregated user behavior) tend to look Gaussian, and why estimators built from averages (like the sample mean) have asymptotically Gaussian sampling distributions — the theoretical backbone of confidence intervals (see [Hypothesis Testing & Confidence Intervals](/docs/foundations/probability-statistics/hypothesis-testing)).
+
+<Mermaid chart={`
+graph LR
+  A["Outcome ω in sample space"] --> B["Random variable X(ω) → real number"]
+  B --> C{"Discrete or continuous support?"}
+  C -->|Discrete| D["PMF: p(x) = P(X=x)"]
+  C -->|Continuous| E["PDF: f(x), P(a≤X≤b)=∫f dx"]
+  D --> F["CDF F(x) = P(X≤x)"]
+  E --> F
+  F --> G["E[X], Var(X) summarize the distribution"]
+`} />
+
+## Joint, Marginal, and Conditional Distributions
+
+For two random variables $X, Y$, the **joint distribution** $p(x,y)$ describes them together. From it:
+
+$$
+\text{Marginal: } p(x) = \sum_y p(x,y) \qquad \text{Conditional: } p(y \mid x) = \frac{p(x,y)}{p(x)}
+$$
+
+This is exactly the machinery behind generative classifiers: model $p(x, y) = p(y)p(x \mid y)$ (class prior times class-conditional likelihood), then use Bayes' theorem to recover $p(y \mid x)$ at inference time.
+
+## Code Example
+
+```python
+import numpy as np
+from scipy import stats
+
+rng = np.random.default_rng(42)
+
+# Verify CLT: average of many Uniform(0,1) samples looks Gaussian
+n_trials, n_sum = 10_000, 30
+sample_means = np.array([
+    rng.uniform(0, 1, n_sum).mean() for _ in range(n_trials)
+])
+
+print(f"Empirical mean: {sample_means.mean():.4f}")   # ≈ 0.5 (true mean of Uniform(0,1))
+print(f"Empirical std:  {sample_means.std():.4f}")     # ≈ sqrt(1/12 / 30) ≈ 0.0527
+
+# Shapiro-Wilk test for normality of the sample-mean distribution
+stat, p_value = stats.shapiro(sample_means)
+print(f"Shapiro-Wilk p-value: {p_value:.4f}")           # typically > 0.05, fails to reject normality
+```
+
+## Complexity / Practical Notes
+
+| Task | Typical cost | Notes |
+| --- | --- | --- |
+| Sampling from standard distributions | $O(1)$ per sample | `numpy.random`, inverse-CDF or rejection sampling under the hood |
+| Evaluating PDF/PMF/CDF | $O(1)$ per point | Closed-form for standard families |
+| Sampling from an arbitrary/custom distribution | Varies | Requires MCMC or rejection sampling — see [Markov Chains & Monte Carlo](/docs/foundations/probability-statistics/markov-chains-monte-carlo) |
+
+<KeyTakeaways items={[
+  "A random variable is a function from outcomes to real numbers — it's what makes probability computable with ordinary algebra and calculus.",
+  "PDFs are not probabilities: only integrals of a PDF over an interval yield probabilities, since P(X = x) = 0 for any single point of a continuous variable.",
+  "The Gaussian's √(2πσ²) normalizing constant is forced by a polar-coordinates integration trick, not chosen for convenience.",
+  "The Central Limit Theorem explains why Gaussian noise models are ubiquitous: sums/averages of many roughly-independent effects converge to Gaussian regardless of the underlying distribution.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Distinguishing PMF (a probability) from PDF (a density, not a probability) — this avoids nonsensical statements like 'the probability of exactly this height is 0.02'.",
+    "Using the CDF as the universal object that works for both discrete and continuous variables when reasoning generally.",
+  ]}
+  cons={[
+    "Treating f(x) > 1 for a PDF as impossible — densities can exceed 1 (e.g. a very peaked distribution) as long as the integral is 1.",
+    "Assuming the CLT means individual observations become Gaussian — it's specifically the sampling distribution of the *mean* (or sum) that converges, not the underlying data itself.",
+    "Confusing independence with uncorrelatedness — zero covariance does not imply independence except in special cases like jointly Gaussian variables.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is it meaningless to say 'the probability that a continuous random variable X equals exactly 2.0'?",
+    options: [
+      "It's not meaningless — it simply equals f(2.0), the density at that point",
+      "For any continuous random variable, P(X = x) = 0 for every single point x, since probability is the integral of the density over an interval, and the integral over a single point (zero width) is always zero",
+      "Continuous random variables cannot take the value 2.0",
+      "This is only true for the Gaussian distribution specifically",
+    ],
+    answerIndex: 1,
+    explanation: "Probabilities for continuous variables come from integrating the density over a range. A single point has zero width, so its integral — and hence its probability — is exactly zero, even though the density f(2.0) itself can be a large positive number.",
+  },
+  {
+    question: "The Central Limit Theorem says the distribution of the sample mean converges to Gaussian as n grows. Does this mean individual data points from a heavily skewed distribution (like income) become Gaussian too?",
+    options: [
+      "Yes, the CLT guarantees all data eventually looks Gaussian",
+      "No — the CLT applies to the sampling distribution of an average (or sum) of many i.i.d. variables, not to the distribution of individual observations, which retains its original shape regardless of n",
+      "Only if the original distribution is symmetric",
+      "The CLT doesn't apply to skewed distributions at all",
+    ],
+    answerIndex: 1,
+    explanation: "The CLT is a statement about the distribution of √n(X̄ₙ − μ), i.e., an average of many draws — not about single draws. A single sample from a skewed income distribution is still skewed no matter how large the population is; only the sampling distribution of the mean approaches Gaussian.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Statistical Inference", authors: "George Casella, Roger L. Berger", venue: "Cengage Learning", year: 2002 },
+  { title: "Pattern Recognition and Machine Learning", authors: "Christopher M. Bishop", venue: "Springer", year: 2006 },
+  { title: "All of Statistics: A Concise Course in Statistical Inference", authors: "Larry Wasserman", venue: "Springer", year: 2004 },
+]} />

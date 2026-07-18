@@ -1,0 +1,151 @@
+---
+title: "Supervised Fine-Tuning (SFT)"
+description: "How the same next-token objective that pretrains a base model turns it into an instruction-follower, once loss is masked onto only the response tokens."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "fine-tuning", "sft", "instruction-tuning"]
+prerequisites: ["Causal language modeling objective", "Cross-entropy loss", "Attention masks"]
+---
+
+## Intuition
+
+A base model fresh out of pretraining is a very good next-token predictor over internet-scale text — but "predict what comes next" and "answer this question helpfully" are not the same task. Asked a question, a base model is just as likely to continue it with more questions, a Wikipedia-style continuation, or a shift in topic, because that's what often follows similar text in its training corpus.
+
+Supervised Fine-Tuning (SFT) closes that gap without inventing a new objective. It reuses exactly the same next-token cross-entropy loss from pretraining, but changes *what data* it's applied to: instead of raw internet text, the model trains on a curated set of (prompt, response) pairs written or selected specifically to demonstrate the desired instruction-following behavior. The mechanism doesn't change; the data distribution does.
+
+<Callout type="tip" title="The one-sentence idea">
+  SFT is pretraining's next-token objective continued on a small, curated dataset of instruction-response pairs, with the loss masked so gradients only flow from predicting the response tokens — the prompt is context to condition on, not something the model needs to learn to generate.
+</Callout>
+
+## The SFT Objective: Loss Masking
+
+Given a formatted example consisting of a prompt $x$ and a target response $y = (y_1, \ldots, y_m)$, SFT still trains with autoregressive cross-entropy — but only over the response tokens:
+
+$$
+\mathcal{L}_{\text{SFT}}(\theta) = -\sum_{t=1}^{m} \log p_\theta(y_t \mid x, y_1, \ldots, y_{t-1})
+$$
+
+Note what's absent from this sum: there's no term for predicting the tokens of the prompt $x$ itself. In implementation, this is done by constructing a **loss mask** the same length as the full tokenized sequence (prompt + response), set to 0 over prompt positions and 1 over response positions, and multiplying the per-token loss by this mask before averaging:
+
+$$
+\mathcal{L}_{\text{SFT}}(\theta) = -\frac{1}{\sum_t m_t}\sum_{t=1}^{T} m_t \cdot \log p_\theta(x_t \mid x_{<t}), \qquad m_t = \begin{cases} 0 & t \text{ in prompt} \\ 1 & t \text{ in response} \end{cases}
+$$
+
+The prompt tokens are still fed through the model as context (the model attends to them normally via causal self-attention) — they're excluded only from the *loss*, not from the forward pass. This is the detail that's easy to get wrong: masking a token out of attention would remove it as context; masking it out of the loss just means the model isn't penalized for how well it "predicts" text it was only ever supposed to condition on.
+
+<Mermaid chart={`
+graph LR
+  A["Tokenized sequence: [prompt tokens][response tokens]"] --> B["Forward pass: causal self-attention over full sequence"]
+  B --> C["Per-token loss computed at every position"]
+  C --> D["Loss mask: 0 over prompt tokens, 1 over response tokens"]
+  D --> E["Masked loss averaged over response tokens only -> backprop"]
+`} />
+
+## Why Mask the Prompt at All?
+
+Without masking, the model would also be trained to predict the prompt tokens from the tokens before them — but prompts in an instruction dataset are usually written by humans and vary enormously in phrasing; there's no benefit to the model learning to "predict" a user's question verbatim, and doing so wastes capacity and gradient signal on a task (generating plausible-looking prompts) that has nothing to do with the actual goal (generating good responses). Masking focuses every unit of gradient signal on the part of the sequence the model will actually need to generate at inference time.
+
+## Data: What Makes a Good SFT Dataset
+
+SFT datasets are comparatively small relative to pretraining corpora — typically thousands to low tens-of-thousands of examples rather than trillions of tokens — but their quality matters disproportionately, since every single example directly shapes the model's response style and behavior. Sources typically include:
+
+- **Human-written demonstrations**: annotators write example responses to a diverse set of prompts, following detailed labeling guidelines about tone, format, and refusal behavior.
+- **Filtered/curated existing data**: high-quality question-answer or instruction-following text mined from existing corpora and filtered for quality.
+- **Model-generated data with human or model-based filtering**: increasingly common — using a strong existing model to draft candidate responses, then filtering or lightly editing them, which is far cheaper than pure human authorship at scale.
+
+<Callout type="note">
+  SFT is a necessary but not sufficient step for building a well-aligned assistant. It teaches format and surface-level instruction-following well, but SFT alone tends to underperform on subtler preferences (which of two plausible-sounding responses is actually better, how to handle ambiguous or borderline requests) — that's the gap RLHF and DPO are built to close on top of an SFT model.
+</Callout>
+
+## Code Sketch: Loss Masking in Practice
+
+```python
+import torch
+
+def build_labels(input_ids: torch.Tensor, prompt_lengths: torch.Tensor, pad_token_id: int):
+    """
+    input_ids: [batch, seq_len] — tokenized (prompt + response), padded
+    prompt_lengths: [batch] — number of prompt tokens per example
+    Returns labels with prompt tokens and padding set to -100 (ignored by
+    PyTorch's cross-entropy loss).
+    """
+    labels = input_ids.clone()
+    for i, plen in enumerate(prompt_lengths):
+        labels[i, :plen] = -100          # mask the prompt out of the loss
+    labels[input_ids == pad_token_id] = -100  # mask padding too
+    return labels
+
+# Standard HF training loop then just does:
+# outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+# loss = outputs.loss   # cross-entropy, automatically ignoring -100 positions
+```
+
+`-100` is PyTorch's (and Hugging Face's) convention for "ignore this position in the loss" — it's the mechanism that implements the mask described above without needing a custom loss function.
+
+## SFT vs. Pretraining vs. Preference-Based Alignment
+
+<ComparisonTable
+  headers={["Stage", "Objective", "Data", "Data scale", "What it teaches"]}
+  rows={[
+    ["Pretraining", "Next-token prediction over all tokens", "Raw internet-scale text", "Trillions of tokens", "General language modeling, world knowledge, broad capability"],
+    ["SFT", "Next-token prediction, masked to response tokens only", "Curated (prompt, response) pairs", "Thousands–low tens of thousands of examples", "Instruction-following format and surface behavior"],
+    ["RLHF / DPO", "Preference-based optimization (reward model + RL, or direct preference loss)", "Pairwise human preference comparisons between candidate responses", "Tens of thousands–low millions of comparisons", "Which of several plausible responses humans actually prefer"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "SFT reuses the exact same cross-entropy next-token objective as pretraining — the only structural change is loss masking, restricted to response tokens.",
+  "Prompt tokens are still part of the forward pass (attended to as context) — masking only removes them from the loss calculation, it does not remove them from the model's view.",
+  "SFT datasets are orders of magnitude smaller than pretraining corpora, but their quality has an outsized effect on the model's resulting style and behavior.",
+  "SFT alone typically isn't sufficient for strong alignment on subtler preferences — it's the base that RLHF or DPO build on top of.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Reuses the pretraining infrastructure and objective almost unchanged — no new loss function or training loop architecture needed.",
+    "Directly teaches format, tone, and instruction-following conventions from a relatively small, controllable dataset.",
+    "A necessary, well-understood, comparatively cheap step relative to RLHF/DPO's preference-data collection and (in RLHF's case) RL infrastructure.",
+  ]}
+  cons={[
+    "A common mistake: forgetting to mask the prompt tokens out of the loss, which wastes gradient signal on learning to reproduce arbitrary human-written prompts rather than focusing entirely on response quality.",
+    "Overfitting to a small SFT dataset is easy given how much smaller it is than the pretraining corpus — too many epochs over the same handful of thousand examples can measurably degrade general capability picked up during pretraining (sometimes called 'alignment tax' or catastrophic forgetting).",
+    "Treating SFT as the final alignment step rather than a foundation — SFT alone doesn't optimize for the fact that some correct-format responses are still meaningfully better than other correct-format responses, which is exactly the gap preference-based methods address.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "During SFT, why are prompt tokens still passed through the model's forward pass even though they're excluded from the loss?",
+    options: [
+      "Prompt tokens are actually excluded from the forward pass too — this is a common misconception",
+      "The model needs to attend to the prompt as context to generate an appropriate response; masking only removes prompt positions from the loss calculation, not from what the model can see via causal self-attention",
+      "Including prompt tokens in the forward pass is a bug that most implementations accidentally introduce",
+      "It saves GPU memory to run the forward pass but skip the loss",
+    ],
+    answerIndex: 1,
+    explanation: "Loss masking (typically implemented via label value -100) only affects which positions contribute to the cross-entropy loss during backpropagation. The forward pass still processes the full sequence — prompt and response — because causal self-attention needs the prompt as context to predict good response tokens.",
+  },
+  {
+    question: "Why does SFT reuse the same objective as pretraining (next-token cross-entropy) rather than a different loss function?",
+    options: [
+      "Because no other loss function is compatible with Transformer architectures",
+      "Because the underlying task — predict the next token given everything before it — is unchanged; what changes is the training data (curated instruction-response pairs) and the loss mask restricting gradient to the response",
+      "Because SFT and pretraining are actually the exact same process with no differences at all",
+      "Because cross-entropy is the only loss function that supports GPU acceleration",
+    ],
+    answerIndex: 1,
+    explanation: "SFT doesn't need a new mechanism — it needs the model to apply its existing next-token prediction ability to a narrower, curated data distribution (instruction-response pairs) while only being graded on generating the response, which loss masking achieves without altering the underlying objective.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Training language models to follow instructions with human feedback", authors: "Ouyang, L., Wu, J., Jiang, X., Almeida, D., Wainwright, C. L., Mishkin, P., et al.", venue: "arXiv:2203.02155", year: 2022, url: "https://arxiv.org/abs/2203.02155" },
+  { title: "Self-Instruct: Aligning Language Models with Self-Generated Instructions", authors: "Wang, Y., Kordi, Y., Mishra, S., Liu, A., Smith, N. A., Khashabi, D., & Hajishirzi, H.", venue: "arXiv:2212.10560", year: 2022, url: "https://arxiv.org/abs/2212.10560" },
+]} />

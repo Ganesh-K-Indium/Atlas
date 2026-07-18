@@ -1,0 +1,191 @@
+---
+title: "PPO & Trust Region Methods"
+description: "Why unconstrained policy gradient steps can silently destroy a policy, and how PPO's clipped surrogate objective enforces a trust region without the second-order machinery of TRPO."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["reinforcement-learning", "machine-learning", "ppo", "trpo", "trust-region", "policy-optimization"]
+prerequisites: ["Policy Gradients & Actor-Critic", "Q-Learning & Value-Based Methods", "Basic constrained optimization intuition (KL divergence as a distance between distributions)"]
+---
+
+<Prerequisites items={[
+  "Policy Gradients & Actor-Critic (policy gradient theorem, advantage function)",
+  "Basic notion of KL divergence as a distance between probability distributions",
+  "Gradient ascent and the idea of a step size",
+]} />
+
+<Callout type="note">
+  This page builds on [Policy Gradients & Actor-Critic](/docs/machine-learning/reinforcement-learning/policy-gradients-actor-critic), which derives the policy gradient theorem and the advantage function $A^\pi(s,a)$ used throughout below.
+</Callout>
+
+## Intuition
+
+Vanilla policy gradient methods take a step $\theta \leftarrow \theta + \alpha \nabla_\theta J(\theta)$ using gradient information computed from data collected under the *current* policy. This creates a subtle but severe problem: the step size $\alpha$ controls movement in *parameter* space, but what actually matters is movement in *policy behavior* space — and the relationship between the two is wildly nonlinear. A small change in $\theta$ can leave the policy's action distribution almost untouched in one part of parameter space, or catastrophically flip it (e.g. turning a mostly-safe driving policy into one that floors the accelerator) in another. Because the training data was collected under the *old* policy, the estimated gradient direction is only trustworthy for a *small* neighborhood of policies around the old one — take too large a step, and you can jump to a policy so different that it performs far worse, and (worse still) that bad policy is now the one collecting the *next* batch of training data. There is no "undo" — a policy collapse can be difficult or impossible to recover from, unlike an SGD misstep in supervised learning where the next mislabeled gradient step usually can't hurt much because the data distribution is fixed.
+
+**Trust region** methods address this directly: constrain each policy update so that the new policy stays within some bounded "distance" (measured by KL divergence) of the old policy, guaranteeing the update is conservative enough that the approximations underlying the policy gradient estimate remain valid. **TRPO** (Trust Region Policy Optimization) enforces this literally, as a constrained optimization problem, using second-order (Fisher information / natural gradient) machinery to solve it. **PPO** (Proximal Policy Optimization) approximates the same effect with a much simpler first-order trick: a clipped objective that removes the incentive to move too far, without ever explicitly constraining or measuring a KL divergence.
+
+<Callout type="tip" title="The one idea that matters">
+  PPO doesn't solve a constrained optimization problem — it *reshapes the objective* so that the policy has nothing to gain by moving too far from where the data was collected. Once the probability ratio between new and old policy exceeds a small window around 1, the clipped objective simply stops rewarding further movement in that direction, acting as a soft, built-in trust region.
+</Callout>
+
+## Formal Setup: The Surrogate Objective
+
+Because we want to reuse data collected under an old policy $\pi_{\theta_{\text{old}}}$ to evaluate and improve a new policy $\pi_\theta$, we need an off-policy correction. Importance sampling lets us re-weight the expectation of any quantity under one distribution using samples from another:
+
+$$
+\mathbb{E}_{a \sim \pi_\theta}[f(a)] = \mathbb{E}_{a \sim \pi_{\theta_{\text{old}}}}\left[ \frac{\pi_\theta(a\mid s)}{\pi_{\theta_{\text{old}}}(a \mid s)} f(a) \right].
+$$
+
+Applying this to the policy gradient objective (using the advantage $A^{\pi_{\theta_\text{old}}}(s,a)$ in place of the raw return, as derived on the actor-critic page, since it's a lower-variance, equally valid gradient signal) gives the **surrogate objective**:
+
+$$
+L^{\text{CPI}}(\theta) = \mathbb{E}_{(s,a)\sim \pi_{\theta_{\text{old}}}} \left[ \frac{\pi_\theta(a\mid s)}{\pi_{\theta_{\text{old}}}(a\mid s)} \, A^{\pi_{\theta_{\text{old}}}}(s,a) \right].
+$$
+
+Define the **probability ratio** $r_t(\theta) = \dfrac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\text{old}}}(a_t\mid s_t)}$, so $r_t(\theta_{\text{old}}) = 1$ exactly at the old policy. The surrogate objective is a good local approximation to the true improvement in expected return near $\theta_{\text{old}}$ (this is the "conservative policy iteration" result underlying both TRPO and PPO) — but maximizing $L^{\text{CPI}}(\theta)$ *without any constraint* is dangerous: nothing stops $\theta$ from drifting to a point where $r_t(\theta)$ is enormous and the linear approximation is no longer valid, producing an update that looks good on the (invalid) surrogate but is actually catastrophic on the real objective.
+
+## TRPO: Explicit Trust Region
+
+TRPO makes the "stay close to the old policy" requirement literal, by maximizing the surrogate objective subject to a hard constraint on the average KL divergence between old and new policy:
+
+$$
+\max_\theta \; \mathbb{E}\left[ r_t(\theta) A_t \right] \quad \text{subject to} \quad \mathbb{E}_{s}\big[ D_{KL}(\pi_{\theta_{\text{old}}}(\cdot\mid s) \,\|\, \pi_\theta(\cdot\mid s)) \big] \le \delta.
+$$
+
+Solving this constrained problem requires approximating the KL constraint with its second-order (Fisher information matrix) expansion and using conjugate gradient plus a line search to find a step that improves the objective while respecting the constraint — correct, but computationally heavy and fiddly to implement (it needs Hessian-vector products and careful numerical safeguards).
+
+## Derivation: PPO's Clipped Surrogate Objective
+
+PPO's goal is to get *approximately* the same effect as TRPO's KL constraint — discourage large policy changes — using only first-order gradient information, no Hessians, no constrained optimization solver.
+
+Start from the unclipped surrogate objective for a single sample, $r_t(\theta) A_t$. The problem case is when $A_t > 0$ (the action was better than average): maximizing $r_t(\theta) A_t$ pushes $r_t(\theta) \to \infty$ with no limit, i.e. it keeps increasing the probability of that action without bound, which is exactly the runaway-update failure mode. Symmetrically, when $A_t < 0$, maximizing $r_t(\theta)A_t$ pushes $r_t(\theta) \to 0$, driving the action's probability to zero, again without limit.
+
+PPO's fix is to clip the ratio to a fixed interval $[1-\epsilon, 1+\epsilon]$ around 1 (typical $\epsilon = 0.2$), forming a second, clipped copy of the objective, and then take the **minimum** of the clipped and unclipped versions:
+
+$$
+L^{\text{CLIP}}(\theta) = \mathbb{E}_t \Big[ \min\big( r_t(\theta)\, A_t, \; \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\, A_t \big) \Big].
+$$
+
+To see why the min with a clipped term removes the incentive to overshoot, consider the two cases separately:
+
+**Case $A_t > 0$** (good action — we want to increase its probability, but only up to a point). For $r_t \le 1+\epsilon$, both terms inside the min are equal ($\text{clip}$ is inactive), so the objective behaves like the ordinary surrogate. Once $r_t > 1+\epsilon$, the clipped term flattens at $(1+\epsilon)A_t$ while the unclipped term $r_t A_t$ keeps growing — and since $A_t>0$, the *smaller* of the two is now the flat clipped term. Taking the min therefore caps the objective's value (and hence its gradient — the flat region has zero gradient with respect to $\theta$) once $r_t$ exceeds $1+\epsilon$: **there is no more benefit to pushing $r_t$ higher**, so gradient ascent stops rewarding further movement in that direction.
+
+**Case $A_t < 0$** (bad action — we want to decrease its probability, but only up to a point). Here we care about the direction gradient ascent naturally moves $r_t$: since $A_t<0$, the unclipped term $r_t A_t$ is increased by *decreasing* $r_t$, so ascent pushes $r_t \to 0$ with no limit — the runaway case, mirroring $A_t>0$ but in the opposite direction. Once $r_t$ drops below $1-\epsilon$, the clipped term flattens at $(1-\epsilon)A_t$, a fixed (negative) number no longer sensitive to further decreases in $r_t$, while the unclipped term $r_t A_t$ keeps *increasing* as $r_t \to 0$ (a negative number times a shrinking-toward-zero positive ratio grows toward zero, i.e. increases). Since the clipped term is now the *smaller* of the two once $r_t<1-\epsilon$, the min selects it — again capping the objective and zeroing the gradient with respect to further decreases in $r_t$.
+
+In both cases, the min operator selects whichever term is more pessimistic (lower), and that pessimistic term happens to be the flat, clipped one exactly once $r_t$ has moved past the boundary in the direction ascent was already pushing it. That's what removes the incentive to keep moving the policy further away from $\pi_{\theta_\text{old}}$ once the ratio has left the trusted $[1-\epsilon, 1+\epsilon]$ band.
+
+The net effect: $L^{\text{CLIP}}$ behaves identically to the unclipped surrogate for small policy changes ($r_t$ near 1), but removes the *gradient signal* to keep changing the policy once the ratio has moved by more than $\epsilon$ — the policy simply stops being pushed further in that direction by that sample. This is a soft, per-sample, first-order surrogate for TRPO's hard, global, second-order KL constraint: no explicit KL divergence is ever computed, yet large, destabilizing steps are discouraged by construction.
+
+<Mermaid chart={`
+graph TD
+  A["Collect trajectories with π_θ_old"] --> B["Compute advantage estimates A_t"]
+  B --> C["Compute ratio r_t(θ) = π_θ(a|s) / π_θ_old(a|s)"]
+  C --> D{"r_t(θ) inside [1-ε, 1+ε]?"}
+  D -- "Yes" --> E["Use r_t(θ)·A_t (behaves like vanilla surrogate)"]
+  D -- "No, and moving further from 1 would increase objective" --> F["Clipped term dominates the min → flat, zero gradient"]
+  E --> G["Gradient ascent step on L_CLIP"]
+  F --> G
+  G --> A
+`} />
+
+## Code Example: Computing the PPO Clipped Objective
+
+```python
+import numpy as np
+
+def ppo_clipped_objective(new_log_probs, old_log_probs, advantages, epsilon=0.2):
+    """
+    new_log_probs, old_log_probs: log pi_theta(a|s), log pi_theta_old(a|s) for a batch of (s,a) samples
+    advantages: estimated A(s,a) for each sample (e.g. from GAE, using the critic)
+    Returns the scalar PPO-CLIP loss to *minimize* (negative of the objective to maximize).
+    """
+    ratio = np.exp(new_log_probs - old_log_probs)          # r_t(theta), numerically stable via log-space subtraction
+    unclipped = ratio * advantages
+    clipped = np.clip(ratio, 1 - epsilon, 1 + epsilon) * advantages
+    per_sample_objective = np.minimum(unclipped, clipped)   # pessimistic bound, per the derivation above
+    objective = per_sample_objective.mean()
+    loss = -objective                                        # gradient ASCENT on objective == gradient DESCENT on -objective
+    return loss
+
+# Sanity check: when the ratio is exactly 1 (theta == theta_old), clipping never activates
+r = np.array([1.0, 1.0])
+adv = np.array([2.0, -1.5])
+assert np.isclose(ppo_clipped_objective(np.log(r), np.zeros_like(r), adv), -np.minimum(r*adv, r*adv).mean())
+```
+
+In a full implementation, `new_log_probs` are recomputed every epoch of optimization as $\theta$ changes (the policy is optimized for several epochs on the same batch of collected data before new trajectories are gathered), while `old_log_probs` and `advantages` are fixed at the values computed when the data was collected — this reuse of a batch for multiple gradient steps is exactly what makes clipping necessary: without it, several epochs of unclipped ascent on the same batch could push the ratio far from 1.
+
+<ComparisonTable
+  headers={["Method", "Mechanism", "Requires", "Typical implementation cost"]}
+  rows={[
+    ["Vanilla policy gradient", "Unconstrained ascent on E[∇log π · A]", "Nothing beyond first-order gradients", "Low, but prone to destructively large steps"],
+    ["TRPO", "Hard KL-divergence constraint, solved via conjugate gradient + line search", "Fisher-information / Hessian-vector products", "High — second-order, fiddly to implement correctly"],
+    ["PPO (clipped)", "Clip the probability ratio into [1−ε, 1+ε] and take a min with the unclipped term", "Only first-order gradients", "Low — simple to implement, robust in practice"],
+  ]}
+/>
+
+<ProsCons
+  pros={[
+    "PPO achieves TRPO-like stability using only first-order optimization (plain SGD/Adam), making it dramatically simpler to implement and tune.",
+    "The clipping mechanism is a soft trust region applied per-sample, requiring no explicit KL computation, Hessian-vector products, or line search.",
+    "PPO allows multiple gradient epochs over the same batch of collected data (improving sample efficiency versus vanilla policy gradient, which typically takes one gradient step per batch), because the clip term bounds how far any single epoch can push the policy.",
+  ]}
+  cons={[
+    "The clipping bound ε is a heuristic hyperparameter, not a principled measure of policy distance the way TRPO's KL constraint is — two policies with the same average ratio-clipping can differ in actual behavioral distance.",
+    "PPO provides no formal monotonic-improvement guarantee the way TRPO's derivation does; it works very well empirically but the theoretical guarantees are weaker.",
+    "Still requires a reasonably accurate advantage estimate (typically via GAE and a learned critic) — a noisy or biased advantage undermines the clipping mechanism's benefits.",
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Unconstrained policy gradient ascent can take arbitrarily large steps in policy-behavior space even for small parameter-space steps, and because training data is collected on-policy, a bad step corrupts the next batch of training data too — there's no 'undo.'",
+  "Trust region methods bound each update's KL divergence from the old policy so that the surrogate objective (built via importance sampling / the probability ratio r_t(θ)) remains a valid local approximation to true policy improvement.",
+  "TRPO enforces this as an explicit constrained optimization problem using second-order (Fisher information) methods; PPO instead reshapes the objective itself.",
+  "PPO's clipped objective takes the min of the unclipped surrogate r_t(θ)·A_t and a version with r_t(θ) clipped to [1−ε, 1+ε] — this removes the gradient incentive to push the ratio outside that band once doing so would inflate the objective.",
+  "PPO trades TRPO's theoretical monotonic-improvement guarantee for enormously simpler first-order implementation, and in practice matches or exceeds TRPO's performance across most benchmarks.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Pitfalls to avoid">
+  - **Believing PPO explicitly computes or bounds a KL divergence.** It doesn't — the clipped ratio is a proxy that discourages large moves, but two policies can satisfy the clip bound while still differing substantially in KL divergence; some PPO variants add an explicit KL penalty term as a supplementary safeguard, but the core "clip" version does not.
+  - **Forgetting why clipping alone is not enough without the min.** Clipping the ratio by itself, without the outer min against the unclipped term, does not fully prevent bad updates — the min is what ensures the *pessimistic* (lower) estimate is always used, so that the objective can't be improved by exploiting the region *between* the true objective and its clipped surrogate.
+  - **Reusing a batch for too many optimization epochs.** While PPO's clipping tolerates multiple epochs on the same batch (unlike vanilla policy gradient), too many epochs still let the effective policy drift far from the data-collecting policy in aggregate, degrading performance — this is tuned via the number of epochs and minibatch size, not the clip parameter alone.
+  - **Confusing PPO's ratio clipping with gradient clipping.** They are unrelated mechanisms — ratio clipping bounds the *policy probability ratio* inside the objective; gradient clipping (a separate, optional technique) bounds the norm of the *gradient vector* during optimization.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why can an unconstrained (vanilla) policy gradient step be more dangerous than an unconstrained supervised-learning gradient step?",
+    options: [
+      "It isn't more dangerous — both are equally robust to large steps",
+      "Because a large policy gradient step both degrades performance and corrupts the *data-collection* distribution for the next update (the new, worse policy generates the next training batch), whereas supervised learning's data distribution is typically fixed regardless of model quality",
+      "Because policy gradients always use a larger learning rate than supervised learning by convention",
+      "Because policy networks are always deeper than supervised learning networks",
+    ],
+    answerIndex: 1,
+    explanation: "In RL, the current policy determines what data gets collected next; a destructive update doesn't just produce a worse model, it produces a worse policy that then generates a worse (and potentially unrecoverable) training distribution. Supervised learning's data distribution is independent of the model's current parameters, so a bad gradient step there doesn't compound the same way.",
+  },
+  {
+    question: "In PPO's clipped surrogate objective L_CLIP = E[min(r_t(θ)A_t, clip(r_t(θ), 1−ε, 1+ε)A_t)], what is the purpose of taking the min rather than just clipping the ratio directly?",
+    options: [
+      "The min has no real purpose; it's included only for numerical stability",
+      "Taking the min ensures the objective always uses the more pessimistic (lower) of the clipped and unclipped estimates, so that once the ratio has moved outside [1−ε, 1+ε] in a direction that would increase the objective, there is no more gradient incentive to push it further in that direction",
+      "The min is used to average the clipped and unclipped objectives for a smoother loss surface",
+      "The min ensures the ratio r_t(θ) is always exactly 1 during training",
+    ],
+    answerIndex: 1,
+    explanation: "Simply clipping the ratio (without the min) can still let the objective be improved by moving the ratio outside the trusted band, since the clipped value itself could exceed the true unclipped value in some regime. Taking the min with the unclipped term guarantees the objective never overstates the benefit of moving further away from the old policy once it's left the [1−ε, 1+ε] band, removing the gradient incentive to keep going.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Proximal Policy Optimization Algorithms", authors: "Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O.", venue: "arXiv:1707.06347", year: 2017, url: "https://arxiv.org/abs/1707.06347" },
+  { title: "Trust Region Policy Optimization", authors: "Schulman, J., Levine, S., Abbeel, P., Jordan, M., & Moritz, P.", venue: "arXiv:1502.05477 / ICML", year: 2015, url: "https://arxiv.org/abs/1502.05477" },
+  { title: "Reinforcement Learning: An Introduction (2nd ed.)", authors: "Sutton, R. S., & Barto, A. G.", venue: "MIT Press", year: 2018 },
+  { title: "High-Dimensional Continuous Control Using Generalized Advantage Estimation", authors: "Schulman, J., Moritz, P., Levine, S., Jordan, M., & Abbeel, P.", venue: "arXiv:1506.02438", year: 2016, url: "https://arxiv.org/abs/1506.02438" },
+]} />

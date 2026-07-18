@@ -1,0 +1,237 @@
+---
+title: "Linear & Logistic Regression"
+description: "The two workhorse linear models — one derived from minimizing squared error in closed form, the other from maximum likelihood on a Bernoulli outcome — and why a sigmoid is the inevitable consequence of that derivation, not a design choice."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["machine-learning", "supervised-learning", "regression", "classification", "linear-models"]
+prerequisites: ["Basic linear algebra (matrix multiplication, inverses)", "Derivatives and the chain rule", "Probability basics (Bernoulli distribution)"]
+---
+
+<Prerequisites items={["Basic linear algebra (matrix multiplication, inverses)", "Derivatives and the chain rule", "Probability basics (Bernoulli distribution)"]} />
+
+## Intuition
+
+**Linear regression** predicts a continuous number as a weighted sum of the inputs. **Logistic regression** predicts the *probability* of a binary event, also as a function of a weighted sum of the inputs — but it squashes that sum through a function that guarantees the output stays between 0 and 1. Despite the name, logistic regression is a classifier, not a regressor.
+
+Both models share the same backbone — a linear combination $w^\top x + b$ — and differ only in what happens to that combination afterward, and in what loss function is used to fit the weights.
+
+<Callout type="tip" title="The core idea">
+  Linear regression finds the weights that minimize squared prediction error, which has a **closed-form solution** because the loss is quadratic. Logistic regression finds the weights that maximize the likelihood of the observed labels under a Bernoulli model, and the sigmoid function isn't chosen arbitrarily — it **falls out of the algebra** when you write down the Bernoulli log-likelihood and take its gradient.
+</Callout>
+
+## Formal Definition
+
+**Linear regression.** Given inputs $x \in \mathbb{R}^d$ and targets $y \in \mathbb{R}$, we model
+
+$$
+\hat{y} = w^\top x + b
+$$
+
+and fit $w, b$ by minimizing the mean squared error (MSE) over $n$ training examples:
+
+$$
+J(w, b) = \frac{1}{n}\sum_{i=1}^n \left(y_i - w^\top x_i - b\right)^2
+$$
+
+**Logistic regression.** Given the same linear score $z = w^\top x + b$ (often called the *logit*), we map it to a probability via the sigmoid function:
+
+$$
+\sigma(z) = \frac{1}{1 + e^{-z}}, \qquad P(y=1 \mid x) = \sigma(w^\top x + b)
+$$
+
+and fit $w, b$ by maximizing the likelihood of the observed binary labels $y_i \in \{0, 1\}$.
+
+## Derivation
+
+### 1. Closed-form OLS via the normal equations
+
+Absorb the bias into $w$ by appending a constant $1$ to every $x_i$, and stack all examples into a design matrix $X \in \mathbb{R}^{n \times (d+1)}$ and target vector $y \in \mathbb{R}^n$. The loss becomes
+
+$$
+J(w) = \frac{1}{n}\lVert y - Xw \rVert_2^2 = \frac{1}{n}(y - Xw)^\top(y - Xw)
+$$
+
+Expand and take the gradient with respect to $w$:
+
+$$
+J(w) = \frac{1}{n}\left(y^\top y - 2 w^\top X^\top y + w^\top X^\top X w\right)
+$$
+
+$$
+\nabla_w J(w) = \frac{1}{n}\left(-2 X^\top y + 2 X^\top X w\right)
+$$
+
+$J(w)$ is convex in $w$ (its Hessian $\frac{2}{n}X^\top X$ is positive semi-definite), so the global minimum is where the gradient is zero:
+
+$$
+X^\top X w = X^\top y \qquad \Longrightarrow \qquad w^* = (X^\top X)^{-1} X^\top y
+$$
+
+These are the **normal equations**. They give the exact minimizer in one step, provided $X^\top X$ is invertible (i.e., the features aren't perfectly collinear and $n \geq d+1$). When $X^\top X$ is ill-conditioned or singular, ridge regression adds $\lambda I$ before inverting, which is also what makes the matrix invertible again: $w^* = (X^\top X + \lambda I)^{-1}X^\top y$.
+
+### 2. Logistic regression: the sigmoid falls out of Bernoulli MLE
+
+Model each label as a Bernoulli random variable with success probability $p_i = \sigma(z_i)$, $z_i = w^\top x_i$. The likelihood of the whole dataset is
+
+$$
+L(w) = \prod_{i=1}^n p_i^{y_i}(1-p_i)^{1-y_i}
+$$
+
+Taking logs turns the product into a sum (the log-likelihood):
+
+$$
+\ell(w) = \sum_{i=1}^n \Big[ y_i \log p_i + (1-y_i)\log(1-p_i) \Big]
+$$
+
+We want to **maximize** $\ell(w)$, equivalently minimize the negative log-likelihood, which is exactly binary cross-entropy. To optimize it we need $\partial \ell / \partial w$. This requires $\partial p_i/\partial z_i$, i.e., the derivative of the sigmoid itself. A short computation shows the sigmoid has a remarkably clean derivative in terms of itself:
+
+$$
+\frac{d\sigma(z)}{dz} = \sigma(z)\big(1-\sigma(z)\big)
+$$
+
+*(Proof: $\sigma(z) = (1+e^{-z})^{-1}$, so $\sigma'(z) = e^{-z}(1+e^{-z})^{-2} = \sigma(z)\cdot\frac{e^{-z}}{1+e^{-z}} = \sigma(z)(1-\sigma(z))$.)*
+
+Now apply the chain rule to one term of $\ell$, dropping the $i$ subscript for clarity ($p = \sigma(z)$):
+
+$$
+\frac{\partial}{\partial z}\Big[y\log p + (1-y)\log(1-p)\Big] = \frac{y}{p} \cdot p(1-p) - \frac{1-y}{1-p}\cdot p(1-p)
+$$
+
+$$
+= y(1-p) - (1-y)p = y - yp - p + yp = y - p
+$$
+
+The $p(1-p)$ terms — the sigmoid's own derivative — cancel almost entirely against the $1/p$ and $1/(1-p)$ from the log, leaving the strikingly simple **residual** $y - p = y - \sigma(z)$. Since $z = w^\top x$, by the chain rule $\partial z/\partial w = x$, so:
+
+$$
+\nabla_w \ell(w) = \sum_{i=1}^n \big(y_i - \sigma(w^\top x_i)\big)\, x_i
+$$
+
+This has exactly the same *form* as the linear regression gradient (residual times input), which is why the two models feel so related — but unlike OLS, this equation has no closed-form solution for $w$ because $\sigma$ is nonlinear. It's solved iteratively, typically with gradient descent or Newton's method (iteratively reweighted least squares):
+
+$$
+w \leftarrow w + \eta \sum_{i=1}^n \big(y_i - \sigma(w^\top x_i)\big) x_i
+$$
+
+The sigmoid wasn't an arbitrary "squashing function" choice — it is the function whose log-likelihood gradient collapses to this clean residual form, which is precisely because $\sigma$ is the canonical link function of the Bernoulli distribution in the generalized linear model framework.
+
+<Mermaid chart={`graph LR
+  A[Input x] --> B["Linear score z = w^T x + b"]
+  B -->|Linear regression| C["Prediction = z (identity link)"]
+  B -->|Logistic regression| D["sigma(z) = 1 / (1 + e^-z)"]
+  D --> E{"sigma(z) >= 0.5?"}
+  E -->|Yes| F[Predict class 1]
+  E -->|No| G[Predict class 0]
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.preprocessing import StandardScaler
+
+# --- Linear regression via scikit-learn (uses closed-form / SVD internally) ---
+X_reg, y_reg = np.random.randn(200, 3), np.random.randn(200)
+lin = LinearRegression().fit(X_reg, y_reg)
+print(lin.coef_, lin.intercept_)
+
+# --- Normal equations from scratch, to see the closed form directly ---
+X_design = np.hstack([X_reg, np.ones((X_reg.shape[0], 1))])
+w_star = np.linalg.solve(X_design.T @ X_design, X_design.T @ y_reg)
+print(w_star)  # matches lin.coef_ / lin.intercept_ up to ordering
+
+# --- Logistic regression via scikit-learn ---
+X_clf = np.random.randn(200, 3)
+y_clf = (X_clf[:, 0] + X_clf[:, 1] > 0).astype(int)
+clf = LogisticRegression().fit(StandardScaler().fit_transform(X_clf), y_clf)
+
+# --- Gradient ascent on the log-likelihood, from scratch ---
+def sigmoid(z):
+    return 1 / (1 + np.exp(-z))
+
+def fit_logistic(X, y, lr=0.1, epochs=1000):
+    w = np.zeros(X.shape[1])
+    for _ in range(epochs):
+        p = sigmoid(X @ w)
+        grad = X.T @ (y - p)          # exactly the derived gradient
+        w += lr * grad / len(y)
+    return w
+
+X_bias = np.hstack([X_clf, np.ones((X_clf.shape[0], 1))])
+w_scratch = fit_logistic(X_bias, y_clf)
+```
+
+## Complexity
+
+| Operation | Time | Space | Notes |
+| --- | --- | --- | --- |
+| OLS via normal equations | $O(nd^2 + d^3)$ | $O(d^2)$ | $d^3$ term is the matrix inverse; infeasible for very large $d$ |
+| OLS via gradient descent | $O(nd)$ per epoch | $O(d)$ | Preferred when $d$ is large or $X^\top X$ is singular |
+| Logistic regression (gradient descent / Newton) | $O(nd)$ per iteration ($O(nd^2 + d^3)$ per Newton step) | $O(d)$ (or $O(d^2)$ for Newton) | No closed form; iterative to convergence |
+| Inference (either model) | $O(d)$ | $O(d)$ | A single dot product |
+
+<ProsCons
+  pros={[
+    "Extremely fast to train and predict, trivially interpretable (coefficients have direct meaning), and a strong, well-calibrated baseline before reaching for complex models.",
+    "Convex loss in both cases means gradient descent (or the closed form) always finds the global optimum — no local minima to worry about.",
+    "Logistic regression outputs calibrated probabilities, not just hard labels, which is valuable for risk-sensitive decisions.",
+  ]}
+  cons={[
+    "Both assume a linear relationship between features and the (link-transformed) target — they cannot capture interactions or nonlinearities unless you engineer them manually.",
+    "Sensitive to multicollinearity: highly correlated features make $X^\\top X$ ill-conditioned, inflating coefficient variance.",
+    "Logistic regression's decision boundary is always a hyperplane, which fails on data that isn't linearly separable in the original feature space.",
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Linear regression's normal equations exist because the squared-error loss is quadratic and convex, giving a closed-form global minimum.",
+  "Logistic regression has no closed form because the sigmoid is nonlinear, but its maximum-likelihood gradient reduces to the same clean 'residual times input' form as linear regression.",
+  "The sigmoid isn't an arbitrary squashing function — it emerges from writing the Bernoulli log-likelihood and differentiating, making logistic regression the canonical generalized linear model for binary outcomes.",
+  "Both models are convex optimization problems, so gradient descent (or closed-form solving) is guaranteed to find the global optimum.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Frequent errors">
+  - Forgetting to scale features before gradient-descent-based logistic regression — unscaled features cause slow, unstable convergence.
+  - Interpreting logistic regression coefficients as probabilities directly, rather than as changes in the **log-odds** (logit) — a coefficient of 0.5 does not mean "50% more likely."
+  - Using plain linear regression for a 0/1 target ("linear probability model") — this can produce predictions outside $[0, 1]$ and violates the constant-variance assumption of OLS.
+  - Trusting $(X^\top X)^{-1}$ blindly with near-collinear features; check the condition number or use ridge regression instead.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does linear regression have a closed-form solution but logistic regression does not?",
+    options: [
+      "Logistic regression has more parameters",
+      "The squared-error loss is quadratic in the weights, so its gradient is linear and can be solved directly; the log-likelihood loss involves a nonlinear sigmoid, so its gradient has no algebraic solution for the weights",
+      "Logistic regression is not convex",
+      "Linear regression uses fewer training examples",
+    ],
+    answerIndex: 1,
+    explanation: "OLS's loss is a quadratic form in w, so setting its gradient to zero yields a linear system (the normal equations). Logistic regression's log-likelihood gradient involves sigma(w^T x), which is nonlinear in w, so no closed-form algebraic inverse exists — it must be solved iteratively, even though the loss is still convex.",
+  },
+  {
+    question: "In the derivation of the logistic regression gradient, what happens to the sigmoid derivative term sigma(z)(1-sigma(z))?",
+    options: [
+      "It has no role in the derivation",
+      "It cancels almost exactly against the 1/p and 1/(1-p) terms from differentiating the log-likelihood, leaving the simple residual (y - sigma(z))",
+      "It is added as a regularization penalty",
+      "It causes the gradient to vanish for all inputs",
+    ],
+    answerIndex: 1,
+    explanation: "Differentiating the log-likelihood term via the chain rule multiplies 1/p and -1/(1-p) by the sigmoid derivative p(1-p). Distributing and simplifying, the p(1-p) factors cancel the fractions entirely, collapsing the expression to y - p — this is why the gradient looks identical in form to linear regression's residual-times-input gradient.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "The Elements of Statistical Learning", authors: "Hastie, T., Tibshirani, R., & Friedman, J.", venue: "Springer", year: 2009 },
+  { title: "Generalized Linear Models", authors: "McCullagh, P., & Nelder, J. A.", venue: "Chapman & Hall", year: 1989 },
+  { title: "Pattern Recognition and Machine Learning", authors: "Bishop, C. M.", venue: "Springer", year: 2006 },
+]} />

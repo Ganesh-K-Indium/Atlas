@@ -1,0 +1,184 @@
+---
+title: "Diffusion Models & Stable Diffusion"
+description: "How gradually destroying data with noise, then training a network to undo it one small step at a time, became the dominant approach to high-fidelity image generation."
+difficulty: "expert"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "generative-models", "diffusion", "ddpm", "stable-diffusion"]
+prerequisites: ["Variational Autoencoders (VAEs)", "Gaussian distributions and reparameterization", "Markov chains (basic notion)"]
+---
+
+## Intuition
+
+Diffusion models take a strikingly indirect route to generation: instead of learning to map noise to data in one shot (as a GAN's generator does), they define a **fixed process that gradually destroys** a data point by adding small amounts of Gaussian noise over many steps, until it's indistinguishable from pure noise — and then train a neural network to **reverse that process one small step at a time**. Generation becomes: start from pure noise, and repeatedly ask the network "given this noisy version, what did the slightly-less-noisy previous version look like?", until you arrive back at a clean, novel sample.
+
+The reason this works better than trying to jump directly from noise to data: predicting a *tiny* denoising step is a far easier learning problem than predicting the full data distribution from noise in one leap. Each step only has to undo a small, known amount of corruption, and the fixed forward process gives an exact, computable target for what that undo-step should look like on average.
+
+<Callout type="tip" title="The one-sentence idea">
+  Define a fixed forward process that turns data into noise over many small Gaussian steps, train a network to predict (and thus undo) the noise added at each step, and generate new samples by running that learned denoising process backward from pure noise.
+</Callout>
+
+## The Forward (Noising) Process
+
+The forward process $q$ is a fixed Markov chain — no learned parameters — that adds a small amount of Gaussian noise at each of $T$ steps (commonly on the order of hundreds to a few thousand in the original DDPM formulation), according to a variance schedule $\beta_1, \dots, \beta_T$ (each $\beta_t$ small, typically increasing with $t$):
+
+$$
+q(x_t \mid x_{t-1}) = \mathcal{N}\!\left(x_t;\ \sqrt{1-\beta_t}\, x_{t-1},\ \beta_t I\right)
+$$
+
+Because this is a chain of Gaussians, there's a well-known closed form to jump directly from the clean data $x_0$ to any noise level $t$ without simulating every intermediate step — a key computational convenience. Defining $\alpha_t = 1-\beta_t$ and $\bar{\alpha}_t = \prod_{s=1}^{t} \alpha_s$:
+
+$$
+q(x_t \mid x_0) = \mathcal{N}\!\left(x_t;\ \sqrt{\bar{\alpha}_t}\, x_0,\ (1-\bar{\alpha}_t) I\right) \quad \Longleftrightarrow \quad x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1-\bar{\alpha}_t}\, \epsilon,\ \ \epsilon \sim \mathcal{N}(0, I)
+$$
+
+As $t \to T$, $\bar{\alpha}_t \to 0$ (by design of the schedule), so $x_T$ approaches pure isotropic Gaussian noise regardless of $x_0$ — the forward process has a known, fixed endpoint distribution, which is exactly what lets generation start from simple noise.
+
+## The Reverse (Denoising) Process
+
+The reverse process $p_\theta(x_{t-1} \mid x_t)$ is what a neural network learns. The true reverse conditional $q(x_{t-1} \mid x_t, x_0)$ is *also* Gaussian (a consequence of Bayes' rule applied to Gaussians) with a mean that is a known function of $x_t$, $x_0$, and the schedule — but computing it at generation time requires $x_0$, which isn't known yet (that's the whole point of generating it). So the network is trained to approximate this reverse conditional using only $x_t$ and $t$:
+
+$$
+p_\theta(x_{t-1} \mid x_t) = \mathcal{N}\!\left(x_{t-1};\ \mu_\theta(x_t, t),\ \Sigma_\theta(x_t, t)\right)
+$$
+
+**The key simplification from Ho et al. (2020):** rather than have the network directly predict $\mu_\theta$ or $x_0$, it's both mathematically equivalent and empirically far more effective to reparameterize the network to predict the **noise $\epsilon$** that was added to produce $x_t$ from $x_0$. Given the forward-process closed form above, knowing $\epsilon$ (and $t$) is equivalent to knowing $x_0$, hence equivalent to knowing the true reverse mean. So the network $\epsilon_\theta(x_t, t)$ is trained to predict the noise vector directly, and the true posterior mean is substituted with its estimate:
+
+$$
+\mu_\theta(x_t, t) = \frac{1}{\sqrt{\alpha_t}}\left( x_t - \frac{\beta_t}{\sqrt{1-\bar{\alpha}_t}}\, \epsilon_\theta(x_t, t) \right)
+$$
+
+## Connecting Training to a Variational Bound
+
+Diffusion models are trained by maximizing a variational lower bound on $\log p_\theta(x_0)$, in the same spirit as a VAE's ELBO (in fact, a diffusion model can be viewed as a deep hierarchical VAE with a fixed, non-learned encoder — the forward process — and $T$ latent variables $x_1, \dots, x_T$). The bound decomposes into a sum of KL divergences between the true reverse posterior $q(x_{t-1}\mid x_t, x_0)$ and the model's reverse step $p_\theta(x_{t-1}\mid x_t)$ at every timestep, plus a reconstruction term — directly analogous to the VAE ELBO's reconstruction-term-plus-KL-to-prior structure, just with $T$ intermediate KL terms instead of one.
+
+Because both distributions being compared at each step are Gaussian, each per-step KL term reduces to a weighted squared difference between the true mean and the predicted mean — and substituting the noise-prediction reparameterization above, Ho et al. show this simplifies (after dropping certain timestep-dependent weighting terms, which they find empirically improves sample quality over the exact weighting derived from the bound) to a simple **denoising score-matching loss**:
+
+$$
+L_{\text{simple}}(\theta) = \mathbb{E}_{t,\, x_0,\, \epsilon}\Big[ \big\| \epsilon - \epsilon_\theta(x_t, t) \big\|^2 \Big], \qquad x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1-\bar{\alpha}_t}\, \epsilon
+$$
+
+In words: sample a training image $x_0$, a random timestep $t$, and noise $\epsilon$; construct the corresponding noisy $x_t$ via the closed-form forward equation; and train the network to predict the noise $\epsilon$ that was used, via plain mean-squared error. This is remarkably simple to implement despite the elaborate derivation behind it — the network never even needs to see the variance schedule's exact probabilistic role during training, just the resulting $x_t$, $t$, and target $\epsilon$.
+
+## Sampling (Reverse Generation)
+
+Starting from $x_T \sim \mathcal{N}(0, I)$, sampling iterates the learned reverse step for $t = T, \dots, 1$:
+
+$$
+x_{t-1} = \frac{1}{\sqrt{\alpha_t}}\left( x_t - \frac{\beta_t}{\sqrt{1-\bar{\alpha}_t}}\, \epsilon_\theta(x_t, t) \right) + \sigma_t z, \qquad z \sim \mathcal{N}(0, I) \text{ (for } t>1\text{, else } z=0\text{)}
+$$
+
+where $\sigma_t$ is a (fixed or learned) per-step noise scale. This is why naive DDPM sampling is slow — generating one sample requires running the network sequentially for every one of the $T$ training timesteps (commonly ~1000 in the original formulation); much follow-up work (e.g., DDIM and other fast samplers) focuses specifically on reducing the number of sampling steps needed without retraining.
+
+<Mermaid chart={`
+graph LR
+  subgraph Forward["Forward process (fixed, no learning)"]
+    X0["x_0 (clean data)"] -->|"+ noise"| X1["x_1"]
+    X1 -->|"+ noise"| Xdots["..."]
+    Xdots -->|"+ noise"| XT["x_T (~pure noise)"]
+  end
+  subgraph Reverse["Reverse process (learned network predicts noise)"]
+    XT2["x_T"] -->|"predict & remove noise"| XTm1["x_T-1"]
+    XTm1 -->|"predict & remove noise"| Rdots["..."]
+    Rdots -->|"predict & remove noise"| X02["x_0 (generated sample)"]
+  end
+`} />
+
+## Latent Diffusion: Running the Process in a Compressed Space
+
+Running the full forward/reverse process directly on high-resolution pixel data is computationally expensive — every one of the many sampling steps requires a full network forward pass over the full image resolution. **Latent Diffusion Models** (the approach underlying Stable Diffusion) address this with a straightforward idea: first compress images into a much smaller latent representation using a pretrained autoencoder (conceptually similar to a VAE's encoder/decoder), then run the *entire* forward-noising and reverse-denoising diffusion process in that compressed latent space instead of pixel space, and finally decode the generated latent back into a full-resolution image with the autoencoder's decoder.
+
+Because the latent space is much lower-dimensional than pixel space, this dramatically reduces the compute cost of every diffusion step while (empirically) preserving perceptual quality — the autoencoder is trained to preserve the image details that matter perceptually, and the diffusion process only has to model the coarser, more compressible structure. Text-conditioning (as in Stable Diffusion) is typically incorporated by feeding text-encoder embeddings into the denoising network via cross-attention at each step, letting the same iterative denoising process be steered toward images matching a prompt — the precise architectural specifics vary by implementation and are evolving quickly, so treat this as the general shape rather than a fixed spec.
+
+<ComparisonTable
+  headers={["Property", "Pixel-space DDPM", "Latent diffusion (Stable Diffusion-style)"]}
+  rows={[
+    ["Where noising/denoising happens", "Full-resolution pixel space", "Compressed latent space from a pretrained autoencoder"],
+    ["Compute per diffusion step", "High (scales with pixel count)", "Much lower (scales with latent dimensionality)"],
+    ["Extra components needed", "None beyond the denoiser", "Pretrained encoder/decoder autoencoder, plus a conditioning mechanism (e.g., cross-attention) for text-to-image"],
+    ["Final output", "Directly the generated pixels", "Decoded from the generated latent by the autoencoder's decoder"],
+  ]}
+/>
+
+## Implementation Sketch (Training Step)
+
+```python
+import torch
+import torch.nn.functional as F
+
+def diffusion_training_step(model, x0, alphas_bar, T):
+    """
+    model: network epsilon_theta(x_t, t) -> predicted noise
+    x0: batch of clean data (or clean latents, for latent diffusion)
+    alphas_bar: precomputed cumulative products \\bar{alpha}_t, shape [T]
+    """
+    batch_size = x0.size(0)
+    t = torch.randint(0, T, (batch_size,), device=x0.device)
+    eps = torch.randn_like(x0)
+
+    sqrt_ab = alphas_bar[t].sqrt().view(-1, 1, 1, 1)
+    sqrt_one_minus_ab = (1 - alphas_bar[t]).sqrt().view(-1, 1, 1, 1)
+    x_t = sqrt_ab * x0 + sqrt_one_minus_ab * eps      # closed-form forward process
+
+    eps_pred = model(x_t, t)
+    return F.mse_loss(eps_pred, eps)                  # L_simple
+```
+
+<KeyTakeaways items={[
+  "The forward process is a fixed (non-learned) Markov chain of small Gaussian noising steps, with a closed-form shortcut to sample any noise level directly from x_0.",
+  "The reverse process is learned by a network trained to predict the noise added at each step, which is mathematically equivalent to predicting the reverse-step mean.",
+  "Training reduces (via a variational bound analogous to a VAE's ELBO, with a simplifying reweighting) to a simple mean-squared-error loss between true and predicted noise -- L_simple.",
+  "Sampling requires iterating the learned reverse step across all timesteps, which is why diffusion sampling is comparatively slow versus a single GAN forward pass -- a major focus of follow-up sampling-acceleration research.",
+  "Latent diffusion runs the entire process in a compressed autoencoder latent space rather than pixel space, which is the core efficiency idea behind Stable Diffusion.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Training is stable -- a straightforward regression loss (predict the noise), unlike a GAN's adversarial minimax game.",
+    "State-of-the-art sample fidelity and diversity on most image benchmarks as of recent literature, generally avoiding GAN-style mode collapse.",
+    "Latent diffusion makes high-resolution generation computationally tractable by moving the expensive iterative process into a compressed space.",
+  ]}
+  cons={[
+    "Sampling requires many sequential network evaluations (often dozens to hundreds even with accelerated samplers), making inference much slower than a single-pass GAN or VAE decode.",
+    "The variance schedule and number of timesteps are important hyperparameters -- a poorly chosen schedule can hurt sample quality or waste compute.",
+    "Latent diffusion's quality is bounded by the autoencoder's reconstruction fidelity -- any information the autoencoder can't preserve is unrecoverable regardless of the diffusion model's quality.",
+  ]}
+/>
+
+A common conceptual mistake: assuming the network predicts $x_0$ directly by default. The dominant DDPM formulation predicts the noise $\epsilon$, not $x_0$ or the mean directly -- these are mathematically interchangeable given the forward process's closed form, but the noise-prediction parameterization is what Ho et al. found trains most effectively in practice, and it's the one most implementations use by default.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does the forward diffusion process have a closed-form expression for q(x_t | x_0) directly, rather than requiring simulation through every intermediate step x_1, ..., x_{t-1}?",
+    options: [
+      "It doesn't -- every implementation must simulate all intermediate steps",
+      "Because the forward process is a chain of Gaussians, and a composition of Gaussian transformations is itself Gaussian -- so x_t | x_0 can be written directly as N(sqrt(alpha_bar_t) x_0, (1 - alpha_bar_t) I) using the cumulative product of the per-step retained variance",
+      "Because x_0 is discarded after the first noising step",
+      "Because T is always equal to 1 in practice",
+    ],
+    answerIndex: 1,
+    explanation: "Since each forward step is Gaussian and the noise added at each step is independent, the marginal distribution of x_t given x_0 is also Gaussian, with mean sqrt(alpha_bar_t) * x_0 and variance (1 - alpha_bar_t) I, where alpha_bar_t is the cumulative product of (1 - beta_s) over all prior steps. This lets training sample any timestep t directly without simulating the chain.",
+  },
+  {
+    question: "What is the core computational motivation behind latent diffusion models (the approach behind Stable Diffusion)?",
+    options: [
+      "They replace the Gaussian noising process with a different, non-Gaussian noise distribution",
+      "They remove the need for a reverse denoising network entirely",
+      "They run the entire forward and reverse diffusion process in a lower-dimensional latent space produced by a pretrained autoencoder, instead of directly on full-resolution pixels, substantially reducing the compute cost of each of the many required diffusion steps",
+      "They eliminate the need for multiple sampling steps by generating images in a single forward pass",
+    ],
+    answerIndex: 2,
+    explanation: "Latent diffusion's key idea is compressing images into a smaller latent representation first (via a pretrained encoder/decoder), then performing the expensive, multi-step diffusion process in that compressed space, and decoding back to pixels only at the end -- reducing the per-step compute cost without changing the fundamental forward/reverse diffusion mechanism.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Denoising Diffusion Probabilistic Models", authors: "Ho, J., Jain, A., & Abbeel, P.", venue: "NeurIPS", year: 2020, url: "https://arxiv.org/abs/2006.11239" },
+  { title: "High-Resolution Image Synthesis with Latent Diffusion Models", authors: "Rombach, R., Blattmann, A., Lorenz, D., Esser, P., & Ommer, B.", venue: "CVPR", year: 2022, url: "https://arxiv.org/abs/2112.10752" },
+]} />

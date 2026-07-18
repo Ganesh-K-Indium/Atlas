@@ -1,0 +1,227 @@
+---
+title: "Principal Component Analysis — Derivation"
+description: "Why maximizing variance, minimizing reconstruction error, and taking the covariance matrix's eigenvectors are secretly the same problem — derived from scratch."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["linear-algebra", "math", "pca", "dimensionality-reduction"]
+prerequisites: ["Eigenvalues & Eigenvectors", "Singular Value Decomposition (SVD)", "Vectors & Vector Spaces"]
+---
+
+## Intuition
+
+You have data in high dimensions and want to compress it into fewer dimensions while losing as little information as possible. PCA answers a very specific version of that question: find the direction along which the data varies the most, project onto it, then find the next-best direction orthogonal to the first, and so on. The remarkable fact — which we'll derive rigorously below — is that this "maximize variance" goal turns out to be solved *exactly* by the eigenvectors of the data's covariance matrix.
+
+<Callout type="tip" title="One-sentence definition">
+  The principal components of a dataset are the eigenvectors of its covariance matrix, ordered by eigenvalue (variance explained); projecting onto the top $k$ components is the best possible rank-$k$ linear compression of the data in a mean-squared-error sense.
+</Callout>
+
+This page assumes you're comfortable with [Eigenvalues & Eigenvectors](/docs/foundations/linear-algebra/eigenvalues-eigenvectors) and derives PCA from first principles using constrained optimization — not just stating the recipe, but proving why it's correct.
+
+## Setup
+
+Let $X \in \mathbb{R}^{n \times d}$ be a data matrix with $n$ samples and $d$ features, assumed **centered** (each column has mean zero — subtract the column means first if not). The (empirical) covariance matrix is:
+
+$$
+\Sigma = \frac{1}{n-1} X^\top X \in \mathbb{R}^{d \times d}
+$$
+
+$\Sigma$ is always symmetric positive semi-definite: symmetric because $\Sigma^\top = \Sigma$ trivially, and PSD because for any $v$, $v^\top \Sigma v = \frac{1}{n-1}\|Xv\|^2 \ge 0$. By the spectral theorem (see the eigenvalues page), $\Sigma$ therefore has real, nonnegative eigenvalues and an orthonormal set of eigenvectors.
+
+## Derivation 1: Maximum Variance Formulation
+
+**Goal:** find a unit vector $v$ ($\|v\|=1$) such that projecting the centered data onto $v$ maximizes the variance of the projected values.
+
+The projection of a single centered sample $x_i$ onto direction $v$ is the scalar $x_i^\top v$. The variance of these projected values across all $n$ samples is:
+
+$$
+\text{Var}(Xv) = \frac{1}{n-1}\sum_{i=1}^n (x_i^\top v)^2 = \frac{1}{n-1} \|Xv\|^2 = \frac{1}{n-1} v^\top X^\top X v = v^\top \Sigma v
+$$
+
+(using that the data is centered, so the mean of $x_i^\top v$ is zero, and variance reduces to the mean of squares).
+
+**Step 1 — set up the constrained optimization.**
+
+$$
+\max_v \; v^\top \Sigma v \quad \text{subject to} \quad v^\top v = 1
+$$
+
+The unit-norm constraint is essential — without it, $v^\top \Sigma v$ is unbounded (just scale $v$ up).
+
+**Step 2 — form the Lagrangian.**
+
+$$
+\mathcal{L}(v, \lambda) = v^\top \Sigma v - \lambda(v^\top v - 1)
+$$
+
+**Step 3 — take the gradient and set it to zero.**
+
+$$
+\nabla_v \mathcal{L} = 2\Sigma v - 2\lambda v = 0 \implies \Sigma v = \lambda v
+$$
+
+This is exactly the eigenvector equation. So any **critical point** of the constrained problem is an eigenvector of $\Sigma$, with $\lambda$ its corresponding eigenvalue.
+
+**Step 4 — identify which eigenvector maximizes the objective.** At a critical point $v$ with $\Sigma v = \lambda v$, the objective value itself is:
+
+$$
+v^\top \Sigma v = v^\top (\lambda v) = \lambda (v^\top v) = \lambda
+$$
+
+So the variance captured along direction $v$ is *exactly* its eigenvalue $\lambda$. To maximize variance, pick the eigenvector with the **largest** eigenvalue $\lambda_1$. This is the **first principal component**.
+
+**Step 5 — the second component.** Repeat the maximization, now additionally constrained to be orthogonal to the first component ($v^\top v_1 = 0$). Adding this constraint to the Lagrangian and redoing the same stationarity argument shows the maximizer is the eigenvector with the second-largest eigenvalue, $v_2$. Inductively, the $k$-th principal component is the eigenvector of $\Sigma$ with the $k$-th largest eigenvalue, and the total variance captured by the top $k$ components is $\sum_{i=1}^k \lambda_i$.
+
+## Derivation 2: Minimum Reconstruction Error (Equivalent View)
+
+A seemingly different goal: choose an orthonormal basis $v_1, \ldots, v_k$ minimizing the squared reconstruction error when each point is projected onto $\text{span}(v_1,\ldots,v_k)$ and mapped back:
+
+$$
+\min_{\{v_i\}} \sum_{i=1}^n \left\| x_i - \sum_{j=1}^k (x_i^\top v_j) v_j \right\|^2
+$$
+
+Expanding the squared norm and using orthonormality of the $v_j$, one can show this error decomposes as:
+
+$$
+\sum_{i=1}^n \|x_i\|^2 - (n-1)\sum_{j=1}^k v_j^\top \Sigma v_j
+$$
+
+The first term is a fixed constant (total variance in the data, independent of the choice of $v_j$'s). So **minimizing reconstruction error is equivalent to maximizing** $\sum_j v_j^\top \Sigma v_j$ — exactly the same objective as Derivation 1. Both formulations are solved by the same eigenvectors of $\Sigma$. This equivalence is why PCA is simultaneously described as "maximize variance" and "minimize reconstruction error" in different textbooks — they are the same optimization problem in disguise.
+
+## Connection to SVD
+
+Directly eigendecomposing $\Sigma = \frac{1}{n-1}X^\top X$ requires forming $X^\top X$ explicitly, which can be numerically unstable (it squares the condition number of $X$). In practice, PCA is computed via the [SVD](/docs/foundations/linear-algebra/svd) of $X$ itself:
+
+$$
+X = U \Sigma_{\text{svd}} V^\top \implies X^\top X = V \Sigma_{\text{svd}}^\top \Sigma_{\text{svd}} V^\top
+$$
+
+So the right singular vectors $V$ of $X$ are exactly the eigenvectors (principal components) of $\Sigma$, and the eigenvalues are $\lambda_i = \sigma_i^2/(n-1)$ where $\sigma_i$ are $X$'s singular values. This is the numerically preferred route — compute the SVD of the (centered) data matrix directly rather than forming and eigendecomposing $X^\top X$.
+
+<Mermaid chart={`
+graph TD
+  A["Centered data matrix X"] --> B["Maximize variance of projection: max v^T Σ v s.t. ||v||=1"]
+  A --> C["Minimize reconstruction error"]
+  B -->|"Lagrange multipliers"| D["Σv = λv — eigenvector equation"]
+  C -->|"algebraic equivalence"| D
+  D --> E["Top-k eigenvectors of Σ = principal components"]
+  A -->|"SVD: X = UΣ_svd V^T"| F["V = eigenvectors of Σ, σ_i^2/(n-1) = λ_i"]
+  E -.->|"same result, better numerics"| F
+`} />
+
+## Worked Example
+
+Data (already centered), 4 points in $\mathbb{R}^2$:
+
+$$
+X = \begin{pmatrix} 2 & 1 \\ -1 & -2 \\ 1 & 0 \\ -2 & 1 \end{pmatrix}
+$$
+
+**Step 1 — covariance matrix.** $X^\top X = \begin{pmatrix} 2^2+(-1)^2+1^2+(-2)^2 & 2(1)+(-1)(-2)+1(0)+(-2)(1) \\ \cdot & 1^2+(-2)^2+0^2+1^2\end{pmatrix} = \begin{pmatrix}10 & 2\\2 & 6\end{pmatrix}$.
+
+With $n=4$: $\Sigma = \frac{1}{3}\begin{pmatrix}10 & 2\\2 & 6\end{pmatrix}$.
+
+**Step 2 — eigenvalues of $\begin{pmatrix}10&2\\2&6\end{pmatrix}$** (we can eigendecompose before dividing by 3, then divide eigenvalues by 3 at the end): characteristic polynomial $\lambda^2 - 16\lambda + (60-4) = \lambda^2-16\lambda+56=0$. Roots: $\lambda = \frac{16 \pm \sqrt{256-224}}{2} = \frac{16\pm\sqrt{32}}{2} = 8 \pm 2\sqrt{2}$, i.e. $\lambda_1 \approx 10.83$, $\lambda_2 \approx 5.17$. Dividing by $n-1=3$: the covariance eigenvalues are $\approx 3.61$ and $\approx 1.72$.
+
+**Step 3 — first principal component** solves $(10-\lambda_1)v_1 + 2v_2 = 0$ with $\lambda_1 \approx 10.83$: $v_2 \approx 0.414\, v_1$, giving (normalized) $v^{(1)} \approx (0.925, 0.383)^\top$ — the direction along which this data varies most, tilted slightly toward the first coordinate since it has larger individual variance.
+
+## Code Example
+
+```python
+import numpy as np
+
+X = np.array([
+    [2.0,  1.0],
+    [-1.0, -2.0],
+    [1.0,  0.0],
+    [-2.0, 1.0],
+])
+
+# Center (already centered here, but always do this in practice)
+X_centered = X - X.mean(axis=0)
+
+# Method 1: eigendecomposition of the covariance matrix
+cov = np.cov(X_centered, rowvar=False)          # (2, 2)
+eigvals, eigvecs = np.linalg.eigh(cov)          # eigh: for symmetric matrices, ascending order
+order = np.argsort(eigvals)[::-1]               # sort descending
+eigvals, eigvecs = eigvals[order], eigvecs[:, order]
+print("eigenvalues:", eigvals)
+print("principal components (columns):\n", eigvecs)
+
+# Method 2: SVD of the data matrix directly (numerically preferred)
+U, s, Vt = np.linalg.svd(X_centered, full_matrices=False)
+pca_eigenvalues_from_svd = (s ** 2) / (X.shape[0] - 1)
+print("eigenvalues via SVD:", pca_eigenvalues_from_svd)
+print("principal components via SVD (rows of Vt):\n", Vt)
+
+# Project onto top-1 component
+k = 1
+X_reduced = X_centered @ eigvecs[:, :k]
+print("reduced data:\n", X_reduced)
+```
+
+## Complexity
+
+| Operation | Time complexity | Space |
+| --- | --- | --- |
+| Forming $\Sigma = X^\top X / (n-1)$ | $O(nd^2)$ | $O(d^2)$ |
+| Eigendecomposition of $\Sigma$ (dense, $d \times d$) | $O(d^3)$ | $O(d^2)$ |
+| SVD of $X$ directly (n×d, preferred) | $O(nd\min(n,d))$ | $O(nd)$ |
+| Projecting $n$ points onto top-$k$ components | $O(ndk)$ | $O(nk)$ |
+| Randomized PCA (top-$k$ only, large $d$) | $O(nd\log k + (n+d)k^2)$ approx | $O((n+d)k)$ |
+
+<KeyTakeaways items={[
+  "PCA's 'maximize variance' objective, when formalized with a Lagrange multiplier under a unit-norm constraint, reduces exactly to the eigenvector equation Σv = λv.",
+  "The variance captured along a principal component equals its eigenvalue exactly — this is where 'percent variance explained' comes from (λ_i / sum of all λ).",
+  "Maximizing projected variance and minimizing reconstruction error are mathematically the same optimization problem, differing only by a constant term.",
+  "Computing PCA via the SVD of the (centered) data matrix directly is numerically preferred over eigendecomposing X^T X, since forming X^T X squares the condition number.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Always centering (and often standardizing/scaling) the data before PCA — uncentered data corrupts the covariance-as-variance interpretation entirely.",
+    "Using SVD of X directly instead of eigendecomposing X^T X for better numerical stability, especially when d is large or X is ill-conditioned.",
+  ]}
+  cons={[
+    "Forgetting to standardize when features are on very different scales (e.g., income in dollars vs. age in years) — PCA will be dominated by whichever feature happens to have larger raw variance, not larger *informativeness*.",
+    "Treating principal components as inherently interpretable — they're linear combinations of the original features and often don't correspond to any meaningful real-world concept.",
+    "Assuming PCA finds the best features for a downstream supervised task — PCA only optimizes for variance/reconstruction, which is unsupervised and can discard directions that are low-variance but highly predictive of the label.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "When you set up the Lagrangian max v^T Σ v subject to v^T v = 1 and take its gradient, why does the constraint's Lagrange multiplier λ end up being interpretable as 'variance explained'?",
+    options: [
+      "It's a coincidence with no deeper meaning",
+      "Because at a stationary point Σv = λv, so v^T Σ v = v^T(λv) = λ(v^T v) = λ, since v is unit norm — the objective's value at that point literally equals λ",
+      "λ is only meaningful when Σ is diagonal",
+      "Variance explained is defined separately and doesn't come from λ at all",
+    ],
+    answerIndex: 1,
+    explanation: "Substituting the stationarity condition back into the objective directly shows the projected variance v^T Σ v equals λ exactly (given ||v||=1). This is why eigenvalues of the covariance matrix are read off as 'variance explained' by each principal component.",
+  },
+  {
+    question: "Why is it numerically preferable to compute PCA via the SVD of the centered data matrix X rather than by eigendecomposing X^T X?",
+    options: [
+      "They give different, incompatible answers, and SVD is simply 'more correct'",
+      "Forming X^T X explicitly squares X's condition number, amplifying floating-point error, whereas SVD operates on X directly and derives the eigenvectors/eigenvalues of X^T X without ever forming that product",
+      "Eigendecomposition doesn't work on covariance matrices",
+      "SVD is faster in every case, which is the only reason to prefer it",
+    ],
+    answerIndex: 1,
+    explanation: "If X has condition number κ, then X^T X has condition number κ^2, which can severely degrade numerical precision for ill-conditioned data. SVD avoids this by factorizing X directly — the right singular vectors V and singular values σ_i give the same principal components and eigenvalues (λ_i = σ_i^2/(n-1)) without the squaring step.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Introduction to Linear Algebra", authors: "Gilbert Strang", venue: "Wellesley-Cambridge Press", year: 2023 },
+  { title: "Pattern Recognition and Machine Learning", authors: "Christopher M. Bishop", venue: "Springer", year: 2006 },
+  { title: "Mathematics for Machine Learning", authors: "Marc Peter Deisenroth, A. Aldo Faisal, Cheng Soon Ong", venue: "Cambridge University Press", year: 2020 },
+]} />

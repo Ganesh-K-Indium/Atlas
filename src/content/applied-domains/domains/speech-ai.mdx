@@ -1,0 +1,142 @@
+---
+title: "Speech AI (ASR & TTS)"
+description: "Why converting between audio and text is an alignment problem in disguise, and how CTC and sequence-to-sequence models solve it without ever being told which audio frame corresponds to which letter."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["applied-ai", "speech", "asr", "tts", "audio"]
+prerequisites: ["The Transformer Architecture", "Recurrent Neural Networks", "Probability foundations"]
+---
+
+## Intuition
+
+Speech is audio: a continuous waveform sampled thousands of times per second, typically converted into a spectrogram — a time-frequency representation showing which frequencies are present at each moment. Text is a short, discrete sequence of characters or subword tokens. Speech AI is the applied field of building the two directions of translation between these representations: **Automatic Speech Recognition (ASR)**, audio to text, and **Text-to-Speech (TTS)**, text to audio.
+
+The central difficulty in both directions is not "audio is hard to represent" or "text is hard to represent" in isolation — it's that the two representations have wildly different, and unknown, lengths and alignments. A one-second utterance of the word "cat" might span dozens of audio frames, and there is no label telling the model which specific frames correspond to "c," which to "a," and which to "t" — frame-level alignment is exactly the information that's *missing* from ordinary transcribed speech datasets, which only pair a whole utterance with its whole transcript.
+
+<Callout type="tip" title="The one-sentence idea">
+  Both ASR and TTS are fundamentally sequence-alignment problems between representations of very different length and granularity — the interesting architectural ideas in speech AI exist specifically to learn that alignment without ever being given it as a label.
+</Callout>
+
+## Core Problem Formulations
+
+- **ASR:** given an audio sequence (typically a spectrogram, a sequence of $T$ frames), produce the most likely text transcription — a sequence of $L$ tokens where $L \ll T$ (many audio frames map to one character/token).
+- **TTS:** the inverse — given text, generate a waveform or spectrogram whose duration and prosody (pitch, rhythm, stress) are not specified anywhere in the input text and must be inferred or predicted by the model.
+- **Alignment:** the shared subproblem underlying both — learning a mapping between a long, densely-sampled sequence and a short, discrete one, without frame-level ground truth for that mapping.
+
+## Key Techniques and How They Connect
+
+**Connectionist Temporal Classification (CTC)** solves the ASR alignment problem directly. Instead of requiring per-frame labels, CTC introduces a special *blank* token and defines the model's target as the *sum of probabilities over every possible frame-to-label alignment* that collapses (by merging repeated consecutive labels and removing blanks) to the correct transcript. Concretely, if $\pi$ ranges over all length-$T$ label sequences (including blanks) that collapse to the target transcript $y$, the CTC loss is:
+
+$$
+p(y \mid x) = \sum_{\pi \in \mathcal{B}^{-1}(y)} \prod_{t=1}^{T} p(\pi_t \mid x)
+$$
+
+where $\mathcal{B}$ is the collapsing function that removes blanks and merges repeats. This sum over exponentially many alignments is computed efficiently with a forward-backward dynamic program (structurally similar to the forward-backward algorithm for HMMs), so the network can be trained end-to-end with only (audio, full-transcript) pairs — no frame-level alignment labels are ever needed. This is precisely what made large-scale ASR training practical without expensive phoneme-level alignment annotation.
+
+**RNN-based encoder architectures** were the first practical CTC backbones — a bidirectional LSTM or GRU processes the spectrogram frame sequence and produces a per-frame output distribution over characters/tokens plus the blank symbol, which CTC then aligns against the target transcript during training. See [RNNs, LSTMs, and GRUs](/docs/deep-learning/sequence-models/rnn-lstm-gru) (roadmap) for the recurrent architecture itself.
+
+**Sequence-to-sequence attention models** offered an alternative to CTC's conditional-independence assumption between output positions: an encoder processes the full audio sequence, and a decoder generates text tokens one at a time, attending back over the encoder's representations to decide, implicitly, which part of the audio is relevant at each decoding step — the attention weights effectively *learn* soft alignment rather than needing CTC's explicit blank/collapse mechanism.
+
+**The shift to Transformer-based encoder-decoder ASR** (conceptually similar to models like Whisper) folds this idea into the modern Transformer stack: an encoder consumes the audio spectrogram, and a decoder autoregressively generates the transcript with cross-attention into the encoder outputs — the same encoder-decoder pattern used in text-to-text sequence tasks like translation, just with audio as the source modality instead of source-language text. Training this kind of model at very large scale on diverse, often weakly-labeled audio has proven effective at generalizing across accents, languages, and background noise conditions, though exact current-generation architectural internals of any specific commercial system are a fast-moving target and shouldn't be treated as settled beyond this general shape.
+
+**TTS** runs the translation in reverse and splits historically into two stages: an *acoustic model* that predicts a spectrogram (or similar intermediate representation) from text — handling exactly the same "one input unit maps to a variable, unlabeled span of output" alignment problem, but now expanding a short sequence into a long one instead of collapsing a long one into a short one — and a *vocoder* that converts the predicted spectrogram into an actual waveform. Modern neural vocoders learn this spectrogram-to-waveform mapping directly, replacing older signal-processing-based waveform reconstruction methods.
+
+<Mermaid chart={`
+graph LR
+  Wave["Raw audio waveform"] --> Spec["Spectrogram (time x frequency)"]
+  Spec --> Enc["Audio encoder (RNN or Transformer)"]
+  Enc -->|CTC loss: sum over alignments| CTCout["Text transcript (ASR, no alignment labels needed)"]
+  Enc -->|cross-attention| Dec["Autoregressive text decoder"]
+  Dec --> Trans["Text transcript (seq2seq ASR)"]
+  Text["Input text"] --> AM["Acoustic model: text to spectrogram"]
+  AM --> Vocoder["Neural vocoder: spectrogram to waveform"]
+  Vocoder --> OutWave["Synthesized speech waveform"]
+`} />
+
+## Practical Trade-offs
+
+<ComparisonTable
+  headers={["Approach", "Alignment strategy", "Strength", "Weakness"]}
+  rows={[
+    ["CTC (RNN or Transformer encoder)", "Marginalizes over all valid frame-to-label alignments via forward-backward", "Efficient, streaming-friendly, no frame-level labels needed", "Assumes output tokens are conditionally independent given the input, weakening language-modeling capability inside the acoustic model itself"],
+    ["Attention-based seq2seq ASR", "Learned soft attention alignment between decoder steps and encoder frames", "Captures output-token dependencies (better implicit language modeling)", "Historically harder to make streaming (needs full or near-full input before decoding well)"],
+    ["Transformer encoder-decoder ASR (Whisper-style)", "Cross-attention, trained at large scale on diverse audio", "Strong robustness across accents, noise, languages, given enough scale", "Compute-heavy; internals of specific commercial systems evolve quickly"],
+    ["Two-stage TTS (acoustic model + vocoder)", "Text-to-spectrogram, then spectrogram-to-waveform", "Modular — components can be improved/replaced independently", "Error in the acoustic stage propagates into the vocoder stage"],
+  ]}
+/>
+
+## Practical Example
+
+```python
+# Conceptual sketch of a CTC training step (framework-agnostic pseudocode
+# mirroring the shape of torch.nn.CTCLoss usage).
+import torch
+import torch.nn as nn
+
+ctc_loss = nn.CTCLoss(blank=0, zero_infinity=True)
+
+# log_probs: (T, batch, num_classes) — per-frame log-probabilities including the blank class
+# targets: concatenated target label sequences (no blanks, no alignment given)
+# input_lengths / target_lengths: actual (unpadded) lengths per example in the batch
+loss = ctc_loss(log_probs, targets, input_lengths, target_lengths)
+loss.backward()
+```
+
+<KeyTakeaways items={[
+  "ASR and TTS are dual problems: audio-to-text collapses a long sequence into a short one; text-to-audio expands a short sequence into a long one — both require learning an alignment that isn't given as a label.",
+  "CTC solves the alignment problem by summing over every valid frame-to-label alignment via a blank token and a collapsing function, trainable with only (input, full-target) pairs.",
+  "Attention-based seq2seq models learn alignment implicitly through cross-attention weights instead of CTC's explicit marginalization, at some cost to streaming-friendliness.",
+  "The field has trended toward large-scale Transformer encoder-decoder ASR trained on diverse, weakly-labeled audio, improving robustness to accents and noise — but exact current-model internals should be treated as a moving target, not settled fact.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "CTC enables training end-to-end ASR models without expensive frame-level phoneme alignment annotation.",
+    "Attention/Transformer-based seq2seq approaches capture output-token dependencies that CTC's conditional-independence assumption misses.",
+    "Two-stage TTS pipelines are modular, letting the acoustic model and vocoder be developed and improved independently.",
+  ]}
+  cons={[
+    "CTC's conditional independence assumption between output tokens means it needs a separate (or shallow-fused) language model to fully capture linguistic structure, unlike attention-based decoders which condition on previously generated tokens.",
+    "Evaluating ASR only with word error rate hides systematic failures on specific accents, dialects, or noisy environments that aggregate metrics can mask.",
+    "TTS systems trained predominantly on one speaker/accent/language distribution generalize poorly and can produce unnatural prosody on out-of-distribution text (numbers, abbreviations, code-switching).",
+    "Treating streaming (low-latency, partial-input) ASR and offline (full-utterance) ASR as interchangeable ignores that the two have very different practical latency/accuracy trade-offs and often need different architectures.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does CTC introduce a special 'blank' token and a sequence-collapsing function rather than directly predicting one label per audio frame?",
+    options: [
+      "The blank token is purely a padding convenience with no effect on training",
+      "Because the number of audio frames vastly exceeds the number of output tokens, and there's no ground truth for which frames align to which token — the blank plus collapsing function lets many different frame-to-label alignments (including repeated labels and blanks) all be counted as valid, so the model can be trained with only whole-utterance transcripts",
+      "Blanks are needed because audio always has silence at the start",
+      "CTC cannot handle repeated characters in a word without blanks",
+    ],
+    answerIndex: 1,
+    explanation: "CTC's core innovation is defining the transcript probability as a sum over every possible per-frame labeling that collapses (by removing blanks and merging consecutive repeats) to the correct transcript. This lets the model be trained end-to-end from (audio, transcript) pairs alone, sidestepping the need for frame-level alignment labels that don't naturally exist in most speech datasets.",
+  },
+  {
+    question: "What key limitation does CTC have compared to attention-based sequence-to-sequence ASR decoders?",
+    options: [
+      "CTC cannot be trained with backpropagation",
+      "CTC assumes output labels are conditionally independent of each other given the input, so it captures weaker output-side language-modeling structure than an autoregressive attention decoder that conditions each token on previously generated tokens",
+      "CTC only works for TTS, not ASR",
+      "CTC requires more labeled data than any other ASR approach",
+    ],
+    answerIndex: 1,
+    explanation: "CTC's forward-backward marginalization assumes frame-level label probabilities are conditionally independent given the encoder output, so it has no explicit mechanism to model dependencies between output tokens the way an autoregressive decoder (which conditions on its own previous outputs via attention/cross-attention) does. This is why some systems combine CTC with an external or shallow-fused language model, or move to full attention-based seq2seq decoding.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Connectionist Temporal Classification: Labelling Unsegmented Sequence Data with Recurrent Neural Networks", authors: "Graves, A., Fernández, S., Gomez, F., Schmidhuber, J.", venue: "ICML", year: 2006, url: "https://www.cs.toronto.edu/~graves/icml_2006.pdf" },
+  { title: "Attention Is All You Need", authors: "Vaswani, A. et al.", venue: "NeurIPS", year: 2017, url: "https://arxiv.org/abs/1706.03762" },
+  { title: "Deep Learning", authors: "Goodfellow, I., Bengio, Y., Courville, A.", venue: "MIT Press", year: 2016, url: "https://www.deeplearningbook.org/" },
+]} />

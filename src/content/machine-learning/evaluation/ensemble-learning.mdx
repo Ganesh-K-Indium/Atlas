@@ -1,0 +1,206 @@
+---
+title: "Ensemble Learning: Bagging, Boosting, Stacking"
+description: "The three fundamentally different ways to combine weak models into a strong one — reducing variance, reducing bias, and learning how to combine at all — formalized and contrasted."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["machine-learning", "evaluation", "ensembles", "bagging", "boosting", "stacking"]
+prerequisites: ["Bias-variance tradeoff", "Decision trees", "Cross-validation"]
+---
+
+<Prerequisites items={["Bias-variance tradeoff", "Decision trees basics", "Cross-validation / out-of-fold predictions"]} />
+
+## Intuition
+
+No single model is universally best, but combining many models often beats every one of them individually — the question is *how* to combine them, and different combination strategies fix fundamentally different weaknesses. **Bagging** averages many independent, high-variance models to cancel out their individual noise. **Boosting** chains many weak, high-bias models together so each one specifically corrects what came before. **Stacking** trains a small model whose entire job is to learn how to best combine the predictions of several other, already-trained models.
+
+<Callout type="tip" title="The core idea">
+  Bagging trains models in parallel on resampled data and averages them to reduce variance; boosting trains models sequentially, each targeting the previous ensemble's errors, to reduce bias; stacking trains a meta-learner on the out-of-fold predictions of several base models to learn an optimal, possibly nonlinear, way to combine them. These are not competing techniques — they attack different terms in the bias-variance-noise decomposition.
+</Callout>
+
+## Formal Definitions
+
+**Bagging (Bootstrap AGGregatING)**: draw $B$ bootstrap samples $D_1, \dots, D_B$ (each of size $n$, sampled with replacement from the original training set of size $n$), fit a base learner $h_b$ independently on each $D_b$, and combine by averaging (regression) or majority vote (classification):
+
+$$
+\hat f_{\text{bag}}(x) = \frac{1}{B}\sum_{b=1}^B h_b(x)
+$$
+
+Random forests extend bagging by also randomly subsampling features at each split, decorrelating the trees further (see [Decision Trees & Random Forests](/docs/machine-learning/supervised-learning/decision-trees-random-forests) (roadmap) for the full mechanism).
+
+**Boosting**: build an additive ensemble sequentially, $F_m(x) = F_{m-1}(x) + \eta \, h_m(x)$, where each new weak learner $h_m$ is fit specifically to reduce the error remaining after $m-1$ rounds (e.g., to the negative gradient of the loss, in gradient boosting). See [Gradient Boosting](/docs/machine-learning/supervised-learning/gradient-boosting) for the full first- and second-order derivation.
+
+**Stacking (Stacked Generalization, Wolpert 1992)**: train $K$ diverse base learners $h_1, \dots, h_K$ on the training data. Rather than combining their predictions with a fixed rule (average, vote), train a **meta-learner** $g$ whose inputs are the base learners' predictions and whose target is the original label:
+
+$$
+\hat f_{\text{stack}}(x) = g\big(h_1(x), h_2(x), \dots, h_K(x)\big)
+$$
+
+## Derivation: Why Bagging Reduces Variance
+
+Suppose we have $B$ base models, each with the same variance $\sigma^2$ at a given query point, and pairwise correlation $\rho$ between any two models' predictions (correlation arises because they're trained on overlapping bootstrap samples of the same underlying data). The variance of their average is:
+
+$$
+\mathrm{Var}\left(\frac{1}{B}\sum_{b=1}^B h_b(x)\right) = \frac{1}{B^2}\left[\sum_{b=1}^B \mathrm{Var}(h_b(x)) + \sum_{b \neq b'} \mathrm{Cov}(h_b(x), h_{b'}(x))\right] = \rho\sigma^2 + \frac{1-\rho}{B}\sigma^2
+$$
+
+As $B \to \infty$, the second term vanishes and the variance of the ensemble converges to $\rho\sigma^2$ — strictly less than the individual model variance $\sigma^2$ whenever $\rho < 1$, but bounded below by $\rho \sigma^2$ no matter how large $B$ gets. This is exactly why random forests' extra feature-subsampling step matters: it further decorrelates the trees (lowers $\rho$) beyond what bootstrap resampling alone achieves, since bootstrap samples of the same dataset are still fairly similar to each other (typically only about 63.2% of the original rows appear in any given bootstrap sample, but the overlap across different bootstrap samples is still substantial). Crucially, averaging does not change the *bias* of the ensemble — $\mathbb{E}[\hat f_{\text{bag}}(x)] = \mathbb{E}[h_b(x)]$ for any single $b$ — so bagging is a pure variance-reduction technique that works best when the base learner is already low-bias but high-variance (e.g., a deep, unpruned decision tree).
+
+## Derivation: Why Boosting Reduces Bias
+
+Boosting starts from a base learner that is deliberately weak (high bias, low variance — e.g., a shallow decision stump) and builds an additive sequence $F_m = F_{m-1} + \eta h_m$ where $h_m$ is fit to the residual/gradient of $F_{m-1}$'s current errors (the full first- and second-order derivation is in [Gradient Boosting](/docs/machine-learning/supervised-learning/gradient-boosting)). Each additional round can only further reduce the *training* loss the previous rounds failed to capture — the ensemble's representational capacity grows with $m$, directly attacking the systematic error (bias) that a single weak learner alone could never eliminate. This is the opposite lever from bagging: boosting's base learners are individually high-bias/low-variance, and sequential correction drives bias down round by round, at the cost of variance and overfitting risk if $m$ grows too large or $\eta$ is too high — which is exactly why boosting implementations expose shrinkage ($\eta$), early stopping, and row/column subsampling as variance-control mechanisms bolted onto a fundamentally bias-reducing procedure.
+
+## Derivation: Why Stacking Needs Out-of-Fold Predictions
+
+The naive approach — train each base learner $h_k$ on the full training set, generate their predictions on that same training set, and train the meta-learner $g$ on those predictions — is subtly but seriously flawed. Each $h_k(x_i)$ for a training point $x_i$ is generated by a model that *saw $x_i$'s label during training*, so $h_k(x_i)$ is an overly optimistic, low-error prediction relative to what $h_k$ would produce on a genuinely unseen point. The meta-learner $g$, trained on these artificially accurate inputs, learns to trust each base model's predictions *more* than it should — a form of the same overfitting/leakage that motivates held-out validation everywhere else in this section.
+
+The fix is to generate the base models' training-time predictions the same way cross-validation generates honest validation scores: partition the training data into $K$ folds, and for each fold $D_i$, train $h_k$ on $D \setminus D_i$ and predict on $D_i$. Stitching these **out-of-fold (OOF) predictions** together across all $K$ folds gives, for every training point, a base-model prediction generated by a version of $h_k$ that never saw that point during training — exactly analogous to a validation-fold prediction in ordinary $k$-fold CV. The meta-learner $g$ is then trained on these OOF predictions, so it learns the true, held-out-quality relationship between base-model outputs and the label, rather than an inflated one. At prediction time on genuinely new data, each $h_k$ is refit on the *entire* training set (all folds) before producing the input that $g$ consumes.
+
+## Diagram
+
+<Mermaid chart={`graph TD
+  subgraph Bagging
+  B1[Bootstrap sample 1] --> M1[Model 1]
+  B2[Bootstrap sample 2] --> M2[Model 2]
+  B3[Bootstrap sample 3] --> M3[Model 3]
+  M1 & M2 & M3 --> AVG[Average / Vote]
+  end
+
+  subgraph Boosting
+  S0[Weak learner 1] --> S1[Residuals] --> S2[Weak learner 2 fits residuals] --> S3[Residuals] --> S4[Weak learner 3 fits residuals] --> SUM[Additive sum]
+  end
+
+  subgraph Stacking
+  T1[Base model A - OOF preds] --> META[Meta-learner]
+  T2[Base model B - OOF preds] --> META
+  T3[Base model C - OOF preds] --> META
+  META --> FINAL[Final prediction]
+  end
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+from sklearn.ensemble import (
+    BaggingClassifier, RandomForestClassifier, GradientBoostingClassifier,
+    StackingClassifier,
+)
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import cross_val_score
+from sklearn.datasets import make_classification
+
+X, y = make_classification(n_samples=2000, n_features=20, random_state=0)
+
+# Bagging: parallel, variance reduction. Base learner is deliberately unpruned (low bias, high variance).
+bagging = BaggingClassifier(
+    estimator=DecisionTreeClassifier(),  # no max_depth cap -> high variance base learner
+    n_estimators=200, max_samples=0.8, random_state=0,
+)
+rf = RandomForestClassifier(n_estimators=300, random_state=0)  # bagging + feature subsampling
+
+# Boosting: sequential, bias reduction. Base learner is deliberately weak (shallow).
+boosting = GradientBoostingClassifier(
+    n_estimators=300, max_depth=2, learning_rate=0.05, random_state=0,
+)
+
+# Stacking: meta-learner trained on out-of-fold base-model predictions.
+# StackingClassifier internally uses cross_val_predict to generate OOF predictions
+# for the base estimators before training the final_estimator -- this is what
+# prevents the leakage described above.
+stacking = StackingClassifier(
+    estimators=[
+        ("logreg", LogisticRegression(max_iter=1000)),
+        ("svc", SVC(probability=True)),
+        ("tree", DecisionTreeClassifier(max_depth=5)),
+    ],
+    final_estimator=LogisticRegression(),
+    cv=5,  # controls the OOF-prediction generation
+)
+
+for name, model in [("Bagging", bagging), ("RandomForest", rf), ("Boosting", boosting), ("Stacking", stacking)]:
+    score = cross_val_score(model, X, y, cv=5, scoring="roc_auc").mean()
+    print(f"{name:14s} ROC-AUC: {score:.4f}")
+```
+
+## Comparing Ensemble Strategies
+
+<ComparisonTable
+  headers={["Method", "Training", "Primary effect", "Base learner strength", "Example", "Key failure mode"]}
+  rows={[
+    ["Bagging", "Parallel, independent", "Reduces variance", "Should be low-bias, high-variance (deep trees)", "Random forests", "Diminishing returns if base models are highly correlated (rho stays high)"],
+    ["Boosting", "Sequential, each stage corrects prior errors", "Reduces bias", "Should be high-bias, low-variance (shallow trees/stumps)", "Gradient boosting (XGBoost/LightGBM/CatBoost)", "Overfits if too many rounds / learning rate too high; sequential, so harder to parallelize across stages"],
+    ["Stacking", "Base models parallel, meta-learner trained after on OOF predictions", "Learns an optimal, potentially nonlinear combination rule", "Benefits from diverse base learners (different inductive biases)", "Winning Kaggle-competition ensembles combining GBMs, linear models, and neural nets", "Leaks and overfits if OOF predictions aren't used, or if the meta-learner is too complex relative to available data"],
+  ]}
+/>
+
+<ProsCons
+  pros={[
+    "Ensembles routinely outperform any single constituent model, often by a meaningful margin, at the cost of extra training/inference compute.",
+    "Bagging (random forests) parallelizes trivially across trees and is remarkably robust to hyperparameter choices out of the box.",
+    "Boosting (gradient boosting) is currently the strongest widely-used method for structured/tabular data; see [Gradient Boosting](/docs/machine-learning/supervised-learning/gradient-boosting).",
+    "Stacking can combine fundamentally different model families (trees, linear models, neural nets), capturing complementary strengths no single family has alone.",
+  ]}
+  cons={[
+    "All ensembling adds inference-time cost and reduces interpretability relative to a single model.",
+    "Bagging cannot fix a systematically biased base learner — averaging many biased models still yields a biased ensemble.",
+    "Boosting is sequential by construction, limiting parallelism, and is more sensitive to hyperparameters (learning rate, number of rounds) and outliers than bagging.",
+    "Stacking is easy to implement incorrectly (leaking training-fold information into the meta-learner) and its marginal benefit over a well-tuned single boosting model can be small relative to its added complexity.",
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Bagging trains independent models on bootstrap resamples and averages them, driving down variance while leaving bias essentially unchanged.",
+  "The variance of a bagged ensemble converges to rho * sigma^2 as B grows, where rho is the pairwise correlation between base models -- decorrelating the base models (as random forests do via feature subsampling) is the lever that matters once B is already large.",
+  "Boosting trains a sequence of deliberately weak learners, each correcting the current ensemble's residual error, driving down bias at some cost to variance.",
+  "Stacking trains a meta-learner on out-of-fold predictions from several base models specifically to avoid the leakage that would occur if the meta-learner saw predictions from models that had already seen those same training labels.",
+  "These three techniques are not interchangeable substitutes: bagging targets variance, boosting targets bias, and stacking targets the combination rule itself -- they are often combined (e.g., stacking an ensemble that includes both a random forest and a gradient boosting model).",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Frequent errors">
+  - **Bagging an already low-variance, high-bias base learner (e.g., a shallow decision stump or linear model) and expecting a big improvement.** Since bagging's variance-reduction formula shows the ensemble variance is bounded by rho*sigma^2, there is little variance to reduce from a base learner that already has low variance — bagging works best on unstable, high-variance learners like unpruned trees.
+  - **Boosting for too many rounds without early stopping or a validation-based stopping criterion.** Because each round adds representational capacity, boosting can eventually overfit the training set; monitor validation loss and stop (or tune `n_estimators`/`learning_rate` jointly) rather than assuming more rounds is always better.
+  - **Building a stacked ensemble using in-sample (not out-of-fold) base-model predictions to train the meta-learner.** As derived above, this leaks information and causes the meta-learner to overtrust base models, typically producing an ensemble that looks great in training but underperforms in deployment relative to a properly-stacked one.
+  - **Assuming random forests eliminate the need for hyperparameter tuning entirely.** They are robust to many settings by default, but `max_depth`, `min_samples_leaf`, and the number of features sampled per split (`max_features`) still meaningfully affect the bias-variance balance and correlation between trees.
+  - **Ensembling many highly correlated models and expecting bagging-like gains.** If the base models make very similar errors (e.g., several near-identical gradient boosting models with slightly different seeds), rho stays high and the variance-reduction benefit is small — diversity among base learners (different algorithms, feature subsets, or training data) is what makes ensembling (especially stacking) pay off.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why do random forests use both bootstrap resampling AND random feature subsampling at each split, rather than bootstrap resampling alone?",
+    options: [
+      "Feature subsampling is only for speed, it has no effect on model quality",
+      "The variance of a bagged ensemble converges to rho * sigma^2 as the number of trees grows, where rho is the correlation between trees; random feature subsampling further decorrelates the trees (lowers rho) beyond what bootstrap resampling alone achieves, since bootstrapped samples of the same data are still fairly similar to each other",
+      "It converts the model from bagging into boosting",
+      "It reduces the bias of each individual tree",
+    ],
+    answerIndex: 1,
+    explanation: "Bagging's variance-reduction benefit is capped by the term rho*sigma^2 in Var(average) = rho*sigma^2 + (1-rho)/B * sigma^2 -- once B is large, only reducing rho helps further. Bootstrap samples drawn from the same dataset are still correlated with each other; forcing each split to consider only a random subset of features adds an additional independent source of randomness between trees, lowering rho and further reducing the ensemble's variance without changing its bias.",
+  },
+  {
+    question: "In a stacking ensemble, why must the meta-learner be trained on out-of-fold predictions from the base models rather than predictions generated by base models trained on the full training set?",
+    options: [
+      "Out-of-fold predictions train faster",
+      "Base models trained on the full data and then evaluated on that same data produce overly optimistic predictions (since they already saw those labels), causing the meta-learner to overtrust them -- out-of-fold predictions mimic genuinely unseen data and avoid this leakage",
+      "It is only a convention with no real effect on performance",
+      "Out-of-fold predictions are required by scikit-learn's API and have no statistical justification",
+    ],
+    answerIndex: 1,
+    explanation: "A base model evaluated on data it was trained on will look artificially accurate, since it has already seen the true label during fitting. If the meta-learner is trained on these in-sample predictions, it learns a relationship that does not hold once the base models face genuinely new data. Out-of-fold predictions -- generated the same way k-fold cross-validation generates honest validation scores -- give the meta-learner a training signal that reflects true held-out-quality base-model behavior.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Bagging Predictors", authors: "Breiman, L.", venue: "Machine Learning", year: 1996 },
+  { title: "Random Forests", authors: "Breiman, L.", venue: "Machine Learning", year: 2001 },
+  { title: "Greedy Function Approximation: A Gradient Boosting Machine", authors: "Friedman, J. H.", venue: "Annals of Statistics", year: 2001 },
+  { title: "Stacked Generalization", authors: "Wolpert, D. H.", venue: "Neural Networks", year: 1992 },
+]} />

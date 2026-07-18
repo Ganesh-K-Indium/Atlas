@@ -1,0 +1,181 @@
+---
+title: "Mixture of Experts (MoE)"
+description: "How sparse top-k routing lets a model have hundreds of billions of parameters while only touching a small fraction of them per token — and why naive routing collapses without a load-balancing loss."
+difficulty: "expert"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "llms", "mixture-of-experts", "moe", "sparse-models"]
+prerequisites: ["Feedforward network layers", "Softmax", "Transformer architecture"]
+---
+
+## Intuition
+
+A standard (dense) Transformer feed-forward block applies the *same* set of weights to every token — every token's forward pass touches every parameter in that block. Total parameter count and per-token compute cost are therefore locked together: to add more capacity (parameters), you necessarily add more compute per token.
+
+**Mixture of Experts (MoE)** breaks this coupling. Instead of one feed-forward block, an MoE layer has many parallel feed-forward blocks ("experts"), and a small learned **gating network** decides, per token, which few experts should process that specific token. Only the selected experts' parameters are used in that token's forward pass — the rest sit idle for that token. Total parameter count can now grow by adding more experts, while per-token compute stays roughly fixed (bounded by however many experts are selected per token, not the total number available).
+
+<Callout type="tip" title="The one-sentence idea">
+  Replace one dense feed-forward block with many expert feed-forward blocks plus a gating network that routes each token to only a small subset (top-k) of them — so total parameters scale with the number of experts, while compute per token scales only with k, decoupling model capacity from inference cost.
+</Callout>
+
+## Deriving Sparse Top-k Routing
+
+Let there be $N$ expert feed-forward networks $E_1, \dots, E_N$, each an ordinary feed-forward block (same shape as a dense Transformer's FFN). For an input token representation $x$, a **gating network** — typically just a learned linear projection followed by softmax — produces a score for every expert:
+
+$$
+g(x) = \text{softmax}\big(W_g x\big) \in \mathbb{R}^N
+$$
+
+A *dense* mixture (using every expert, weighted by $g$) would defeat the purpose — it still touches every expert's parameters per token. The sparse version keeps only the **top-$k$** entries of $g(x)$ (commonly $k=1$ or $k=2$) and zeroes out the rest before renormalizing, so the token's output is a weighted combination of only the selected experts:
+
+$$
+\mathcal{G}(x) = \text{softmax}\big(\text{TopK}(W_g x,\ k)\big), \qquad y = \sum_{i=1}^{N} \mathcal{G}(x)_i \cdot E_i(x)
+$$
+
+where $\text{TopK}(v, k)$ keeps the $k$ largest entries of $v$ and sets the rest to $-\infty$ (so they vanish under softmax). Crucially, **$E_i(x)$ is only computed for the experts with nonzero gate weight** — the sum's other terms are exactly zero and their corresponding expert networks are never invoked for this token, not merely down-weighted. This is what makes the routing genuinely sparse rather than just a soft-weighted dense mixture.
+
+## Why This Decouples Parameter Count from Per-Token Compute
+
+Consider a layer with $N$ experts, each with $P$ parameters, using top-$k$ routing:
+
+- **Total parameters** in the layer: $N \times P$ (every expert's weights must be stored, since any token might route to any expert across a batch).
+- **Compute (FLOPs) per token**: $k \times P$ — only the $k$ selected experts actually run a forward pass for that token, regardless of how large $N$ is.
+
+So increasing $N$ (adding more experts) grows the model's total parameter count and its representational capacity — different experts can specialize on different kinds of tokens or sub-tasks — **without** increasing the compute cost of processing any individual token, since $k$ stays fixed. This is precisely the property that lets frontier MoE-based LLMs report total parameter counts far larger than the number of parameters actually active per forward pass — see [Frontier Model Landscape](/docs/llms/frontier-landscape/frontier-model-landscape) for how this shows up in reported total-vs-active parameter counts for real deployed models. A dense model with the same *total* parameter count would require that entire count in FLOPs per token; an MoE model with the same total count only pays for $k/N$ of it.
+
+<Mermaid chart={`
+graph TD
+  X["Token x"] --> Gate["Gating network: softmax(W_g x)"]
+  Gate --> TopK["Keep only top-k expert scores, zero the rest"]
+  TopK --> R1{"Expert 1 selected?"}
+  TopK --> R2{"Expert 2 selected?"}
+  TopK --> R3{"Expert N selected?"}
+  R1 -->|"yes: compute E1(x)"| Sum["Weighted sum of selected experts' outputs"]
+  R2 -->|"no: skip -- not computed"| Skip2["(idle for this token)"]
+  R3 -->|"yes: compute EN(x)"| Sum
+  Sum --> Y["Output y"]
+`} />
+
+## The Load-Balancing Problem
+
+Naive top-k routing, trained with only the task loss, has a well-documented failure mode: the gating network can converge to routing most or all tokens to a small handful of "favorite" experts, while the remaining experts receive few or no tokens and never receive enough gradient signal to become useful. This happens because of a **rich-get-richer dynamic**: an expert that happens to perform slightly better early in training (by chance of initialization) gets selected more often, which gives it more gradient updates, which makes it perform even better, which makes the gate select it even more — a positive feedback loop with nothing in the plain task loss to counteract it. The practical consequences are twofold: most of the model's added parameters go unused (defeating the purpose of adding experts), and the few overloaded experts become a compute/memory bottleneck in distributed training and serving, where experts are typically sharded across devices and an imbalanced load means some devices sit idle while others are overloaded.
+
+**The auxiliary load-balancing loss.** The standard fix (introduced in Shazeer et al. 2017's sparsely-gated MoE and used in essentially all subsequent MoE training recipes) adds an auxiliary loss term that explicitly penalizes uneven routing across a batch. A common formulation defines, per expert $i$: $f_i$, the fraction of tokens in the batch routed to expert $i$, and $P_i$, the average gate probability mass assigned to expert $i$ across the batch (a differentiable proxy, since $f_i$ itself — a hard count — has no useful gradient). The auxiliary loss is proportional to:
+
+$$
+L_{\text{aux}} = N \sum_{i=1}^{N} f_i \cdot P_i
+$$
+
+This is minimized (for a fixed total token count) when every expert receives an equal share of tokens ($f_i = 1/N$ for all $i$) — a balanced load is the loss's optimum, so adding this term as an auxiliary objective (weighted by a small coefficient and summed with the main task loss) actively discourages the collapse-to-a-few-experts dynamic, without requiring any hard routing constraint that would otherwise break differentiability.
+
+## Implementation Sketch
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MoELayer(nn.Module):
+    def __init__(self, d_model, d_ff, num_experts, top_k=2):
+        super().__init__()
+        self.experts = nn.ModuleList([
+            nn.Sequential(nn.Linear(d_model, d_ff), nn.ReLU(), nn.Linear(d_ff, d_model))
+            for _ in range(num_experts)
+        ])
+        self.gate = nn.Linear(d_model, num_experts)
+        self.num_experts = num_experts
+        self.top_k = top_k
+
+    def forward(self, x):
+        # x: [batch * seq_len, d_model] -- flattened tokens
+        logits = self.gate(x)                              # [tokens, num_experts]
+        topk_vals, topk_idx = logits.topk(self.top_k, dim=-1)
+        topk_weights = F.softmax(topk_vals, dim=-1)          # renormalize over the k selected
+
+        # load-balancing auxiliary loss
+        gate_probs = F.softmax(logits, dim=-1)               # P_i proxy: mean gate prob per expert
+        chosen_mask = F.one_hot(topk_idx, self.num_experts).sum(dim=1).float()  # [tokens, num_experts]
+        f_i = chosen_mask.mean(dim=0)                         # fraction of tokens routed to each expert
+        P_i = gate_probs.mean(dim=0)
+        aux_loss = self.num_experts * (f_i * P_i).sum()
+
+        out = torch.zeros_like(x)
+        for slot in range(self.top_k):
+            expert_idx = topk_idx[:, slot]                    # which expert each token picked in this slot
+            weight = topk_weights[:, slot].unsqueeze(-1)
+            for e in range(self.num_experts):
+                mask = expert_idx == e
+                if mask.any():
+                    out[mask] += weight[mask] * self.experts[e](x[mask])  # only run expert e on ITS tokens
+        return out, aux_loss
+```
+
+The inner loop only calls `self.experts[e]` on the subset of tokens actually routed to it — in a real distributed implementation, this corresponds to tokens being physically dispatched to whichever device holds expert $e$'s weights, which is the practical mechanism behind the "only active experts run" property.
+
+<ComparisonTable
+  headers={["Property", "Dense Transformer FFN", "Sparse MoE FFN (top-k routing)"]}
+  rows={[
+    ["Total parameters", "Fixed by hidden dimension", "Scales with number of experts N -- can be far larger"],
+    ["Compute (FLOPs) per token", "Full FFN cost every token", "Only k experts' worth of FFN cost, independent of N"],
+    ["Training complexity", "Standard", "Requires auxiliary load-balancing loss and routing infrastructure (token dispatch/combine, often across devices)"],
+    ["Failure mode if untreated", "N/A", "Routing collapse -- most tokens sent to a few experts, most parameters underused"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "MoE decouples total parameter count from per-token compute by routing each token to only a small subset (top-k) of experts, whose weights alone are computed for that token.",
+  "Total parameters scale with the number of experts N; compute per token scales only with k -- this is why MoE models can report total parameter counts far larger than their active parameters per forward pass.",
+  "Naive top-k routing trained on task loss alone tends to collapse onto a few favored experts via a rich-get-richer dynamic during training.",
+  "An auxiliary load-balancing loss, minimized when tokens are spread evenly across experts, is the standard fix and is present in essentially every practical MoE training recipe.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Massively increases model capacity (total parameters) without a proportional increase in per-token inference/training compute.",
+    "Experts can specialize -- different experts empirically tend to handle different kinds of tokens or sub-tasks, though the specific specialization pattern is not always interpretable or guaranteed.",
+    "Enables scaling total model size largely independently of the compute budget available for a single forward pass.",
+  ]}
+  cons={[
+    "Total memory footprint (all experts must be stored, e.g. across devices) can be very large even though compute per token is small -- MoE trades compute for memory/storage, not memory.",
+    "Requires the auxiliary load-balancing loss (and careful tuning of its weight) to avoid routing collapse -- without it, most of the added parameters go unused.",
+    "Distributed serving/training requires routing tokens across devices holding different experts, adding real systems complexity (communication overhead) not present in dense models.",
+    "Routing decisions are discrete (top-k), which is inherently non-smooth -- gradients flow through the gate's softmax weights but not through the hard selection itself, an approximation that can create training instabilities specific to MoE.",
+  ]}
+/>
+
+A common mistake is assuming an MoE model's total parameter count is a fair comparison point against a dense model's parameter count for compute purposes — the relevant number for inference cost is the *active* parameter count ($k/N$ fraction of the total), not the total.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "In a top-k MoE layer with N total experts, why does per-token compute stay roughly constant as N increases, while total parameter count grows with N?",
+    options: [
+      "Because larger N automatically shrinks each expert's size proportionally",
+      "Because only the k selected experts' feed-forward networks are actually executed for a given token -- the other N-k experts' parameters exist in memory but contribute zero compute for that token, since routing is sparse (hard top-k), not a soft weighted average over all experts",
+      "Because MoE layers use a smaller hidden dimension than dense layers regardless of N",
+      "Because compute cost is actually proportional to N, not k, in standard MoE implementations",
+    ],
+    answerIndex: 1,
+    explanation: "The defining property of sparse (top-k) routing is that non-selected experts contribute an exact zero to both the output sum and the compute graph -- they are skipped, not merely down-weighted. So FLOPs per token scale with k (fixed), while stored parameters scale with N (which can grow arbitrarily), decoupling the two.",
+  },
+  {
+    question: "Why does naive top-k routing trained only on the task loss tend to collapse onto a small subset of experts, and what does the auxiliary load-balancing loss do about it?",
+    options: [
+      "Routing collapse is a myth -- task loss alone always produces balanced routing",
+      "An expert that performs slightly better early in training gets routed more tokens, which gives it more gradient updates and makes it perform even better, reinforcing its selection -- a self-reinforcing feedback loop with nothing in the task loss to counteract it; the auxiliary loss adds a term (proportional to the sum over experts of token-fraction times average gate probability) that is minimized when load is balanced across experts, directly counteracting the collapse",
+      "The auxiliary loss works by physically preventing any expert from receiving more than 1/N of tokens via a hard constraint",
+      "Routing collapse only occurs at inference time, never during training",
+    ],
+    answerIndex: 1,
+    explanation: "The rich-get-richer dynamic arises because more routing to an expert means more gradient signal for that expert, reinforcing its selection with nothing in the plain task loss to push back. The auxiliary load-balancing loss is a soft, differentiable penalty (not a hard constraint) that is minimized precisely when tokens are spread evenly across experts, giving the gate an explicit incentive against collapse while remaining compatible with gradient-based training.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer", authors: "Shazeer, N. et al.", venue: "ICLR", year: 2017, url: "https://arxiv.org/abs/1701.06538" },
+]} />

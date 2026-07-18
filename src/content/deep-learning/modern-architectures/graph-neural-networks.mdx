@@ -1,0 +1,177 @@
+---
+title: "Graph Neural Networks"
+description: "How the generic 'aggregate your neighbors, then update yourself' message-passing recipe unifies GCNs, GraphSAGE, and GATs into one framework."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "graph-neural-networks", "gnn", "gcn"]
+prerequisites: ["Linear algebra (matrices, eigenvalues intuition)", "Basic graph terminology (nodes, edges, adjacency)", "Feedforward neural networks"]
+---
+
+## Intuition
+
+Convolutional networks exploit a fixed, regular grid structure (pixels have well-defined neighbors: up, down, left, right). Many real datasets — social networks, molecules, citation networks, knowledge graphs — have relational structure that isn't a grid at all: each node can have a different number of neighbors, in no canonical order. A **Graph Neural Network (GNN)** generalizes the convolutional idea to this irregular setting: each node updates its own representation by looking at its neighbors' representations, the same way a convolution looks at a pixel's spatial neighborhood — just with a neighborhood defined by graph edges instead of grid geometry.
+
+<Callout type="tip" title="The one-sentence idea">
+  Every node repeatedly updates its representation by aggregating messages from its immediate graph neighbors, so that after $k$ rounds of this, each node's representation has absorbed information from everything within $k$ hops — the graph analogue of a convolution's receptive field.
+</Callout>
+
+## The Generic Message-Passing Framework
+
+Almost every mainstream GNN variant (GCN, GraphSAGE, GAT, GIN, ...) is an instance of the same two-step recipe, applied at every layer $l$ and every node $v$:
+
+**1. Aggregate.** Combine the representations of $v$'s neighbors $\mathcal{N}(v)$ into a single message vector, using some permutation-invariant function $\text{AGG}$ (it must not depend on the order neighbors are listed in, since graphs have no canonical neighbor ordering):
+
+$$
+m_v^{(l)} = \text{AGG}^{(l)}\Big(\big\{ h_u^{(l-1)} : u \in \mathcal{N}(v) \big\}\Big)
+$$
+
+**2. Update.** Combine that aggregated message with the node's own previous representation to produce its new representation:
+
+$$
+h_v^{(l)} = \text{UPDATE}^{(l)}\Big( h_v^{(l-1)},\ m_v^{(l)} \Big)
+$$
+
+Stacking $L$ such layers means every node's final representation $h_v^{(L)}$ has, transitively, incorporated information from every node within $L$ hops in the graph — analogous to how stacking convolutional layers grows a pixel's effective receptive field. This is why GNN depth is chosen deliberately: too few layers under-utilizes the graph's structure (a node never "hears from" distant but relevant nodes); too many layers causes **over-smoothing**, where repeated neighbor-averaging makes all node representations converge toward indistinguishable values, since information from increasingly large (and increasingly overlapping) neighborhoods gets mixed together.
+
+## Specializing to a Graph Convolutional Network (GCN)
+
+The GCN (Kipf & Welling, 2016) is the specific, widely used instance of this framework where $\text{AGG}$ is a **degree-normalized average** of neighbor features and $\text{UPDATE}$ is a linear projection followed by a nonlinearity. Concretely, for a graph with adjacency matrix $A$, the GCN adds self-loops ($\tilde{A} = A + I$, so a node's own previous representation counts as part of its own neighborhood-average rather than needing a separate additive term) and computes the symmetric-normalized degree matrix $\tilde{D}$ (where $\tilde{D}_{ii} = \sum_j \tilde{A}_{ij}$). The full layer-wise propagation rule, in matrix form for all nodes simultaneously, is:
+
+$$
+H^{(l)} = \sigma\!\left( \tilde{D}^{-1/2}\, \tilde{A}\, \tilde{D}^{-1/2}\, H^{(l-1)}\, W^{(l)} \right)
+$$
+
+Breaking this down against the generic framework:
+
+- $\tilde{D}^{-1/2} \tilde{A} \tilde{D}^{-1/2} H^{(l-1)}$ is exactly the **aggregate** step: for each node, it computes a *symmetrically normalized* weighted average of its neighbors' (and its own) representations. The normalization by $\tilde{D}^{-1/2}$ on both sides prevents high-degree nodes (hubs) from dominating the aggregation purely due to having more neighbors, and keeps the aggregation numerically well-scaled regardless of a node's degree.
+- Multiplying by $W^{(l)}$ (a learned weight matrix, shared across all nodes) and applying $\sigma$ (a nonlinearity, e.g. ReLU) is the **update** step: the same linear transformation is applied to every node's aggregated representation, exactly analogous to how a convolution's filter weights are shared across every spatial location.
+
+The per-node view of the same equation, written without matrix notation, makes the "normalized neighbor averaging" explicit:
+
+$$
+h_v^{(l)} = \sigma\left( \sum_{u \in \mathcal{N}(v) \cup \{v\}} \frac{1}{\sqrt{\tilde{d}_v}\sqrt{\tilde{d}_u}}\, W^{(l)} h_u^{(l-1)} \right)
+$$
+
+where $\tilde{d}_v$ is node $v$'s degree (including its self-loop). This is a weighted average where the weight between $v$ and $u$ is $1/\sqrt{\tilde{d}_v \tilde{d}_u}$ — larger when both nodes have few neighbors, smaller when either has many, which is the concrete meaning of "degree-normalized."
+
+## How Other Variants Fit the Same Framework
+
+<ComparisonTable
+  headers={["Model", "AGG (aggregation)", "UPDATE", "Key property"]}
+  rows={[
+    ["GCN", "Degree-normalized average of neighbors (incl. self via self-loop)", "Shared linear layer + nonlinearity", "Simple, spectrally motivated, widely used baseline"],
+    ["GraphSAGE", "Configurable -- mean, max-pool, or LSTM over a sampled neighbor subset", "Concatenate self + aggregated neighbor vector, then linear + nonlinearity", "Samples neighbors for scalability on large graphs; inductive (generalizes to unseen nodes)"],
+    ["GAT (Graph Attention Network)", "Attention-weighted sum of neighbors -- weights learned per edge, not fixed by degree", "Weighted sum + nonlinearity, often multi-head like Transformer attention", "Lets the model learn which neighbors matter most, rather than fixing weights by degree"],
+  ]}
+/>
+
+The unifying insight: what differs across these architectures is almost entirely the choice of $\text{AGG}$ (how neighbor information is combined) and $\text{UPDATE}$ (how it's merged with the node's own state) — the two-step message-passing skeleton itself stays fixed.
+
+<Mermaid chart={`
+graph TD
+  V["Node v (previous layer representation h_v)"]
+  N1["Neighbor u1"] --> Agg["AGGREGATE neighbor messages"]
+  N2["Neighbor u2"] --> Agg
+  N3["Neighbor u3"] --> Agg
+  Agg --> Msg["Aggregated message m_v"]
+  V --> Update["UPDATE: combine h_v with m_v"]
+  Msg --> Update
+  Update --> Hnew["New representation h_v (next layer)"]
+`} />
+
+## Implementation Sketch
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GCNLayer(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.linear = nn.Linear(in_dim, out_dim)
+
+    def forward(self, H, A_norm):
+        """
+        H: [num_nodes, in_dim] node features from the previous layer
+        A_norm: [num_nodes, num_nodes] precomputed \\tilde{D}^{-1/2} \\tilde{A} \\tilde{D}^{-1/2}
+        """
+        aggregated = A_norm @ H          # AGGREGATE: normalized neighbor averaging
+        return F.relu(self.linear(aggregated))  # UPDATE: shared linear layer + nonlinearity
+
+def normalize_adjacency(A):
+    """Build \\tilde{D}^{-1/2} \\tilde{A} \\tilde{D}^{-1/2} from a raw adjacency matrix A."""
+    A_tilde = A + torch.eye(A.size(0))              # add self-loops
+    D_tilde = A_tilde.sum(dim=1)
+    D_inv_sqrt = torch.diag(D_tilde.pow(-0.5))
+    return D_inv_sqrt @ A_tilde @ D_inv_sqrt
+
+class GCN(nn.Module):
+    def __init__(self, in_dim, hidden_dim, out_dim):
+        super().__init__()
+        self.layer1 = GCNLayer(in_dim, hidden_dim)
+        self.layer2 = GCNLayer(hidden_dim, out_dim)
+
+    def forward(self, H, A_norm):
+        H = self.layer1(H, A_norm)
+        H = self.layer2(H, A_norm)
+        return H
+```
+
+<KeyTakeaways items={[
+  "Message passing generalizes convolution to irregular graph structure: aggregate neighbor representations, then update the node's own representation with the result.",
+  "Stacking L message-passing layers gives every node an L-hop receptive field, but too many layers causes over-smoothing, where node representations collapse toward indistinguishability.",
+  "A GCN is the specific instance where AGG is degree-normalized neighbor averaging (via the symmetric-normalized adjacency \\tilde{D}^{-1/2} \\tilde{A} \\tilde{D}^{-1/2}) and UPDATE is a shared linear layer plus nonlinearity.",
+  "GraphSAGE and GAT fit the same generic framework, differing mainly in their choice of AGG (sampled/pooled aggregation, or learned attention weights, respectively).",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Directly exploits relational structure that grid-based CNNs or sequence-based RNNs/Transformers cannot natively represent.",
+    "Parameter sharing across nodes (like CNN filter sharing across pixels) keeps parameter count independent of graph size.",
+    "The message-passing framework is highly general -- new domain-specific aggregation/update functions can be dropped in without redesigning the whole architecture.",
+  ]}
+  cons={[
+    "Over-smoothing limits practical depth -- most GNNs use relatively few layers (commonly on the order of 2-4), unlike the very deep stacks common in CNNs/Transformers.",
+    "The original (transductive) GCN formulation requires the full graph (and its fixed adjacency matrix) at both training and inference time -- extending to unseen nodes/graphs requires inductive variants like GraphSAGE.",
+    "Degree-normalized averaging (plain GCN) treats all neighbors' relative importance as fixed by graph structure alone, which can be a poor prior when some neighbors are far more relevant than others -- attention-based variants (GAT) address this at extra compute cost.",
+  ]}
+/>
+
+A frequent mistake is forgetting the self-loop addition ($\tilde{A} = A+I$) in a GCN: without it, a node's own previous-layer representation would never propagate to its own next-layer representation except indirectly through its neighbors, which measurably hurts performance and is not what the standard formulation does.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "In the generic message-passing framework, why must the AGGREGATE function be permutation-invariant with respect to the set of neighbors?",
+    options: [
+      "It's a performance optimization with no correctness implications",
+      "Because graphs have no canonical ordering of a node's neighbors -- if AGG depended on neighbor order, the same graph structure could produce different node representations depending on an arbitrary listing order, which is not a well-defined function of the graph",
+      "Because permutation invariance is required to guarantee no over-smoothing",
+      "Because neural networks cannot process sets of vectors at all",
+    ],
+    answerIndex: 1,
+    explanation: "Unlike a pixel's fixed spatial neighbors (up/down/left/right, a fixed order), a graph node's neighbors have no inherent ordering. An aggregation function that depended on the order neighbors happened to be listed in would make the model's output depend on an arbitrary implementation detail rather than the graph's actual structure -- so AGG must be a function of the neighbor set (e.g. sum, mean, max), not a sequence.",
+  },
+  {
+    question: "In the GCN propagation rule H^(l) = sigma(D~^{-1/2} A~ D~^{-1/2} H^(l-1) W^(l)), what specifically does the D~^{-1/2} A~ D~^{-1/2} term accomplish?",
+    options: [
+      "It applies the learned weight matrix to each node's features",
+      "It computes a degree-normalized (symmetrically normalized) weighted average over each node's neighbors (including itself, via the added self-loop in A~), preventing high-degree nodes from dominating the aggregation purely due to having more neighbors",
+      "It is purely a numerical stability trick with no effect on which nodes' information gets aggregated",
+      "It removes self-loops from the graph before aggregation",
+    ],
+    answerIndex: 1,
+    explanation: "A~ = A + I adds self-loops so each node's own features participate in its own aggregation. D~^{-1/2} A~ D~^{-1/2} then rescales each entry so the resulting aggregation is a normalized average rather than a raw sum -- the normalization by both endpoints' degrees is what specifically prevents hub nodes (high degree) from producing disproportionately large aggregated messages.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Semi-Supervised Classification with Graph Convolutional Networks", authors: "Kipf, T. N. & Welling, M.", venue: "ICLR", year: 2016, url: "https://arxiv.org/abs/1609.02907" },
+]} />

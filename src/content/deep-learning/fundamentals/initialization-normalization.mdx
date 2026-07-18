@@ -1,0 +1,207 @@
+---
+title: "Weight Initialization & Normalization"
+description: "Why the variance of your initial weights determines whether signal survives 100 layers, and why BatchNorm and LayerNorm normalize over completely different axes for good reason."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "neural-networks", "initialization", "normalization", "batch-norm", "layer-norm"]
+prerequisites: ["Variance and expectation of random variables", "Activation functions", "Backpropagation basics"]
+---
+
+<Prerequisites items={["Variance and expectation of random variables", "Activation Functions", "Backpropagation: Full Derivation"]} />
+
+## Intuition
+
+Before a network sees a single training example, its weights are set randomly. That random starting point matters enormously: if the initial weights are too large, activations and gradients can explode as they pass through many layers; too small, and they shrink to zero. Xavier/Glorot and He initialization are principled recipes for picking the *variance* of that initial randomness so that signal neither explodes nor vanishes, on average, across depth.
+
+Normalization layers (BatchNorm, LayerNorm) tackle a related but distinct problem: even with good initialization, the *distribution* of activations can drift and vary wildly as training proceeds and as weights update. Normalization layers re-center and re-scale activations at every layer, during training, so that each layer sees inputs in a consistent, well-behaved range — and then let the network learn how much of that raw normalization it actually wants via learned scale and shift parameters.
+
+<Callout type="tip" title="The one idea that matters">
+  Initialization is a one-time bet on what variance keeps signal stable through depth *before* training starts; normalization is a per-batch (or per-example) correction that keeps activations well-behaved *throughout* training, as weights change.
+</Callout>
+
+## Formal Definition and Theory
+
+### Xavier/Glorot initialization: preserving variance forward and backward
+
+Consider a linear layer $z = Wx$ where $x \in \mathbb{R}^{n_{in}}$, $W \in \mathbb{R}^{n_{out} \times n_{in}}$, with weights drawn i.i.d. with mean 0 and variance $\text{Var}(w)$, independent of $x$. For a single output unit $z_j = \sum_{i=1}^{n_{in}} w_{ji} x_i$:
+
+$$
+\text{Var}(z_j) = \sum_{i=1}^{n_{in}} \text{Var}(w_{ji}) \, \text{Var}(x_i) = n_{in} \, \text{Var}(w) \, \text{Var}(x)
+$$
+
+(using independence and zero-mean $w$, $x$). To keep the forward-pass variance unchanged layer to layer, i.e. $\text{Var}(z) = \text{Var}(x)$, we need:
+
+$$
+n_{in} \, \text{Var}(w) = 1 \quad \Longrightarrow \quad \text{Var}(w) = \frac{1}{n_{in}}
+$$
+
+An identical argument applied to the *backward* pass (gradients flowing through $W^\top$) gives $\text{Var}(w) = \frac{1}{n_{out}}$ for gradient variance to be preserved. Since we generally can't satisfy both exactly, Glorot & Bengio (2010) proposed splitting the difference with the harmonic-mean-like compromise:
+
+$$
+\text{Var}(w) = \frac{2}{n_{in} + n_{out}}
+$$
+
+In practice this is implemented by sampling from $\mathcal{U}\left(-\sqrt{\frac{6}{n_{in}+n_{out}}}, \sqrt{\frac{6}{n_{in}+n_{out}}}\right)$ (a uniform distribution with that variance) or the corresponding zero-mean Gaussian.
+
+### He initialization: adapting for ReLU
+
+Xavier's derivation assumes the activation function preserves variance symmetrically (roughly true for tanh near 0). ReLU breaks this assumption because it zeroes out negative inputs — **half the variance is discarded** at every layer. Formally, if $z$ is symmetric around 0, then $a = \text{ReLU}(z)$ has:
+
+$$
+\mathbb{E}[a^2] = \mathbb{E}[\text{ReLU}(z)^2] = \tfrac{1}{2}\mathbb{E}[z^2]
+$$
+
+(since $\text{ReLU}(z)^2$ equals $z^2$ for the positive half of a symmetric distribution and 0 for the negative half). To compensate for this factor-of-2 loss and still preserve variance through the layer, He et al. (2015) double the Xavier variance:
+
+$$
+\text{Var}(w) = \frac{2}{n_{in}}
+$$
+
+This is why PyTorch's default `kaiming_normal_`/`kaiming_uniform_` initializations use this factor of 2 specifically for ReLU-family activations, while Xavier remains the standard choice for tanh/sigmoid-based networks.
+
+### Batch Normalization: mechanism
+
+For a mini-batch $\mathcal{B} = \{x_1, \dots, x_m\}$ of activations at some layer (per feature/channel), BatchNorm computes:
+
+$$
+\mu_\mathcal{B} = \frac{1}{m}\sum_{i=1}^m x_i, \qquad \sigma_\mathcal{B}^2 = \frac{1}{m}\sum_{i=1}^m (x_i - \mu_\mathcal{B})^2
+$$
+
+$$
+\hat{x}_i = \frac{x_i - \mu_\mathcal{B}}{\sqrt{\sigma_\mathcal{B}^2 + \epsilon}}, \qquad y_i = \gamma \hat{x}_i + \beta
+$$
+
+Each feature is normalized to zero mean, unit variance *across the batch dimension*, then a learned scale $\gamma$ and shift $\beta$ (one pair per feature/channel) let the network undo the normalization entirely if that's optimal — so BatchNorm never strictly reduces the model's representational capacity, it only changes the *parameterization* the optimizer has to search over. At inference time, running averages of $\mu_\mathcal{B}$ and $\sigma_\mathcal{B}^2$ (accumulated during training) are used instead of per-batch statistics, since a single test example has no "batch" to normalize over.
+
+**Why it helps** — be precise here, since this is a genuinely debated point. Ioffe & Szegedy's original 2015 paper attributed BatchNorm's benefit to reducing "internal covariate shift" (the distribution of each layer's inputs changing as earlier layers' weights update during training). Santurkar et al. (2018) presented evidence that this explanation is largely *not* the mechanism at play — they showed BatchNorm doesn't actually reduce internal covariate shift much, and instead argued its main empirical benefit is **smoothing the optimization landscape** (making the loss and its gradients change more predictably as you take a step, which permits larger, more stable learning rates and faster convergence). The debate isn't fully settled, but the empirically robust, uncontested facts are: BatchNorm reliably (a) allows higher learning rates, (b) speeds up convergence, and (c) acts as a mild regularizer (because per-batch statistics inject a bit of noise). Which of these follows from *which* underlying mechanism is the part that's debated — state the effect, not a single confident causal story.
+
+### Layer Normalization: the key contrast
+
+LayerNorm (Ba, Kiros & Hinton, 2016) normalizes across the **feature dimension, per individual example**, instead of across the batch dimension:
+
+$$
+\mu_i = \frac{1}{H}\sum_{j=1}^{H} x_{ij}, \qquad \sigma_i^2 = \frac{1}{H}\sum_{j=1}^{H}(x_{ij} - \mu_i)^2, \qquad \hat{x}_{ij} = \frac{x_{ij} - \mu_i}{\sqrt{\sigma_i^2+\epsilon}}
+$$
+
+where $H$ is the number of features in that layer, and the statistics are computed independently for each example $i$ — there is no dependency on other examples in the batch at all. This has two crucial practical consequences:
+
+1. **It works identically at training and inference time** — no running-average bookkeeping is needed, since normalization never depended on batch composition in the first place.
+2. **It's invariant to batch size, including a batch size of 1**, and works cleanly with variable-length sequences (padding one sequence differently than another in a batch doesn't contaminate another example's statistics). This is exactly why Transformers — which process variable-length token sequences, often with small or per-example batch structure at inference (e.g., autoregressive decoding one token at a time) — use LayerNorm rather than BatchNorm almost universally.
+
+BatchNorm, by contrast, couples examples within a batch together (each example's normalized output depends on every other example's statistics in that batch), which becomes awkward for small batches, variable-length sequences, or recurrent/autoregressive models where "the batch" isn't a stable, well-defined concept at every timestep.
+
+<Mermaid chart={`
+graph TD
+  subgraph BatchNorm["BatchNorm: normalize across the batch, per feature"]
+    b1["feature_1: mean/var over all N examples"]
+    b2["feature_2: mean/var over all N examples"]
+  end
+  subgraph LayerNorm["LayerNorm: normalize across features, per example"]
+    l1["example_1: mean/var over all H features"]
+    l2["example_2: mean/var over all H features"]
+  end
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+
+def xavier_init(n_in, n_out):
+    limit = np.sqrt(6 / (n_in + n_out))
+    return np.random.uniform(-limit, limit, size=(n_out, n_in))
+
+def he_init(n_in, n_out):
+    std = np.sqrt(2 / n_in)
+    return np.random.normal(0, std, size=(n_out, n_in))
+
+def batchnorm_forward(x, gamma, beta, eps=1e-5):
+    # x: (batch_size, num_features)
+    mu = x.mean(axis=0, keepdims=True)          # per-feature, across the batch
+    var = x.var(axis=0, keepdims=True)
+    x_hat = (x - mu) / np.sqrt(var + eps)
+    return gamma * x_hat + beta
+
+def layernorm_forward(x, gamma, beta, eps=1e-5):
+    # x: (batch_size, num_features)
+    mu = x.mean(axis=1, keepdims=True)          # per-example, across features
+    var = x.var(axis=1, keepdims=True)
+    x_hat = (x - mu) / np.sqrt(var + eps)
+    return gamma * x_hat + beta
+
+x = np.random.randn(8, 16) * 5 + 3   # batch of 8, 16 features, shifted/scaled
+gamma, beta = np.ones(16), np.zeros(16)
+
+bn_out = batchnorm_forward(x, gamma, beta)
+ln_out = layernorm_forward(x, gamma, beta)
+
+print("BatchNorm per-feature mean (should be ~0):", bn_out.mean(axis=0)[:3])
+print("LayerNorm per-example mean (should be ~0):", ln_out.mean(axis=1)[:3])
+```
+
+## Complexity / Comparison
+
+<ComparisonTable
+  headers={["Method", "Normalizes over", "Depends on batch size?", "Train/inference consistent?", "Typical use"]}
+  rows={[
+    ["Xavier/Glorot init", "N/A (one-time weight variance)", "No", "N/A", "Tanh/sigmoid networks"],
+    ["He init", "N/A (one-time weight variance)", "No", "N/A", "ReLU-family networks"],
+    ["BatchNorm", "Batch dimension, per feature", "Yes — needs reasonably large batches, needs running stats for inference", "No (uses running averages at inference)", "CNNs, large-batch image models"],
+    ["LayerNorm", "Feature dimension, per example", "No — works even with batch size 1", "Yes (identical computation always)", "Transformers, RNNs, variable-length sequences"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Xavier initialization sets Var(w) = 2/(n_in+n_out) so that forward activation variance and backward gradient variance both stay roughly stable across layers.",
+  "He initialization doubles that variance to 2/n_in specifically to compensate for ReLU discarding half the variance (zeroing all negative pre-activations).",
+  "BatchNorm normalizes per feature across the batch, then applies a learned γ, β — its benefit is empirically robust (faster training, higher usable learning rates, mild regularization) even though the original 'reduces internal covariate shift' explanation is contested; landscape-smoothing is the better-supported account.",
+  "LayerNorm normalizes per example across features, making it batch-size-independent and train/inference-consistent — the reason it dominates in Transformers and sequence models.",
+  "Good initialization and normalization solve related but distinct problems: initialization is a one-time bet before training; normalization actively corrects activation statistics throughout training.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Pitfalls">
+  - Using Xavier initialization with ReLU activations — this under-scales weights (ReLU needs the He factor of 2), leading to slower or less stable early training.
+  - Confusing BatchNorm's training-time computation (per-batch statistics) with its inference-time computation (running averages) — bugs from forgetting to call `.eval()` in PyTorch (or leaving a model in train mode) are a very common source of inconsistent inference results.
+  - Using BatchNorm with very small batch sizes (e.g., batch size of 2 in some memory-constrained detection/segmentation setups) — batch statistics become noisy and unstable, degrading performance; GroupNorm or LayerNorm are common fixes.
+  - Overclaiming that BatchNorm works "because it reduces internal covariate shift" as an uncontested fact — the empirical benefit is real and robust, but the mechanistic explanation remains actively debated in the literature.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does He initialization use variance 2/n_in instead of Xavier's 2/(n_in+n_out)?",
+    options: [
+      "He initialization is simply an arbitrary simplification of Xavier with no theoretical basis",
+      "Because ReLU zeroes out all negative pre-activations, which discards half the variance of a symmetric input distribution — doubling the variance compensates for that factor-of-2 loss to keep signal variance stable across layers",
+      "Because ReLU networks are always deeper than tanh networks and need larger weights for that reason alone",
+      "Because He initialization is designed only for the backward pass, not the forward pass",
+    ],
+    answerIndex: 1,
+    explanation: "For a symmetric zero-mean z, E[ReLU(z)²] = 0.5·E[z²], since ReLU keeps only the positive half. Using Var(w)=2/n_in exactly offsets this halving so that variance is preserved layer to layer, unlike Xavier's 1/n_in-scale derivation which assumes no such truncation.",
+  },
+  {
+    question: "Why do Transformers typically use LayerNorm rather than BatchNorm?",
+    options: [
+      "LayerNorm is computationally cheaper in all cases",
+      "LayerNorm normalizes per example across features rather than across the batch, so it is invariant to batch size (including batch size 1) and behaves identically at training and inference time — important for variable-length sequences and autoregressive decoding",
+      "BatchNorm cannot be implemented efficiently on GPUs",
+      "LayerNorm was specifically designed to reduce internal covariate shift, while BatchNorm cannot",
+    ],
+    answerIndex: 1,
+    explanation: "BatchNorm couples examples together via shared batch statistics and needs running averages at inference, which is awkward for variable-length sequences and small/irregular batches. LayerNorm's per-example, per-feature normalization has no such dependency, making it a natural fit for Transformers.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Understanding the Difficulty of Training Deep Feedforward Neural Networks", authors: "Glorot, X., & Bengio, Y.", venue: "AISTATS", year: 2010 },
+  { title: "Delving Deep into Rectifiers: Surpassing Human-Level Performance on ImageNet Classification", authors: "He, K., Zhang, X., Ren, S., & Sun, J.", venue: "arXiv:1502.01852", year: 2015 },
+  { title: "Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift", authors: "Ioffe, S., & Szegedy, C.", venue: "arXiv:1502.03167", year: 2015 },
+  { title: "Layer Normalization", authors: "Ba, J. L., Kiros, J. R., & Hinton, G. E.", venue: "arXiv:1607.06450", year: 2016 },
+  { title: "How Does Batch Normalization Help Optimization?", authors: "Santurkar, S., Tsipras, D., Ilyas, A., & Madry, A.", venue: "NeurIPS", year: 2018 },
+]} />

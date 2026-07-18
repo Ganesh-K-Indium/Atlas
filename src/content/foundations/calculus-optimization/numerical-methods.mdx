@@ -1,0 +1,187 @@
+---
+title: "Numerical Methods & Stability"
+description: "Why mathematically equivalent formulas can produce wildly different answers on a computer, and the handful of stable-computation tricks (log-sum-exp, condition numbers, Newton's method) every practitioner relies on."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["numerical-methods", "math", "optimization", "floating-point"]
+prerequisites: ["Derivatives, gradients & Jacobians", "Basic linear algebra"]
+---
+
+## Intuition
+
+On paper, $\frac{e^{a}}{e^a + e^b}$ and the softmax formula are exactly equivalent to their "obvious" implementations. On a computer, the obvious implementation can silently return `nan` or `0` when $a$ or $b$ is large, because floating-point numbers have finite range and finite precision. Numerical methods and stability analysis are the discipline of choosing *which mathematically-equivalent formula* to compute, and *how many iterations of an iterative method* to run, so that the finite-precision answer stays close to the true one.
+
+<Callout type="tip" title="The one idea that matters">
+  Floating-point arithmetic introduces rounding error at every operation; numerical stability is about controlling how that error accumulates and amplifies through a computation, not about avoiding it entirely — it's always present, but a stable formula keeps its effect bounded while an unstable one can blow it up exponentially.
+</Callout>
+
+## Formal Background: Floating-Point and Conditioning
+
+A floating-point number is stored with finite precision (IEEE-754 double precision: ~15-17 significant decimal digits, exponent range roughly $10^{\pm308}$). Two failure modes matter most:
+
+- **Overflow/underflow:** $e^{1000}$ exceeds the representable range and becomes `inf`; $e^{-1000}$ underflows to `0`.
+- **Catastrophic cancellation:** subtracting two nearly-equal large numbers destroys precision, because the leading (large, exactly-represented) digits cancel and only the trailing (already-imprecise) digits survive.
+
+The **condition number** of a problem quantifies how much relative error in the input can be amplified in the output:
+
+$$
+\kappa = \sup \frac{\|\delta f\| / \|f(x)\|}{\|\delta x\| / \|x\|}
+$$
+
+For solving a linear system $Ax=b$, the condition number of $A$ is $\kappa(A) = \|A\|\|A^{-1}\| = \sigma_{\max}(A)/\sigma_{\min}(A)$ (ratio of largest to smallest singular value). A well-conditioned problem ($\kappa$ near 1) has errors that don't grow much; an ill-conditioned problem ($\kappa \gg 1$) can amplify tiny input/rounding errors into large output errors — this is a property of the *problem*, independent of the algorithm used to solve it. Algorithmic **stability** is a separate, complementary property: a stable algorithm doesn't introduce *additional* error beyond what the problem's conditioning already implies.
+
+## Derivation: The Log-Sum-Exp Trick
+
+Softmax and log-likelihood computations require $\log \sum_i e^{x_i}$. Computed naively, if any $x_i$ is large (say $x_i = 1000$), $e^{x_i}$ overflows to `inf` before the logarithm can bring it back down. The fix exploits a shift-invariance identity.
+
+Let $m = \max_i x_i$. Factor out $e^m$:
+
+$$
+\log \sum_i e^{x_i} = \log \left( e^m \sum_i e^{x_i - m} \right) = m + \log \sum_i e^{x_i - m}
+$$
+
+This is an *exact* algebraic identity (no approximation), but it is dramatically more stable to compute: every exponent $x_i - m \le 0$, so every term $e^{x_i-m} \in (0, 1]$ — no overflow is possible, and the largest term is guaranteed to be exactly $1$ (at $i = \arg\max$), avoiding the "everything underflows to 0" failure mode too.
+
+**Why this doesn't lose precision relative to the naive formula:** the shift $m$ is subtracted and re-added exactly (both are additions/subtractions of the same value, which floating point handles exactly when magnitudes are comparable), so the only floating-point error introduced is in evaluating $e^{x_i - m}$ and the sum — quantities that are now safely within representable range, instead of the naive formula's silent `inf`/`nan`.
+
+Softmax itself follows immediately: $\operatorname{softmax}(x)_i = \exp(x_i - m - \log\sum_j e^{x_j - m})$, i.e., compute $\log$-softmax stably via log-sum-exp, then exponentiate once at the end.
+
+## Newton's Method: Derivation and Stability Trade-off
+
+Where gradient descent uses only first-order (slope) information, **Newton's method** uses the Hessian (curvature) to jump directly to the minimum of the local quadratic approximation. Taylor-expand $f$ to second order around $x_t$:
+
+$$
+f(x_t + h) \approx f(x_t) + \nabla f(x_t)^\top h + \tfrac{1}{2} h^\top \nabla^2 f(x_t) \, h
+$$
+
+Minimizing this quadratic in $h$ (set its gradient with respect to $h$ to zero): $\nabla f(x_t) + \nabla^2 f(x_t) h = 0 \implies h = -\nabla^2 f(x_t)^{-1} \nabla f(x_t)$, giving the update:
+
+$$
+x_{t+1} = x_t - \big[\nabla^2 f(x_t)\big]^{-1} \nabla f(x_t)
+$$
+
+For a quadratic $f$, this converges in a **single step** (the quadratic approximation is exact). Near a minimum of a general smooth $f$, Newton's method converges **quadratically** — the number of correct digits roughly doubles each iteration, far faster than gradient descent's linear rate — but requires forming and inverting the $n \times n$ Hessian, which costs $O(n^3)$ per step and is numerically unstable if $\nabla^2 f(x_t)$ is ill-conditioned or not positive definite (it can even produce an *ascent* direction, or fail to be invertible, far from the minimum). Quasi-Newton methods (BFGS, L-BFGS) approximate $\nabla^2 f(x_t)^{-1}$ using only gradient history, trading exactness for $O(n^2)$ or $O(n)$ cost and much better numerical robustness.
+
+<Mermaid chart={`
+graph TD
+  A["Compute f, grad f, (optionally) Hessian at x_t"] --> B{"Method?"}
+  B -->|"Gradient descent"| C["Step: x_t - eta * grad f"]
+  B -->|"Newton's method"| D["Solve Hessian * h = -grad f"]
+  D --> E["Step: x_t + h"]
+  B -->|"Quasi-Newton (BFGS)"| F["Update approximate inverse Hessian from gradient history"]
+  F --> G["Step: x_t - B_t^-1 * grad f"]
+  C --> H["Check convergence"]
+  E --> H
+  G --> H
+  H -->|"not converged"| A
+`} />
+
+## Worked Example: Solving $Ax = b$ Without Inverting $A$
+
+A common mistake is computing `x = inv(A) @ b`. This is both slower ($O(n^3)$ to invert, plus another $O(n^2)$ to multiply) and less numerically stable than solving the system directly via LU or Cholesky decomposition, which avoids ever forming the (potentially ill-conditioned, error-amplifying) explicit inverse:
+
+$$
+A = LU \quad \text{(LU decomposition)}, \qquad Ly = b \text{ (forward substitution)}, \qquad Ux = y \text{ (back substitution)}
+$$
+
+Both triangular solves are $O(n^2)$, and critically, avoid the extra rounding error introduced by explicitly forming $A^{-1}$ and multiplying — every numerical linear algebra textbook and library (LAPACK, and by extension NumPy/SciPy) treats "never explicitly invert unless you need the inverse itself" as a hard rule.
+
+## Code Example
+
+```python
+import numpy as np
+from scipy.linalg import lu_factor, lu_solve
+
+def log_sum_exp(x):
+    """Stable log(sum(exp(x))) -- never overflows, even for large x."""
+    m = np.max(x)
+    return m + np.log(np.sum(np.exp(x - m)))
+
+def softmax_stable(x):
+    z = x - np.max(x)          # shift for stability
+    exp_z = np.exp(z)
+    return exp_z / np.sum(exp_z)
+
+# Demonstrate the failure of the naive formula
+x_large = np.array([1000.0, 1001.0, 999.0])
+naive = np.exp(x_large) / np.sum(np.exp(x_large))          # -> [nan, nan, nan]
+stable = softmax_stable(x_large)                             # -> [0.2119, 0.5761, 0.2119]
+print("naive:", naive)
+print("stable:", stable)
+
+# Solving Ax = b: prefer LU/Cholesky over explicit inversion
+A = np.array([[4.0, 3.0], [6.0, 3.0]])
+b = np.array([1.0, 2.0])
+
+x_bad = np.linalg.inv(A) @ b        # works here, but scales poorly & is less stable
+lu, piv = lu_factor(A)
+x_good = lu_solve((lu, piv), b)     # preferred: no explicit inverse formed
+print(np.allclose(x_bad, x_good))   # True, but x_good is the numerically preferred path
+```
+
+## Complexity
+
+| Operation | Naive approach | Stable/efficient approach | Complexity |
+| --- | --- | --- | --- |
+| $\log \sum_i e^{x_i}$ | Direct exponentiation, then log | Log-sum-exp (subtract max first) | $O(n)$ either way; stable version avoids overflow |
+| Solve $Ax=b$, $n \times n$ | Form $A^{-1}$, multiply by $b$ | LU/Cholesky decomposition + triangular solves | $O(n^3)$ (decomposition dominates) vs. same order but numerically superior and reusable across multiple $b$ |
+| Unconstrained minimization near optimum | Gradient descent | Newton's method | $O(1/\epsilon)$ iterations (GD, convex) vs. $O(\log\log(1/\epsilon))$ iterations (Newton, quadratic convergence), but $O(n^3)$ vs $O(n)$ per-iteration cost |
+
+<KeyTakeaways items={[
+  "Numerical stability and problem conditioning are different concepts: conditioning (κ) is a property of the problem itself; stability is a property of the algorithm, describing whether it introduces additional error beyond what conditioning implies.",
+  "The log-sum-exp trick (subtract the max before exponentiating) is an exact algebraic identity that eliminates overflow risk in softmax and log-likelihood computations, at no cost in accuracy.",
+  "Never explicitly invert a matrix to solve a linear system — LU/Cholesky decomposition-based solves are both faster and numerically more stable.",
+  "Newton's method converges quadratically near an optimum (using curvature/Hessian information) but costs O(n^3) per step and can be unstable far from the optimum; quasi-Newton methods (BFGS/L-BFGS) trade some convergence speed for O(n^2) or better cost and much improved robustness.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "A handful of standard tricks (log-sum-exp, avoiding explicit matrix inversion, careful subtraction order) eliminate the majority of numerical failures encountered in practice.",
+    "Condition number diagnostics let you detect ill-posed problems (e.g. near-collinear features in regression) before they silently corrupt results.",
+  ]}
+  cons={[
+    "Computing softmax/log-likelihood without the max-subtraction shift — a very common source of silent `nan` losses in early deep learning training scripts.",
+    "Using `np.linalg.inv(A) @ b` instead of a direct solver (`np.linalg.solve`, LU/Cholesky) — slower and numerically worse, especially for ill-conditioned or large $A$.",
+    "Assuming double precision (float64) 'is precise enough' regardless of the computation — catastrophic cancellation can destroy 10+ digits of precision in a single subtraction of near-equal large numbers, regardless of how many digits float64 nominally offers.",
+    "Applying Newton's method far from the optimum without safeguards (line search, trust region, or Levenberg-Marquardt damping) — an indefinite or singular Hessian there can send the iterate in an ascent direction or make the step blow up.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does subtracting max(x) before exponentiating in the softmax/log-sum-exp computation not change the mathematical answer, but does change numerical behavior?",
+    options: [
+      "It's an approximation that trades a small amount of accuracy for numerical safety",
+      "log(sum(exp(x))) = m + log(sum(exp(x-m))) is an exact algebraic identity for any m (in particular m=max(x)); shifting by the max guarantees every exponent is ≤ 0, so every term is in (0,1] and cannot overflow, while the original could overflow if any x_i were large",
+      "It changes the answer slightly but the difference is negligible in practice",
+      "It only matters for softmax, not for log-sum-exp in general",
+    ],
+    answerIndex: 1,
+    explanation: "The identity log(sum(exp(x))) = m + log(sum(exp(x-m))) holds exactly for any constant m by factoring e^m out of the sum and using log(ab)=log(a)+log(b). Choosing m = max(x) is what makes it numerically safe: it guarantees no term in the sum can overflow, and the largest term is exactly 1.",
+  },
+  {
+    question: "A matrix A has condition number κ(A) = 10^8. What does this imply, and what does it NOT imply?",
+    options: [
+      "It implies A is singular and Ax=b has no solution",
+      "It implies small relative errors in A or b (e.g. from floating-point rounding or measurement noise) can be amplified by up to ~10^8 in the solution x; it does NOT imply that any particular algorithm used to solve Ax=b is unstable — conditioning is a property of the problem, not the algorithm",
+      "It implies the LU decomposition of A will always fail",
+      "It implies Newton's method cannot be used on any function involving A",
+    ],
+    answerIndex: 1,
+    explanation: "The condition number bounds how much relative error in inputs can be amplified in the output — a property of the problem itself. A well-implemented stable algorithm (e.g. one using pivoted LU) won't introduce further error beyond what this amplification already implies, but it also can't undo the inherent sensitivity of an ill-conditioned problem.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Numerical Optimization", authors: "Jorge Nocedal, Stephen J. Wright", venue: "Springer", year: 2006 },
+  { title: "Numerical Linear Algebra", authors: "Lloyd N. Trefethen, David Bau III", venue: "SIAM", year: 1997 },
+  { title: "Deep Learning", authors: "Ian Goodfellow, Yoshua Bengio, Aaron Courville", venue: "MIT Press", year: 2016 },
+  { title: "Accuracy and Stability of Numerical Algorithms", authors: "Nicholas J. Higham", venue: "SIAM", year: 2002 },
+]} />

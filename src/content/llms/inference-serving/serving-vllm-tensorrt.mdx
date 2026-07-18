@@ -1,0 +1,165 @@
+---
+title: "Serving with vLLM & TensorRT-LLM"
+description: "How vLLM's PagedAttention treats the KV cache like OS virtual memory to eliminate fragmentation, and how TensorRT-LLM instead compiles kernels tightly fused to NVIDIA hardware — two different bets on where serving throughput comes from."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "inference", "serving", "vllm", "tensorrt-llm", "pagedattention"]
+prerequisites: ["KV cache fundamentals", "Batching and GPU memory basics", "Operating system virtual memory (helpful analogy)"]
+---
+
+<Prerequisites items={[
+  "How the KV cache works and why it dominates serving memory (see KV Cache & Attention at Inference)",
+  "Basic notion of request batching on a GPU",
+  "Operating-system virtual memory / paging (useful as an analogy, not a strict requirement)",
+]} />
+
+## Intuition
+
+Once a model is trained, serving it efficiently is a systems problem, not a modeling problem: how do you keep GPUs busy, minimize wasted memory, and serve as many concurrent users as possible at low latency? Two serving engines have become dominant, and they attack the problem from different angles.
+
+**vLLM's** core innovation, PagedAttention, targets *memory management*. Naive KV cache allocation reserves a large contiguous block per request sized for the maximum possible sequence length, which wastes enormous amounts of memory on requests that turn out to be shorter — exactly the problem operating systems solved decades ago for RAM with virtual memory and paging. vLLM applies the same idea to the KV cache.
+
+**TensorRT-LLM** targets *raw computational efficiency* on NVIDIA hardware: it compiles the model into a highly optimized, kernel-fused execution graph tailored to specific GPU generations, squeezing out overhead that a more general, flexible runtime can't.
+
+<Callout type="tip" title="The one-sentence idea">
+  vLLM asks "how do we stop wasting GPU memory and share it across requests efficiently" (a memory-management answer, PagedAttention); TensorRT-LLM asks "how do we extract maximum raw throughput from this exact GPU" (a compilation/kernel-fusion answer) — the two are solving adjacent but distinct halves of the serving problem.
+</Callout>
+
+## PagedAttention: The Mechanism, Step by Step
+
+1. **The fragmentation problem.** Standard KV cache allocation reserves one contiguous memory block per request, sized for the maximum sequence length that request *might* reach. Since most requests finish well short of that maximum, and requests of different lengths finish at different times, this leaves large chunks of allocated-but-unused memory scattered across the GPU — classic external fragmentation, and it caps how many concurrent requests fit in memory.
+2. **Borrow the OS's answer: paging.** PagedAttention divides each request's KV cache into fixed-size **blocks** (analogous to OS memory pages), each holding the K and V vectors for a fixed number of tokens. Blocks do **not** need to be contiguous in physical GPU memory — a **block table** (analogous to a page table) maps each request's logical sequence positions to wherever its physical blocks actually live.
+3. **Allocate on demand.** New blocks are allocated only as a request's sequence actually grows, rather than reserving a worst-case maximum up front. This shrinks fragmentation dramatically — reported to bring memory waste down to under roughly 4% versus the much larger waste typical of contiguous pre-allocation.
+4. **Efficient sharing.** Because the mapping from logical to physical blocks is indirect, multiple logical sequences can point to the *same* physical block when they share a prefix — e.g., multiple beams in beam search, or multiple parallel samples from the same prompt, or requests sharing a common system prompt. This gives memory sharing (and copy-on-write semantics when a shared block starts to diverge) essentially for free, at the block granularity, without duplicating memory.
+5. **Feeds continuous batching.** Because memory can be allocated and freed incrementally per block, vLLM can add newly-arrived requests into a running batch and evict/free completed requests' blocks without waiting for the whole batch to finish — this "continuous batching" (iteration-level scheduling) keeps GPU utilization high under bursty, variable-length traffic.
+
+<Mermaid chart={`
+graph TD
+  Req["Multiple requests, different lengths"] --> BT["Per-request block table (logical -> physical block mapping)"]
+  BT --> Blocks["Fixed-size KV cache blocks in GPU memory (need not be contiguous)"]
+  Blocks --> Share["Shared prefix? Multiple requests' block tables point to same physical block"]
+  Blocks --> Grow["Sequence grows -> allocate one more block on demand"]
+  Grow --> Sched["Continuous batching: add/evict requests at block granularity, no fixed batch boundary"]
+`} />
+
+## TensorRT-LLM's Approach
+
+TensorRT-LLM builds on NVIDIA's TensorRT deep-learning compiler: rather than running a general Python/PyTorch execution graph interpretively, it **compiles** the model into an optimized engine ahead of time for a specific GPU architecture, applying:
+
+- **Kernel fusion** — combining multiple operations (e.g., layer norm + matmul + activation) into single fused GPU kernels, reducing kernel-launch overhead and intermediate memory round-trips.
+- **Hardware-specific tuning** — generating execution plans tailored to the target GPU generation (e.g., Hopper, Blackwell), taking advantage of generation-specific tensor core capabilities and low-precision formats (FP8, and lower on newer hardware).
+- **In-flight (continuous) batching and its own paged KV cache** — TensorRT-LLM has adopted KV-cache-paging and continuous-batching ideas as well, so this is no longer a strict feature divide between the two engines; the differentiator is more about *how* those features are implemented and how tightly they're fused with NVIDIA-specific kernels.
+
+The cost of this specialization is an upfront, hardware- and shape-specific **compilation/engine-build step** — potentially tens of minutes — which must be redone if the target GPU, batch shape assumptions, or precision configuration changes materially. In exchange, it typically achieves the best raw throughput/latency achievable on NVIDIA hardware for a fixed, well-characterized deployment.
+
+<Callout type="note" title="Verified via web search, July 2026">
+  As of 2026, industry benchmarking commentary generally frames vLLM as offering broader hardware support (NVIDIA, AMD ROCm, Intel, TPU) and a lighter-weight, pip-installable, HuggingFace-compatible deployment path with no separate compilation step, while TensorRT-LLM is positioned as the choice for squeezing maximum throughput out of a fixed, all-NVIDIA (especially Blackwell/Hopper-class) deployment where the extra engine-build time is an acceptable one-time cost. Both engines have converged significantly on core serving features (paged KV cache, continuous batching, speculative decoding support), so the practical choice increasingly comes down to hardware flexibility versus peak per-GPU performance.
+</Callout>
+
+<ComparisonTable
+  headers={["Dimension", "vLLM", "TensorRT-LLM"]}
+  rows={[
+    ["Core innovation", "PagedAttention — OS-style paged KV cache management", "Ahead-of-time compiled, kernel-fused execution engine"],
+    ["Deployment model", "pip install, point at a HuggingFace checkpoint, serve immediately", "Requires a model-specific compilation/engine-build step before serving"],
+    ["Hardware support", "NVIDIA, AMD ROCm, Intel XPU, TPU — broad", "NVIDIA GPUs only, tuned per architecture generation"],
+    ["Best fit", "Fast iteration, flexible model swapping, heterogeneous hardware", "Fixed, stable deployment on NVIDIA hardware where peak throughput matters most"],
+    ["Memory sharing (beam search, shared prefixes)", "Native, via block table indirection", "Supported, via its own paged-cache implementation"],
+  ]}
+/>
+
+## Code Sketch
+
+```python
+# --- vLLM: minimal offline batch inference ---
+from vllm import LLM, SamplingParams
+
+llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", gpu_memory_utilization=0.9)
+sampling_params = SamplingParams(temperature=0.7, max_tokens=256)
+
+prompts = ["Explain PagedAttention in one paragraph.", "What is speculative decoding?"]
+outputs = llm.generate(prompts, sampling_params)   # PagedAttention + continuous batching under the hood
+for out in outputs:
+    print(out.outputs[0].text)
+
+# --- vLLM: OpenAI-compatible server (no separate compile step) ---
+# vllm serve meta-llama/Llama-3.1-8B-Instruct --port 8000
+
+# --- TensorRT-LLM: build then serve (conceptual CLI flow) ---
+# 1. Convert checkpoint + build a GPU-specific engine (one-time, can take tens of minutes):
+#    trtllm-build --checkpoint_dir ./llama3-8b-ckpt \
+#                  --output_dir ./llama3-8b-engine \
+#                  --gemm_plugin float16
+#
+# 2. Serve the compiled engine:
+#    trtllm-serve ./llama3-8b-engine --port 8000
+```
+
+## Complexity and Memory Analysis
+
+| Quantity | Naive contiguous KV allocation | PagedAttention (vLLM) |
+| --- | --- | --- |
+| Memory reserved per request | Worst-case max sequence length | Grows incrementally, block by block |
+| Fragmentation | Substantial — reported to often waste 60-80% in naive systems | Reported under roughly 4% |
+| Shared-prefix requests (beam search, common system prompt) | Duplicated KV storage per sequence | Shared physical blocks via block-table indirection |
+| Batch composition | Fixed at batch-start (static batching) | Continuous — requests join/leave at block/iteration granularity |
+
+| Quantity | vLLM | TensorRT-LLM |
+| --- | --- | --- |
+| Time to first request served | Minutes (no compile step) | Compile/engine-build time added upfront (can be tens of minutes) |
+| Peak throughput on a fixed NVIDIA GPU/model/shape | Strong, competitive | Typically highest, due to kernel fusion and hardware-specific tuning |
+| Flexibility to swap models/hardware | High | Lower — engine is tied to the compiled configuration |
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "PagedAttention's block-based allocation turns KV cache memory management from a request-level, worst-case-sized problem into a fine-grained, on-demand one — directly increasing achievable batch size and throughput.",
+    "Both engines now support continuous batching and paged KV caches, so most serving deployments benefit from these ideas regardless of which engine is chosen.",
+    "TensorRT-LLM's compilation step, while an upfront cost, can extract substantial additional throughput on hardware where the deployment configuration is stable and well-known ahead of time.",
+]}
+  cons={[
+    "PagedAttention introduces a layer of indirection (block tables) that adds a small amount of lookup overhead per attention operation versus fully contiguous memory — a worthwhile trade for the fragmentation savings, but not literally free.",
+    "TensorRT-LLM's compiled-engine model makes rapid iteration (swapping models, testing new configurations) slower and more operationally heavy than vLLM's load-and-go workflow.",
+    "Neither engine eliminates the fundamental KV-cache memory bottleneck (see KV Cache) — they manage it more efficiently, but extremely long contexts or very high concurrency still require GQA/quantization and enough raw GPU memory to fit.",
+  ]}
+/>
+
+- Assuming PagedAttention changes the *model's* computation — it doesn't; it only changes how KV cache memory is laid out and addressed, which is a pure serving-infrastructure optimization with no effect on output quality.
+- Choosing TensorRT-LLM by default for every deployment — its compilation step is a real operational cost, and its hardware lock-in to NVIDIA can be a poor fit for heterogeneous or rapidly-iterating environments where vLLM's flexibility matters more than peak per-GPU throughput.
+- Forgetting that both frameworks are moving targets — as of 2026 they've converged substantially on core features (paged caches, continuous batching, speculative decoding support), so decisions should be based on current, task-specific benchmarks rather than older feature comparisons.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What specific problem does PagedAttention's block-table indirection solve that a naive, contiguous per-request KV cache allocation does not?",
+    options: [
+      "It reduces the total number of floating-point operations needed for attention",
+      "It eliminates memory fragmentation by allocating KV cache in fixed-size blocks on demand (rather than reserving a worst-case contiguous region per request up front), and enables physical block sharing across logical sequences with a common prefix",
+      "It replaces the attention mechanism with a sparse approximation to save compute",
+      "It compiles the model into a hardware-specific kernel-fused execution engine",
+    ],
+    answerIndex: 1,
+    explanation: "PagedAttention is a memory-management technique, analogous to OS virtual memory: it divides the KV cache into fixed-size blocks that need not be physically contiguous, tracked via a per-request block table, allocating new blocks only as needed. This eliminates the fragmentation caused by reserving a worst-case-length contiguous region per request, and lets multiple sequences (e.g. beam search candidates) share physical blocks for a common prefix rather than duplicating that memory.",
+  },
+  {
+    question: "What is the main practical trade-off of TensorRT-LLM's ahead-of-time compiled engine approach compared to vLLM's load-and-serve model?",
+    options: [
+      "TensorRT-LLM produces lower-quality outputs in exchange for speed",
+      "TensorRT-LLM cannot use a KV cache at all, unlike vLLM",
+      "TensorRT-LLM requires a hardware- and configuration-specific engine-build/compilation step before serving (adding setup time and reducing flexibility to swap models or hardware), in exchange for typically higher peak throughput on the fixed target GPU",
+      "TensorRT-LLM only supports encoder-only models, not decoder-only LLMs",
+    ],
+    answerIndex: 2,
+    explanation: "TensorRT-LLM compiles the model into a kernel-fused, hardware-specific execution engine ahead of time, which can take a meaningful amount of time and ties the resulting engine to a particular GPU generation and configuration. This upfront rigidity is traded for typically superior raw throughput/latency versus a more general, immediately-deployable runtime like vLLM, which requires no separate compilation step but may not extract quite as much peak performance from a fixed NVIDIA GPU.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Efficient Memory Management for Large Language Model Serving with PagedAttention", authors: "Kwon, W. et al.", venue: "SOSP", year: 2023, url: "https://arxiv.org/abs/2309.06180" },
+  { title: "vLLM Documentation", authors: "vLLM Project", venue: "vllm.ai", year: 2026, url: "https://docs.vllm.ai/" },
+  { title: "TensorRT-LLM Documentation", authors: "NVIDIA", venue: "GitHub / NVIDIA Docs", year: 2026, url: "https://nvidia.github.io/TensorRT-LLM/" },
+]} />

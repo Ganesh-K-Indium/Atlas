@@ -1,0 +1,167 @@
+---
+title: "U-Net for Segmentation"
+description: "Why pixel-perfect segmentation needs an architecture that both sees the whole image and remembers exactly where every edge was — and how skip connections deliver both at once."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "computer-vision", "segmentation", "unet", "cnn"]
+prerequisites: ["Convolutional Neural Networks", "ResNet, DenseNet & EfficientNet"]
+---
+
+<Prerequisites items={["Convolutional Neural Networks", "ResNet, DenseNet & EfficientNet"]} />
+
+## Intuition
+
+Image classification only needs to answer one question per image ("what is this?"), so a CNN can safely throw away spatial precision as it goes deeper — by the final layers, all that matters is *whether* a cat-like pattern was detected anywhere, not exactly which pixels it occupied. Segmentation needs the opposite: a label for *every single pixel*. That's in direct tension with how CNNs normally work — pooling and strided convolutions downsample specifically to build large receptive fields and abstract, position-blurred features, discarding exactly the fine-grained spatial detail a pixel-level task needs.
+
+U-Net's answer: run a normal encoder that downsamples and abstracts (to know *what* is where, at a coarse level), then a decoder that upsamples back to full resolution (to produce a full-resolution output map) — but wire in direct connections from each encoder resolution to the matching decoder resolution, so the fine spatial detail lost during downsampling can flow straight across instead of having to be reconstructed from scratch by the decoder.
+
+<Callout type="tip" title="The one-sentence idea">
+  The encoder answers "what is present, roughly where" by discarding spatial detail as it deepens; the decoder needs that detail back to draw precise boundaries, and skip connections deliver it directly from the encoder layer of matching resolution rather than forcing the decoder to hallucinate it from a heavily downsampled bottleneck.
+</Callout>
+
+## Encoder-Decoder with Skip Connections
+
+The **encoder** (contracting path) is a standard CNN stack: repeated (conv → ReLU) blocks followed by downsampling (max-pool or strided conv), roughly doubling the channel count and halving spatial resolution at each stage. As in any CNN, this builds a hierarchy from local, precise, low-level features (early layers) to global, abstract, spatially coarse features (the bottleneck).
+
+The **decoder** (expanding path) mirrors this in reverse: repeated upsampling (transposed convolution or interpolation + conv) followed by convolutional blocks, roughly halving channel count and doubling spatial resolution at each stage, until the output matches the input's spatial resolution.
+
+If the decoder only had the bottleneck to work with, it would need to reconstruct exact object boundaries from a representation that has already discarded most spatial precision in favor of "what is present" abstraction — an under-determined, lossy inverse problem. U-Net's **skip connections** solve this directly: at each decoder stage, the upsampled feature map is concatenated (channel-wise) with the encoder feature map from the *same spatial resolution*, before the next convolution:
+
+$$
+D_\ell = \text{Conv}\big([\text{Upsample}(D_{\ell+1}),\ E_\ell]\big)
+$$
+
+where $E_\ell$ is the encoder's feature map at resolution level $\ell$ and $D_{\ell+1}$ is the decoder's (coarser) output from one level deeper. Because $E_\ell$ was captured *before* that resolution level's information was discarded by further downsampling, it still contains the precise edge and texture information needed to place a segmentation boundary accurately — the network doesn't need to reconstruct that detail, only to combine it with the coarse "what is this region" signal coming up from the bottleneck.
+
+This is the same underlying idea as a ResNet shortcut (give a later layer direct access to an earlier representation instead of forcing it through an information bottleneck) but concatenated rather than added, and connecting matched-resolution stages across an encoder-decoder rather than connecting a block to its own output.
+
+<Mermaid chart={`
+graph TD
+  In["Input image"] --> E1["Encoder block 1 (full res)"]
+  E1 --> E2["Encoder block 2 (1/2 res)"]
+  E2 --> E3["Encoder block 3 (1/4 res)"]
+  E3 --> B["Bottleneck (1/8 res, most abstract)"]
+  B --> D3["Decoder block 3 (upsample to 1/4 res)"]
+  E3 -. skip connection .-> D3
+  D3 --> D2["Decoder block 2 (upsample to 1/2 res)"]
+  E2 -. skip connection .-> D2
+  D2 --> D1["Decoder block 1 (upsample to full res)"]
+  E1 -. skip connection .-> D1
+  D1 --> Out["Per-pixel class probabilities (segmentation map)"]
+`} />
+
+## Loss and Output
+
+The final layer is a $1\times1$ convolution mapping the decoder's final feature map to $C$ channels (one per class), followed by a per-pixel softmax; the network is trained with per-pixel cross-entropy (often combined with a Dice loss to directly optimize the overlap between predicted and ground-truth masks, since cross-entropy alone treats every pixel independently and can be dominated by large background classes in imbalanced masks). Because every operation is applied convolutionally (no fully-connected layers), the same trained U-Net can be applied to input images of any size at inference time.
+
+## Code Sketch
+
+```python
+import torch
+import torch.nn as nn
+
+class ConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1), nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1), nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+class UNet(nn.Module):
+    def __init__(self, in_ch=3, num_classes=2, base=64):
+        super().__init__()
+        self.enc1 = ConvBlock(in_ch, base)
+        self.enc2 = ConvBlock(base, base * 2)
+        self.pool = nn.MaxPool2d(2)
+        self.bottleneck = ConvBlock(base * 2, base * 4)
+
+        self.up2 = nn.ConvTranspose2d(base * 4, base * 2, 2, stride=2)
+        self.dec2 = ConvBlock(base * 4, base * 2)   # base*4 = upsampled + skip concat
+        self.up1 = nn.ConvTranspose2d(base * 2, base, 2, stride=2)
+        self.dec1 = ConvBlock(base * 2, base)
+
+        self.out_conv = nn.Conv2d(base, num_classes, kernel_size=1)
+
+    def forward(self, x):
+        e1 = self.enc1(x)                 # full resolution features
+        e2 = self.enc2(self.pool(e1))     # 1/2 resolution features
+        b = self.bottleneck(self.pool(e2))  # 1/4 resolution, most abstract
+
+        d2 = self.up2(b)
+        d2 = self.dec2(torch.cat([d2, e2], dim=1))   # skip connection: fine detail from e2
+        d1 = self.up1(d2)
+        d1 = self.dec1(torch.cat([d1, e1], dim=1))   # skip connection: fine detail from e1
+
+        return self.out_conv(d1)   # per-pixel class logits, same spatial size as input
+```
+
+## Why This Design, Specifically
+
+<ComparisonTable
+  headers={["Design choice", "Without it", "With it (U-Net)"]}
+  rows={[
+    ["Encoder-decoder shape", "A plain CNN classifier collapses to one label per image; no way to produce a full-resolution output map", "Symmetric upsampling path restores full spatial resolution for a per-pixel prediction"],
+    ["Skip connections", "Decoder must reconstruct fine boundaries purely from the heavily downsampled bottleneck — boundaries come out blurry/imprecise", "Precise, high-resolution encoder features are concatenated in at the matching decoder stage, sharpening boundary localization"],
+    ["Fully convolutional (no dense layers)", "Fixed input size only", "Works on arbitrary input resolutions at inference time"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Segmentation needs both 'what' (semantic content, from deep abstract features) and 'where exactly' (precise spatial detail, lost during downsampling) — U-Net's two paths supply each.",
+  "Skip connections concatenate encoder features with decoder features at matching spatial resolution, giving the decoder direct access to detail it would otherwise have to reconstruct from a lossy, coarse bottleneck.",
+  "The mechanism generalizes beyond biomedical imaging (U-Net's original domain): any dense-prediction task — depth estimation, image-to-image translation, diffusion model denoising networks — reuses this same encoder-decoder-with-skips shape.",
+  "Because U-Net is fully convolutional, a single trained model handles inputs of varying spatial size without retraining or architecture changes.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Recovers sharp, precise segmentation boundaries that a plain encoder-decoder (without skips) systematically blurs.",
+    "Fully convolutional design generalizes across input resolutions and transfers well even with relatively small training sets (the original U-Net was designed for scarce biomedical imaging data).",
+    "The encoder-decoder-with-skips pattern is architecture-agnostic — the encoder can be swapped for any pretrained CNN backbone (e.g. a ResNet) without changing the overall design.",
+  ]}
+  cons={[
+    "Concatenating skip connections requires the encoder and decoder feature maps to have matching spatial dimensions at each stage — off-by-one resolution mismatches (from odd input sizes and integer-dividing pooling) are a common implementation bug, often requiring center-cropping or padding to align shapes.",
+    "Skip connections roughly double the channel count going into each decoder block (concatenation, not addition), increasing memory and parameter count in the decoder relative to a skip-free design.",
+    "Treating per-pixel cross-entropy as sufficient on its own for imbalanced masks (e.g. a small foreground region against a large background) — Dice or IoU-based losses (or a combination) are typically needed to prevent the loss from being dominated by the easy background class.",
+  ]}
+/>
+
+<Quiz questions={[
+  {
+    question: "Why does U-Net use skip connections between the encoder and decoder at matching spatial resolutions, rather than relying only on the bottleneck?",
+    options: [
+      "To reduce the total number of parameters in the network",
+      "Because downsampling in the encoder progressively discards fine spatial detail in favor of abstract, global features; skip connections pass that detail directly to the decoder instead of forcing it to be reconstructed from the heavily compressed bottleneck",
+      "To speed up training by adding more nonlinearities",
+      "Because the bottleneck alone cannot represent semantic class information",
+    ],
+    answerIndex: 1,
+    explanation: "The bottleneck retains 'what is present' semantic information but has lost precise spatial detail through repeated downsampling. Skip connections concatenate the corresponding encoder feature map — captured before that detail was discarded — directly into the decoder at the same resolution, letting the network combine coarse semantics with precise localization instead of trying to invert a lossy transformation.",
+  },
+  {
+    question: "In the U-Net decoder, how is a skip connection typically combined with the upsampled feature map, and why does that choice matter?",
+    options: [
+      "By element-wise addition, requiring identical channel counts, the same way ResNet combines its shortcut",
+      "By channel-wise concatenation, which preserves both feature sets separately for the following convolution to combine, rather than forcing them into a single summed representation",
+      "By multiplying the two feature maps element-wise",
+      "By replacing the upsampled feature map with the encoder feature map entirely",
+    ],
+    answerIndex: 1,
+    explanation: "U-Net concatenates the encoder and decoder feature maps along the channel dimension (not addition, which is how ResNet shortcuts work), so the following convolution has access to both the coarse, upsampled semantic features and the precise encoder features as separate input channels, and learns how to combine them.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "U-Net: Convolutional Networks for Biomedical Image Segmentation", authors: "Ronneberger, O., Fischer, P., Brox, T.", venue: "MICCAI", year: 2015, url: "https://arxiv.org/abs/1505.04597" },
+  { title: "Deep Residual Learning for Image Recognition", authors: "He, K., Zhang, X., Ren, S., Sun, J.", venue: "CVPR", year: 2015, url: "https://arxiv.org/abs/1512.03385" },
+  { title: "Fully Convolutional Networks for Semantic Segmentation", authors: "Long, J., Shelhamer, E., Darrell, T.", venue: "CVPR", year: 2015, url: "https://arxiv.org/abs/1411.4038" },
+]} />

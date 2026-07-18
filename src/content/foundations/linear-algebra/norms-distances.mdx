@@ -1,0 +1,190 @@
+---
+title: "Norms & Distances"
+description: "How you choose to measure 'size' and 'closeness' quietly decides what a regularizer penalizes, what a nearest-neighbor search finds, and what a loss function optimizes for."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["linear-algebra", "math", "norms", "regularization"]
+prerequisites: ["Vectors & Vector Spaces"]
+---
+
+## Intuition
+
+"How big is this vector?" and "how far apart are these two vectors?" sound like they should have one obvious answer, but they don't — different notions of size (norms) lead to genuinely different behavior in ML: L2 regularization shrinks weights smoothly, L1 regularization pushes them to exactly zero, and the choice of distance metric decides what "nearest neighbor" even means. Norms aren't a footnote; they're a design choice with real consequences.
+
+<Callout type="tip" title="One-sentence definition">
+  A norm is any function that assigns a nonnegative "length" to a vector consistently with scaling and the triangle inequality; a distance is just the norm of the difference between two vectors.
+</Callout>
+
+## Formal Definition
+
+A function $\|\cdot\|: V \to \mathbb{R}$ is a **norm** if, for all $u, v \in V$ and scalars $c$:
+
+1. **Nonnegativity:** $\|v\| \ge 0$, with $\|v\| = 0$ iff $v = 0$.
+2. **Absolute homogeneity:** $\|cv\| = |c|\,\|v\|$.
+3. **Triangle inequality:** $\|u + v\| \le \|u\| + \|v\|$.
+
+Any function satisfying these three axioms defines a valid notion of vector length, and the induced **distance** between two points is $d(u,v) = \|u - v\|$, which automatically inherits a metric's required properties (nonnegativity, symmetry, and the triangle inequality — $d(u,w) \le d(u,v) + d(v,w)$) directly from the norm axioms.
+
+### The $\ell_p$ Family
+
+For $p \ge 1$, the $\ell_p$ norm of $v \in \mathbb{R}^n$ is:
+
+$$
+\|v\|_p = \left(\sum_{i=1}^n |v_i|^p\right)^{1/p}
+$$
+
+Special and limiting cases used constantly in ML:
+
+- **$\ell_1$ (Manhattan/taxicab):** $\|v\|_1 = \sum_i |v_i|$ — sum of absolute values.
+- **$\ell_2$ (Euclidean):** $\|v\|_2 = \sqrt{\sum_i v_i^2}$ — ordinary straight-line length.
+- **$\ell_\infty$ (Chebyshev, max norm):** $\|v\|_\infty = \max_i |v_i| = \lim_{p\to\infty} \|v\|_p$.
+- **$\ell_0$ "norm"** (not a true norm — violates homogeneity, since $\|cv\|_0 = \|v\|_0$ for any $c\neq0$): counts the number of nonzero entries, used informally to describe sparsity.
+
+### Matrix Norms Used in ML
+
+- **Frobenius norm:** $\|A\|_F = \sqrt{\sum_{i,j} A_{ij}^2} = \sqrt{\text{tr}(A^\top A)}$ — treats the matrix as a flattened vector.
+- **Spectral (operator) norm:** $\|A\|_2 = \sigma_1$, the largest singular value of $A$ (see [SVD](/docs/foundations/linear-algebra/svd)) — measures the maximum possible stretching factor $A$ can apply to any unit vector: $\|A\|_2 = \max_{\|x\|=1} \|Ax\|$.
+- **Nuclear norm:** $\|A\|_* = \sum_i \sigma_i$, the sum of singular values — used as a convex surrogate for matrix rank in low-rank recovery problems.
+
+## Why the Choice of Norm Matters: L1 vs. L2 Regularization
+
+Consider minimizing a loss $L(w)$ subject to a penalty on the weight vector $w$: $\min_w L(w) + \lambda R(w)$.
+
+**Step 1 — geometric picture.** Regularized minimization can be viewed as constrained optimization: minimize $L(w)$ subject to $R(w) \le t$ for some budget $t$ (Lagrangian duality connects the penalized and constrained forms). The constraint region $\{w : R(w) \le t\}$ is a **ball** in the chosen norm.
+
+- For $\ell_2$: $\{w : \|w\|_2 \le t\}$ is a smooth sphere.
+- For $\ell_1$: $\{w : \|w\|_1 \le t\}$ is a "diamond" (cross-polytope) with sharp corners on the coordinate axes.
+
+**Step 2 — where the loss contours meet the constraint.** The unconstrained minimum of $L(w)$ sits somewhere; as $t$ shrinks, the constrained solution is the first point where the loss's level-set contours touch the norm ball's boundary. For the smooth $\ell_2$ ball, this contact point is generically an interior point of a face — a non-sparse vector with all coordinates nonzero. For the $\ell_1$ diamond, the sharp corners lie exactly on the coordinate axes, so contact very often happens *at* a corner — a point where one or more coordinates are exactly zero.
+
+**Conclusion:** $\ell_1$ regularization induces sparsity (exact zeros) because its constraint set has corners aligned with the axes; $\ell_2$ regularization shrinks all coordinates smoothly toward zero but essentially never sets any exactly to zero. This is the entire geometric reason Lasso ($\ell_1$) produces sparse solutions and Ridge ($\ell_2$) does not.
+
+<Mermaid chart={`
+graph TD
+  A["Regularized objective: min L(w) + λR(w)"] --> B{"Which norm ball?"}
+  B -->|"ℓ2 (smooth sphere)"| C["Contact point generically has all coords nonzero -> Ridge: shrinkage, no sparsity"]
+  B -->|"ℓ1 (diamond, corners on axes)"| D["Contact often at a corner -> Lasso: exact zeros, sparse solution"]
+`} />
+
+## Worked Example: Comparing Distances
+
+Let $u = (1, 2, 3)$ and $v = (4, 0, -1)$, so $u - v = (-3, 2, 4)$.
+
+$$
+\|u-v\|_1 = 3 + 2 + 4 = 9
+$$
+
+$$
+\|u-v\|_2 = \sqrt{9 + 4 + 16} = \sqrt{29} \approx 5.385
+$$
+
+$$
+\|u-v\|_\infty = \max(3,2,4) = 4
+$$
+
+Note the general inequality this satisfies: $\|w\|_\infty \le \|w\|_2 \le \|w\|_1 \le \sqrt{n}\,\|w\|_2 \le n\,\|w\|_\infty$ for $w \in \mathbb{R}^n$ — here $4 \le 5.385 \le 9$, consistent with $n=3$.
+
+**Cosine distance**, a fundamentally different notion (angle, not magnitude): $\cos\theta = \dfrac{u\cdot v}{\|u\|_2\|v\|_2} = \dfrac{4+0-3}{\sqrt{14}\cdot\sqrt{17}} = \dfrac{1}{\sqrt{238}} \approx 0.065$, so cosine distance $= 1-\cos\theta \approx 0.935$ — nearly orthogonal, even though the raw Euclidean distance ($\approx 5.385$) doesn't by itself tell you that; cosine distance ignores magnitude entirely and measures only direction, which is why it's preferred for comparing embeddings whose length can vary with document/sentence length.
+
+## Code Example
+
+```python
+import numpy as np
+
+u = np.array([1.0, 2.0, 3.0])
+v = np.array([4.0, 0.0, -1.0])
+diff = u - v
+
+l1 = np.linalg.norm(diff, ord=1)
+l2 = np.linalg.norm(diff, ord=2)
+linf = np.linalg.norm(diff, ord=np.inf)
+print(l1, l2, linf)   # 9.0 5.385... 4.0
+
+cos_sim = (u @ v) / (np.linalg.norm(u) * np.linalg.norm(v))
+cos_dist = 1 - cos_sim
+print(cos_sim, cos_dist)
+
+# Matrix norms
+A = np.array([[3.0, 0.0], [4.0, 5.0]])
+fro = np.linalg.norm(A, 'fro')
+spectral = np.linalg.norm(A, 2)          # largest singular value
+nuclear = np.linalg.norm(A, 'nuc')       # sum of singular values
+print(fro, spectral, nuclear)
+
+# L1 vs L2 regularized regression, showing sparsity difference
+from sklearn.linear_model import Lasso, Ridge
+X = np.random.randn(50, 20)
+y = X[:, 0] * 3 + np.random.randn(50) * 0.1  # only feature 0 truly matters
+
+lasso = Lasso(alpha=0.1).fit(X, y)
+ridge = Ridge(alpha=0.1).fit(X, y)
+print("Lasso nonzero coefs:", np.sum(lasso.coef_ != 0))   # typically much sparser
+print("Ridge nonzero coefs:", np.sum(ridge.coef_ != 0))   # typically all nonzero
+```
+
+## Complexity
+
+| Operation | Time complexity | Space |
+| --- | --- | --- |
+| $\ell_p$ norm of a vector in $\mathbb{R}^n$ | $O(n)$ | $O(1)$ extra |
+| Euclidean distance between two vectors | $O(n)$ | $O(1)$ extra |
+| Frobenius norm of an $m\times n$ matrix | $O(mn)$ | $O(1)$ extra |
+| Spectral / nuclear norm (requires SVD) | $O(mn\min(m,n))$ | $O(mn)$ |
+| Brute-force nearest-neighbor search ($k$ points, dimension $n$) | $O(kn)$ per query | $O(kn)$ |
+
+<KeyTakeaways items={[
+  "A norm just needs nonnegativity, absolute homogeneity, and the triangle inequality — many valid notions of 'length' exist beyond the familiar Euclidean one.",
+  "L1's diamond-shaped constraint region has corners on the coordinate axes, which is the geometric reason Lasso regression produces exactly-zero coefficients while Ridge (L2, a smooth ball) does not.",
+  "Cosine distance measures only direction, ignoring magnitude — this is why it's preferred over Euclidean distance for comparing text/image embeddings of varying scale.",
+  "The spectral norm of a matrix equals its largest singular value; it measures the maximum possible amplification factor the matrix can apply to any unit vector.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Choosing L1 regularization specifically when feature selection / sparsity is a goal, and L2 when smooth shrinkage without eliminating features is preferred.",
+    "Using cosine similarity instead of raw Euclidean/dot-product distance when comparing embeddings that can have very different magnitudes (e.g., due to differing text length).",
+  ]}
+  cons={[
+    "Calling the count of nonzero entries the 'L0 norm' without noting it isn't actually a norm — it fails absolute homogeneity (scaling a vector by any nonzero constant doesn't change its L0 'norm').",
+    "Assuming Euclidean distance is always the 'default correct' choice — in high dimensions, Euclidean distances between random points concentrate (the 'curse of dimensionality'), which is part of why cosine distance or learned metrics are often preferred for high-dimensional embeddings.",
+    "Forgetting that the spectral norm requires computing the largest singular value (an SVD), not simply the largest matrix entry or the Frobenius norm — these are all different, non-interchangeable quantities.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Geometrically, why does L1 regularization tend to produce sparse solutions (exact zeros) while L2 regularization does not?",
+    options: [
+      "L1 is simply a stronger penalty than L2, so it pushes more values to zero",
+      "The L1 constraint region is a diamond with corners aligned on the coordinate axes; as the loss contour shrinks the feasible region, it frequently first touches the diamond at one of these corners, where one or more coordinates are exactly zero — the smooth L2 ball has no such corners",
+      "L2 regularization is mathematically incapable of producing small coefficients",
+      "This is purely an implementation detail of specific solvers, not a property of the norms themselves",
+    ],
+    answerIndex: 1,
+    explanation: "The constrained-optimization geometry is the crux: L1's ball (a cross-polytope) has vertices exactly where some coordinates are zero, and loss-contour tangency at those vertices is common. L2's ball is smooth everywhere, so tangency almost always occurs at points with every coordinate nonzero.",
+  },
+  {
+    question: "Why is cosine similarity often preferred over raw Euclidean distance when comparing two sentence embeddings?",
+    options: [
+      "Cosine similarity is always computationally cheaper to evaluate",
+      "Cosine similarity normalizes out vector magnitude and measures only the angle between vectors, so two embeddings pointing in the same semantic direction are judged similar even if one has larger overall magnitude (e.g., due to sentence length)",
+      "Euclidean distance cannot be computed for high-dimensional vectors",
+      "There is no meaningful difference; the two measures always agree",
+    ],
+    answerIndex: 1,
+    explanation: "Cosine similarity = (u . v)/(||u|| ||v||) explicitly divides out both vectors' magnitudes, isolating direction. Raw Euclidean distance is sensitive to magnitude differences that often reflect incidental factors (like text length) rather than semantic dissimilarity, which is why embedding-based retrieval systems typically use cosine (or normalize embeddings before using dot product/Euclidean distance).",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Introduction to Linear Algebra", authors: "Gilbert Strang", venue: "Wellesley-Cambridge Press", year: 2023 },
+  { title: "Convex Optimization", authors: "Stephen Boyd, Lieven Vandenberghe", venue: "Cambridge University Press", year: 2004 },
+  { title: "The Elements of Statistical Learning", authors: "Trevor Hastie, Robert Tibshirani, Jerome Friedman", venue: "Springer", year: 2009 },
+]} />

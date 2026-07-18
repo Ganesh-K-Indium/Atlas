@@ -1,0 +1,240 @@
+---
+title: "Fisher Information"
+description: "How the curvature of the log-likelihood sets a hard floor on estimator variance, and why that same curvature is the natural metric for second-order and natural-gradient optimization."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["information-theory", "math", "fisher-information", "estimation-theory", "optimization", "natural-gradient"]
+prerequisites: ["Entropy & Cross-Entropy", "Maximum likelihood estimation", "Multivariable calculus (Hessian, expectation)"]
+---
+
+## Intuition
+
+Imagine two possible likelihood functions for a parameter $\theta$: one is a sharp, narrow peak around the true value; the other is a broad, flat plateau. Data generated under the sharp-peaked likelihood pins down $\theta$ precisely — small changes in $\theta$ produce large changes in how likely the observed data looks, so the data is very informative about $\theta$. Data generated under the flat likelihood barely constrains $\theta$ at all — many different values of $\theta$ explain the data almost equally well.
+
+**Fisher information** formalizes "how sharply peaked the likelihood is" as a single number (or matrix, for multiple parameters): it measures the expected curvature of the log-likelihood around the true parameter. High curvature (sharp peak) means high Fisher information means an estimator *can* be very precise. This single quantity turns out to do double duty: it sets the theoretical best-possible precision for *any* unbiased estimator (the Cramér-Rao bound), and it defines the natural geometry of parameter space that natural gradient descent exploits to take better-conditioned optimization steps than plain gradient descent.
+
+<Callout type="tip" title="The one-sentence idea">
+  Fisher information is the expected curvature (negative expected Hessian) of the log-likelihood with respect to the parameters — high curvature means the data pins the parameter down tightly, which both bounds how precise any estimator can be and tells second-order optimizers how to rescale their steps.
+</Callout>
+
+## Formal Definition
+
+For a parametric family of distributions $p(x \mid \theta)$ with a scalar parameter $\theta$, the **score function** is the gradient of the log-likelihood:
+
+$$
+s(\theta; x) = \frac{\partial}{\partial \theta} \log p(x\mid\theta)
+$$
+
+The **Fisher information** is the variance of the score, equivalently its second moment (since $\mathbb{E}[s(\theta;x)] = 0$, shown below):
+
+$$
+\mathcal{I}(\theta) = \mathbb{E}_{x\sim p(\cdot\mid\theta)}\left[\left(\frac{\partial}{\partial\theta}\log p(x\mid\theta)\right)^2\right] = \mathrm{Var}\big[s(\theta;x)\big]
+$$
+
+For a vector parameter $\theta \in \mathbb{R}^d$, this generalizes to the **Fisher information matrix**:
+
+$$
+\mathcal{I}(\theta)_{ij} = \mathbb{E}\left[\frac{\partial \log p(x\mid\theta)}{\partial\theta_i}\cdot\frac{\partial \log p(x\mid\theta)}{\partial\theta_j}\right]
+$$
+
+## Derivation
+
+### Step 1: The score has zero mean
+
+This is the key regularity fact that makes everything else work. Since $p(x\mid\theta)$ integrates to 1 for every $\theta$:
+
+$$
+\int p(x\mid\theta)\,dx = 1 \quad\implies\quad \frac{\partial}{\partial\theta}\int p(x\mid\theta)\,dx = 0
+$$
+
+Assuming we can swap the order of differentiation and integration (a standard regularity condition):
+
+$$
+\int \frac{\partial p(x\mid\theta)}{\partial\theta}\,dx = 0
+$$
+
+Using the identity $\frac{\partial p}{\partial\theta} = p \cdot \frac{\partial \log p}{\partial\theta}$ (the "log-derivative trick"):
+
+$$
+\int p(x\mid\theta)\frac{\partial\log p(x\mid\theta)}{\partial\theta}\,dx = \mathbb{E}\left[\frac{\partial\log p(x\mid\theta)}{\partial\theta}\right] = \mathbb{E}[s(\theta;x)] = 0
+$$
+
+So the score has mean zero, which is why $\mathcal{I}(\theta) = \mathbb{E}[s^2] = \mathrm{Var}[s]$ — the second moment equals the variance directly.
+
+### Step 2: Fisher information equals negative expected curvature of the log-likelihood
+
+Differentiate the zero-mean identity $\int p \cdot \frac{\partial \log p}{\partial\theta}\,dx = 0$ once more with respect to $\theta$, using the product rule:
+
+$$
+\frac{\partial}{\partial\theta}\int p\cdot\frac{\partial\log p}{\partial\theta}\,dx = \int\left[\frac{\partial p}{\partial\theta}\cdot\frac{\partial\log p}{\partial\theta} + p\cdot\frac{\partial^2\log p}{\partial\theta^2}\right]dx = 0
+$$
+
+Substitute $\frac{\partial p}{\partial\theta} = p\cdot\frac{\partial\log p}{\partial\theta}$ again in the first term:
+
+$$
+\int p\left(\frac{\partial\log p}{\partial\theta}\right)^2 dx \;+\; \int p\cdot\frac{\partial^2\log p}{\partial\theta^2}\,dx \;=\; 0
+$$
+
+The first integral is exactly $\mathcal{I}(\theta) = \mathbb{E}[s^2]$. Rearranging:
+
+$$
+\mathcal{I}(\theta) = -\mathbb{E}\left[\frac{\partial^2}{\partial\theta^2}\log p(x\mid\theta)\right] = -\mathbb{E}[H_{\log p}(\theta)]
+$$
+
+This gives the second, equally standard definition of Fisher information: **the negative expected Hessian of the log-likelihood.** This is the connection that makes Fisher information a *curvature* — a sharply curved (concave, large negative second derivative) log-likelihood around $\theta$ means a large $\mathcal{I}(\theta)$, i.e. a log-likelihood that drops off fast as you move away from the true parameter, meaning the data strongly constrains $\theta$.
+
+### Step 3: The Cramér-Rao lower bound
+
+Let $\hat\theta(x)$ be any unbiased estimator of $\theta$, meaning $\mathbb{E}[\hat\theta(x)] = \theta$ for all $\theta$. Differentiate this identity with respect to $\theta$:
+
+$$
+\frac{\partial}{\partial\theta}\int \hat\theta(x)\,p(x\mid\theta)\,dx = 1 \quad\implies\quad \int \hat\theta(x)\,p(x\mid\theta)\,s(\theta;x)\,dx = 1
+$$
+
+(using the log-derivative trick again). Since $\mathbb{E}[s(\theta;x)] = 0$ (Step 1), we can subtract $\theta \cdot \mathbb{E}[s] = 0$ from the left side without changing it:
+
+$$
+\mathbb{E}\big[(\hat\theta(x) - \theta)\,s(\theta;x)\big] = 1
+$$
+
+This is $\mathrm{Cov}(\hat\theta, s) = 1$. Now apply the Cauchy-Schwarz inequality, $\mathrm{Cov}(A,B)^2 \leq \mathrm{Var}(A)\mathrm{Var}(B)$:
+
+$$
+1 = \mathrm{Cov}(\hat\theta, s)^2 \leq \mathrm{Var}(\hat\theta)\cdot\mathrm{Var}(s) = \mathrm{Var}(\hat\theta)\cdot\mathcal{I}(\theta)
+$$
+
+Rearranging gives the **Cramér-Rao lower bound**:
+
+$$
+\mathrm{Var}(\hat\theta) \geq \frac{1}{\mathcal{I}(\theta)}
+$$
+
+No unbiased estimator can have variance below the reciprocal of the Fisher information — Fisher information isn't just an abstract curvature measure, it's a literal, achievable-in-the-limit floor on estimation precision. (Maximum likelihood estimators are asymptotically efficient — as sample size grows, their variance approaches this bound — which is one of the deepest reasons MLE is the default estimation procedure across statistics; see [Maximum Likelihood Estimation](/docs/foundations/probability-statistics/maximum-likelihood-estimation) (roadmap).)
+
+### Step 4: Fisher information as a Riemannian metric — the link to natural gradient descent
+
+Ordinary gradient descent on a log-likelihood (or any loss) treats parameter space as flat Euclidean space: a step of fixed Euclidean size $\|\Delta\theta\|$ is treated as "the same size" everywhere, regardless of how much that step actually changes the model's output distribution. But two parameter settings can be numerically close while producing very different distributions (if Fisher information is high there), or numerically far apart while producing nearly identical distributions (if Fisher information is low there).
+
+Locally, the KL divergence between $p(\cdot\mid\theta)$ and a nearby $p(\cdot\mid\theta+\Delta\theta)$ has a second-order Taylor expansion (the first-order term vanishes because $\mathrm{KL}(p_\theta\|p_\theta)=0$ is a minimum at $\Delta\theta=0$) given exactly by the Fisher information matrix:
+
+$$
+\mathrm{KL}\big(p_\theta \,\|\, p_{\theta+\Delta\theta}\big) \approx \frac{1}{2}\Delta\theta^\top \mathcal{I}(\theta)\,\Delta\theta
+$$
+
+This means $\mathcal{I}(\theta)$ acts as a local **Riemannian metric** on the space of distributions parameterized by $\theta$ — it tells you how much a small step $\Delta\theta$ actually moves the distribution, in KL terms, not just in raw Euclidean terms. **Natural gradient descent** replaces the ordinary gradient step $\theta \leftarrow \theta - \eta\nabla_\theta \mathcal{L}$ with a step that accounts for this geometry:
+
+$$
+\theta \leftarrow \theta - \eta\, \mathcal{I}(\theta)^{-1}\nabla_\theta\mathcal{L}(\theta)
+$$
+
+This is also exactly why Fisher information shows up in second-order optimization more broadly: since $\mathcal{I}(\theta) = -\mathbb{E}[\text{Hessian of }\log p]$, using $\mathcal{I}(\theta)^{-1}$ in place of the true inverse Hessian gives a **Gauss-Newton-like** update — it captures curvature information (rescaling steps to be small in flat/insensitive directions and appropriately larger in sharp/sensitive directions) without needing to compute or invert the full, possibly indefinite, Hessian directly. This is the theoretical basis for the Fisher information matrix as a practical, guaranteed-positive-semi-definite curvature approximation in optimizers like K-FAC and in the theory underlying natural policy gradients in reinforcement learning.
+
+<Mermaid chart={`
+graph TD
+  A["Log-likelihood log p(x|theta)"] --> B["Score: d/dtheta log p"]
+  B --> C["E[score] = 0 (regularity condition)"]
+  B --> D["Var(score) = Fisher Information I(theta)"]
+  A --> E["Second derivative: d^2/dtheta^2 log p"]
+  E --> F["-E[Hessian] = I(theta) (curvature identity)"]
+  D --> G["Cramer-Rao: Var(estimator) >= 1/I(theta)"]
+  F --> H["KL(p_theta || p_theta+d) ~ 1/2 d^T I(theta) d"]
+  H --> I["Natural gradient: theta -= eta * I(theta)^-1 * grad(loss)"]
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+from scipy.stats import norm
+
+rng = np.random.default_rng(0)
+
+# --- Example: Fisher information for the mean of a Normal(mu, sigma^2), sigma known ---
+sigma = 2.0
+mu_true = 5.0
+n = 2000
+samples = rng.normal(mu_true, sigma, size=n)
+
+# Analytical Fisher information (per observation) for a Normal mean:
+# log p(x|mu) = -0.5*log(2*pi*sigma^2) - (x-mu)^2/(2*sigma^2)
+# d/dmu log p = (x - mu) / sigma^2
+# d^2/dmu^2 log p = -1/sigma^2  =>  I(mu) = 1/sigma^2 (per sample), exactly, no randomness needed here
+I_analytical_per_sample = 1.0 / sigma**2
+
+# Empirical check: I(mu) = Var(score) = E[score^2], evaluated at the true mu
+score = (samples - mu_true) / sigma**2
+I_empirical_per_sample = np.mean(score**2)
+
+print("Analytical I(mu) per sample:", I_analytical_per_sample)
+print("Empirical  I(mu) per sample:", I_empirical_per_sample)
+
+# Total Fisher information for n i.i.d. samples scales linearly with n
+I_total = n * I_analytical_per_sample
+cramer_rao_bound = 1.0 / I_total
+print("Cramer-Rao lower bound on Var(mu_hat):", cramer_rao_bound)
+
+# The sample mean IS the MLE for mu here, and its true variance is sigma^2/n --
+# which exactly equals the Cramer-Rao bound: the sample mean is fully efficient.
+print("Actual Var(sample mean) = sigma^2/n =", sigma**2 / n)
+
+# --- Numerically estimate Fisher information via finite-difference Hessian of log-likelihood ---
+def loglik(mu, x):
+    return np.sum(norm.logpdf(x, loc=mu, scale=sigma))
+
+h = 1e-4
+mu0 = mu_true
+d2 = (loglik(mu0 + h, samples) - 2*loglik(mu0, samples) + loglik(mu0 - h, samples)) / h**2
+I_from_hessian = -d2 / n   # negative expected Hessian, per-sample
+print("Fisher info from finite-difference Hessian (per sample):", I_from_hessian)
+```
+
+<KeyTakeaways items={[
+  "Fisher information I(theta) = E[(d/dtheta log p)^2] = Var(score), and equivalently I(theta) = -E[d^2/dtheta^2 log p] — the expected curvature of the log-likelihood. Both derivations rely on the score having zero expectation, itself a consequence of p(x|theta) integrating to 1 for every theta.",
+  "The Cramer-Rao lower bound, Var(theta_hat) >= 1/I(theta), follows from Cauchy-Schwarz applied to Cov(theta_hat, score) = 1 — it is a hard floor on the variance of any unbiased estimator, and MLE achieves it asymptotically.",
+  "Fisher information locally approximates KL divergence between nearby parameter settings: KL(p_theta || p_theta+d) ~ (1/2) d^T I(theta) d, making it the natural Riemannian metric on parameter space.",
+  "Natural gradient descent preconditions the gradient by I(theta)^-1, rescaling steps according to how much they actually change the model's distribution (not just raw Euclidean parameter distance) — a practical, guaranteed positive-semi-definite stand-in for full second-order (Hessian-based) optimization.",
+]} />
+
+## Common Mistakes
+
+- **Confusing Fisher information with "information" in the Shannon sense.** Shannon entropy/information (see [Entropy & Cross-Entropy](/docs/foundations/information-theory/entropy-cross-entropy)) quantifies uncertainty in a distribution's outcomes; Fisher information quantifies how much a distribution's *shape* changes as its *parameters* change. They are related fields but answer fundamentally different questions and are not interchangeable.
+- **Forgetting the regularity conditions.** The derivations above (score has zero mean, Fisher information equals negative expected Hessian) require being able to differentiate under the integral sign and require the support of $p(x\mid\theta)$ to not depend on $\theta$. Distributions with parameter-dependent support (e.g., $\mathrm{Uniform}(0,\theta)$) violate this, and the standard Fisher information machinery and Cramér-Rao bound do not directly apply.
+- **Assuming the Cramér-Rao bound is always achievable.** It's a lower bound; not every unbiased estimator attains it for finite sample sizes. MLE is only asymptotically efficient (achieves the bound as $n\to\infty$), not necessarily for small samples.
+- **Treating natural gradient descent as "just Newton's method."** Newton's method uses the actual Hessian of the loss (which can be indefinite, causing divergence at saddle points); natural gradient uses the Fisher information matrix, which is always positive semi-definite by construction (it's a covariance/second-moment matrix) — this is precisely why it's used as a more stable curvature approximation in practice.
+- **Ignoring that Fisher information for i.i.d. samples is additive.** For $n$ i.i.d. observations, the total Fisher information is $n$ times the per-sample Fisher information (as in the code example) — a common error is using the per-sample value directly in the Cramér-Rao bound for a dataset of size $n$.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Starting from the fact that E[score] = 0 for any valid parametric family (since p(x|theta) integrates to 1 for every theta), how do you derive that Fisher information equals the negative expected second derivative of the log-likelihood?",
+    options: [
+      "By definition — the negative expected Hessian formula is simply an alternative notation with no derivation required",
+      "By differentiating the zero-mean score identity once more with respect to theta, applying the product rule and the log-derivative trick (dp/dtheta = p * d(log p)/dtheta), which shows that E[(d log p/dtheta)^2] + E[d^2 log p/dtheta^2] = 0, i.e., they are negatives of each other",
+      "By applying Jensen's inequality to the log-likelihood function",
+      "By assuming the log-likelihood is exactly quadratic in theta",
+    ],
+    answerIndex: 1,
+    explanation: "Differentiating int p * (d log p/d theta) dx = 0 with respect to theta and substituting dp/dtheta = p*(d log p/d theta) in the resulting product-rule expansion yields E[(score)^2] + E[second derivative of log p] = 0, i.e. Var(score) = -E[Hessian]. This is a direct algebraic consequence of the normalization constraint, not an independent assumption.",
+  },
+  {
+    question: "Why does natural gradient descent use the Fisher information matrix as a preconditioner rather than the true Hessian of the loss, as in Newton's method?",
+    options: [
+      "The Fisher information matrix is always positive semi-definite (it's built from an expected outer product / variance of the score), unlike the true Hessian which can be indefinite near saddle points and cause Newton's method to diverge or step in the wrong direction; Fisher information also directly captures the local KL-divergence geometry of the parameter space rather than just loss curvature",
+      "The Fisher information matrix is always cheaper to compute than the Hessian in every case",
+      "Newton's method and natural gradient descent are mathematically identical, so it doesn't matter which is used",
+      "The Fisher information matrix ignores second-order information entirely, making it a first-order method",
+    ],
+    answerIndex: 0,
+    explanation: "The Fisher information matrix I(theta) = E[score * score^T] is a second-moment matrix, hence always positive semi-definite by construction, whereas the raw Hessian of a non-convex loss can have negative eigenvalues. Natural gradient descent additionally has a distinct theoretical justification: I(theta) is exactly the local quadratic approximation to KL divergence between nearby distributions, so preconditioning by I(theta)^-1 rescales updates according to how much they actually change the model's output distribution, not merely raw parameter-space distance.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Elements of Information Theory (2nd ed.)", authors: "Cover, T. M. & Thomas, J. A.", venue: "Wiley", year: 2006, url: "https://www.wiley.com/en-us/Elements+of+Information+Theory%2C+2nd+Edition-p-9780471241959" },
+  { title: "Statistical Inference (2nd ed.)", authors: "Casella, G. & Berger, R. L.", venue: "Duxbury Press (Ch. 7: Point Estimation, incl. Cramér-Rao bound)", year: 2002, url: "https://www.cengage.com/c/statistical-inference-2e-casella" },
+  { title: "New Insights and Perspectives on the Natural Gradient Method", authors: "Martens, J.", venue: "Journal of Machine Learning Research (JMLR)", year: 2020, url: "https://arxiv.org/abs/1412.1193" },
+]} />

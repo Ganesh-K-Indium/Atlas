@@ -1,0 +1,184 @@
+---
+title: "K-Nearest Neighbors"
+description: "The classifier that does no training at all — it defers every decision to inference time, letting a single hyperparameter k trace out the entire bias-variance spectrum."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["machine-learning", "supervised-learning", "classification", "regression", "instance-based-learning"]
+prerequisites: ["Distance metrics (Euclidean, Manhattan)", "Bias-variance tradeoff", "Basic probability"]
+---
+
+<Prerequisites items={["Distance metrics (Euclidean, Manhattan)", "Bias-variance tradeoff", "Basic probability"]} />
+
+## Intuition
+
+K-Nearest Neighbors (KNN) makes no assumption about the functional form of the relationship between features and target at all. To classify a new point, it simply looks at the $k$ closest points in the training set and takes a majority vote (classification) or an average (regression). There is no explicit training phase — the entire dataset *is* the model, and all the computation happens at prediction time.
+
+<Callout type="tip" title="The core idea">
+  KNN is a non-parametric, "lazy" learner: it memorizes the training data and defers all decision-making to inference, where it asks "which labeled points look most like this new point?" The single hyperparameter $k$ directly controls the bias-variance tradeoff — small $k$ gives a highly flexible, low-bias/high-variance decision boundary; large $k$ gives a smoother, high-bias/low-variance one.
+</Callout>
+
+## Formal Definition
+
+Given a training set $\{(x_i, y_i)\}_{i=1}^n$ and a distance metric $d(\cdot, \cdot)$ (typically Euclidean), for a new query point $x$:
+
+1. Compute $d(x, x_i)$ for every training point $x_i$.
+2. Let $N_k(x)$ be the set of the $k$ training points with smallest distance to $x$.
+3. **Classification:** predict the majority class among $\{y_i : i \in N_k(x)\}$ (optionally weighted by inverse distance).
+4. **Regression:** predict $\hat{y} = \frac{1}{k}\sum_{i \in N_k(x)} y_i$.
+
+## Derivation: the bias-variance tradeoff as a function of k
+
+Consider KNN regression at a point $x$, where the true generating process is $y = f(x) + \epsilon$ with $\mathbb{E}[\epsilon]=0$, $\text{Var}(\epsilon)=\sigma^2$. The KNN prediction is the average of the $k$ nearest neighbors' labels:
+
+$$
+\hat{f}(x) = \frac{1}{k}\sum_{i \in N_k(x)} y_i = \frac{1}{k}\sum_{i \in N_k(x)} \big(f(x_i) + \epsilon_i\big)
+$$
+
+**Expected prediction (bias):**
+
+$$
+\mathbb{E}[\hat{f}(x)] = \frac{1}{k}\sum_{i \in N_k(x)} f(x_i)
+$$
+
+Bias is $f(x) - \mathbb{E}[\hat{f}(x)]$. When $k$ is small, the neighbors are all very close to $x$, so $f(x_i) \approx f(x)$ and bias is small — the estimate can track sharp local variation in $f$. When $k$ is large, the neighborhood expands to include points where $f(x_i)$ may differ substantially from $f(x)$ (especially if $f$ is curved or the neighborhood spans a decision boundary), so bias grows.
+
+**Variance:** assuming the noise terms $\epsilon_i$ are i.i.d. with variance $\sigma^2$ and independent across the $k$ neighbors,
+
+$$
+\text{Var}(\hat{f}(x)) = \text{Var}\left(\frac{1}{k}\sum_{i \in N_k(x)} \epsilon_i\right) = \frac{1}{k^2}\sum_{i \in N_k(x)} \text{Var}(\epsilon_i) = \frac{\sigma^2}{k}
+$$
+
+This is the same "average of $k$ independent noisy measurements" identity that underlies polling and bagging: averaging over more points shrinks variance proportionally to $1/k$. So variance monotonically **decreases** as $k$ grows, while bias (typically) **increases** as $k$ grows and the neighborhood is forced to include less locally-representative points. The expected test error decomposes as:
+
+$$
+\mathbb{E}\big[(y - \hat{f}(x))^2\big] = \underbrace{\big(f(x) - \mathbb{E}[\hat{f}(x)]\big)^2}_{\text{bias}^2 \text{ (grows with } k)} + \underbrace{\frac{\sigma^2}{k}}_{\text{variance (shrinks with } k)} + \underbrace{\sigma^2}_{\text{irreducible noise}}
+$$
+
+The optimal $k$ minimizes this sum — neither the $k=1$ extreme (zero bias from training data, but maximal variance, and in classification a training error of exactly zero since every point is its own nearest neighbor) nor a very large $k$ (heavily smoothed, high bias, potentially converging to just predicting the global mean/majority class) is generally best. This is why $k$ is tuned via cross-validation rather than fixed.
+
+### The curse of dimensionality and distance metrics
+
+KNN's entire mechanism depends on "closeness" being meaningful, but distance concentrates as dimensionality grows. Consider $n$ points drawn uniformly in a $d$-dimensional unit hypercube. The expected fraction of the volume you must enclose to capture a fraction $p$ of the points, along a single edge, scales as $p^{1/d}$. For $p = 0.10$ (i.e., "the nearest 10% of points") and $d = 10$: $0.10^{1/10} \approx 0.79$ — you must span 79% of the range along *each* axis just to capture 10% of the data. As $d$ grows, "nearest neighbors" are no longer local at all; they are almost as far away as a randomly chosen point.
+
+More precisely, it can be shown that as $d \to \infty$ (under mild conditions on the data distribution), the ratio
+
+$$
+\frac{\max_i d(x, x_i) - \min_i d(x, x_i)}{\min_i d(x, x_i)} \to 0
+$$
+
+meaning the distance to the nearest and farthest neighbor become nearly indistinguishable — the very notion of "nearest" loses discriminative power. This is compounded by the fact that Euclidean distance in high dimensions is dominated by noise accumulated across many irrelevant features, since each additional (even weakly informative) dimension adds to the sum of squared differences. Practical mitigations: dimensionality reduction (PCA) before computing distances, feature selection to remove irrelevant dimensions, and using metrics like cosine distance for high-dimensional sparse data (e.g., text embeddings) where magnitude is less meaningful than direction.
+
+<Mermaid chart={`graph TD
+  A["Query point x"] --> B["Compute distance to all n training points"]
+  B --> C["Sort and take k closest neighbors"]
+  C --> D{"Classification or regression?"}
+  D -->|Classification| E["Majority vote among k neighbors' labels"]
+  D -->|Regression| F["Average k neighbors' target values"]
+  E --> G["Predicted class"]
+  F --> H["Predicted value"]
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+
+X = np.random.randn(300, 5)
+y = (X[:, 0] + X[:, 1] > 0).astype(int)
+
+# Feature scaling is mandatory: KNN's distances are meaningless if
+# features are on wildly different scales.
+pipe = make_pipeline(StandardScaler(), KNeighborsClassifier())
+grid = GridSearchCV(pipe, {"kneighborsclassifier__n_neighbors": [1, 3, 5, 10, 20, 50]}, cv=5)
+grid.fit(X, y)
+print(grid.best_params_)
+
+# --- From-scratch KNN classifier, illustrating the core mechanism ---
+def knn_predict(X_train, y_train, x_query, k=5):
+    dists = np.linalg.norm(X_train - x_query, axis=1)
+    nearest_idx = np.argsort(dists)[:k]
+    nearest_labels = y_train[nearest_idx]
+    values, counts = np.unique(nearest_labels, return_counts=True)
+    return values[np.argmax(counts)]
+
+preds = [knn_predict(X, y, x, k=5) for x in X[:10]]
+```
+
+## Complexity
+
+| Operation | Time | Space | Notes |
+| --- | --- | --- | --- |
+| "Training" | $O(1)$ | $O(nd)$ | Just stores the training data — no actual model fitting |
+| Brute-force inference (per query) | $O(nd)$ | $O(n)$ | Compute distance to every training point |
+| Inference with a k-d tree (low dimensions) | $O(d \log n)$ average | $O(nd)$ | Degrades toward brute force as $d$ grows past roughly 20 dimensions |
+| Inference with approximate nearest neighbor (e.g., HNSW) | $O(\log n)$ approx. | $O(nd)$ | Standard for high-dimensional embedding search at scale |
+
+<ProsCons
+  pros={[
+    "No training phase, no assumptions about the decision boundary's shape — can model arbitrarily complex, non-linear boundaries given enough data.",
+    "Naturally extends to multi-class classification and regression with the same mechanism.",
+    "Simple to understand and reason about; a good sanity-check baseline.",
+  ]}
+  cons={[
+    "Inference is expensive at scale (all computation deferred to prediction time) unless paired with an indexing structure.",
+    "Performance degrades sharply in high dimensions due to the curse of dimensionality — distances stop being discriminative.",
+    "Extremely sensitive to feature scaling and irrelevant/noisy features, since every feature contributes equally to the distance by default.",
+    "Struggles with imbalanced classes — the majority class can dominate the neighborhood vote regardless of true local density.",
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "KNN is a non-parametric, lazy learner: all computation is deferred to inference, and the 'model' is just the stored training data.",
+  "Variance of the KNN estimate scales as sigma^2 / k while bias tends to grow with k, giving a direct, tunable bias-variance knob via a single hyperparameter.",
+  "In high dimensions, distances concentrate — the gap between nearest and farthest neighbor shrinks toward zero, undermining the entire premise of 'nearest neighbor' search.",
+  "Feature scaling and dimensionality reduction are not optional refinements for KNN — they are close to prerequisites for it to work at all.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Frequent errors">
+  - Not scaling features before computing distances, letting a large-magnitude feature dominate the distance calculation regardless of its actual relevance.
+  - Choosing $k$ by intuition rather than cross-validation, or using an even $k$ for binary classification (risking tie votes).
+  - Applying brute-force KNN to high-dimensional embeddings at production scale without an approximate nearest-neighbor index, causing inference latency to blow up.
+  - Ignoring the curse of dimensionality — throwing dozens of weakly relevant features into the distance computation and wondering why neighbors no longer look similar.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "As k increases in KNN, what happens to bias and variance?",
+    options: [
+      "Both increase",
+      "Bias tends to increase (the neighborhood includes less locally-representative points) while variance decreases proportionally to 1/k (averaging over more independent noisy neighbors)",
+      "Both decrease",
+      "Neither changes; k only affects training time",
+    ],
+    answerIndex: 1,
+    explanation: "Variance of an average of k roughly-independent noisy labels is sigma^2/k, which shrinks as k grows. Bias grows because a larger neighborhood is more likely to include points whose true function value differs from f(x), especially near decision boundaries or regions of curvature.",
+  },
+  {
+    question: "Why does the curse of dimensionality specifically undermine KNN's core assumption?",
+    options: [
+      "It doesn't — KNN is unaffected by the number of features",
+      "As dimensionality grows, distances between points concentrate, so the difference between the nearest and farthest neighbor shrinks toward zero, meaning 'nearest neighbors' stop being meaningfully closer than random points",
+      "High dimensions only slow down training, not the distance calculation's meaning",
+      "It only affects regression, not classification",
+    ],
+    answerIndex: 1,
+    explanation: "In high-dimensional spaces, the ratio between the maximum and minimum distance from a query point to the dataset tends toward 1, meaning all points become nearly equidistant. This directly breaks KNN's premise that geometric closeness implies label similarity.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "The Elements of Statistical Learning", authors: "Hastie, T., Tibshirani, R., & Friedman, J.", venue: "Springer", year: 2009 },
+  { title: "Nearest neighbor pattern classification", authors: "Cover, T., & Hart, P.", venue: "IEEE Transactions on Information Theory", year: 1967 },
+  { title: "Pattern Recognition and Machine Learning", authors: "Bishop, C. M.", venue: "Springer", year: 2006 },
+]} />

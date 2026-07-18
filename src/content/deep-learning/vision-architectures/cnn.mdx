@@ -1,0 +1,170 @@
+---
+title: "Convolutional Neural Networks"
+description: "How weight-shared local filters let a network see images with orders of magnitude fewer parameters than a fully-connected layer, and why that constraint is the whole point."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "computer-vision", "cnn", "convolution"]
+prerequisites: ["Linear algebra basics", "Backpropagation", "Basic probability"]
+---
+
+## Intuition
+
+A fully-connected layer treats an image as a flat bag of pixels: every output unit looks at every input pixel through its own independent weight. That throws away the one fact we know for certain about images — nearby pixels are related, and a pattern (an edge, a texture, an eye) means the same thing regardless of where in the image it appears.
+
+A convolutional layer bakes that fact in as an architectural constraint: instead of learning a separate weight for every (input pixel, output unit) pair, it learns a small filter — say $3\times3$ or $5\times5$ — and slides that *same* filter across every spatial location. The filter's job ("detect a vertical edge," "detect a patch of orange fur") doesn't change based on where it's applied.
+
+<Callout type="tip" title="The one-sentence idea">
+  Convolution replaces "learn a unique weight for every input-output pair" with "learn one small filter, and reuse it at every position" — trading away the ability to treat different image locations differently in exchange for a massive reduction in parameters and a built-in assumption (translation equivariance) that turns out to be exactly correct for images.
+</Callout>
+
+## The Convolution Operation
+
+For a single-channel input image $I$ and a filter (kernel) $K$ of size $F \times F$, the output at position $(i, j)$ is:
+
+$$
+S(i, j) = (I * K)(i, j) = \sum_{m=0}^{F-1} \sum_{n=0}^{F-1} I(i + m,\ j + n) \cdot K(m, n)
+$$
+
+Mechanically: place the filter so its top-left corner sits at $(i, j)$ in the input, multiply it element-wise with the patch of the input it overlaps, sum the products into a single scalar, and write that scalar to output position $(i, j)$. Slide the filter by a fixed **stride** $S$ and repeat for every valid position. (Strictly, this is cross-correlation rather than true mathematical convolution, which flips the kernel — but every deep learning framework calls this "convolution," and since the kernel is learned, the flip makes no practical difference.)
+
+With multiple input channels (e.g. R, G, B), the kernel has matching depth and the sums above also run over the channel dimension; a single filter still produces one output channel. A convolutional layer learns many such filters in parallel, each producing its own output channel, so the layer's output is a stack of feature maps — one per filter, each responding strongly wherever its pattern appears in the input.
+
+### Output Size
+
+Given an input of spatial width $W$, filter size $F$, zero-padding $P$ (added symmetrically on each side), and stride $S$, the output width is:
+
+$$
+W_{\text{out}} = \frac{W - F + 2P}{S} + 1
+$$
+
+Derivation: padding extends the effective input to $W + 2P$. The filter's left edge can occupy any position from $0$ up to $(W + 2P) - F$ (the last position where the whole filter still fits), a span of $(W + 2P - F) + 1$ possible positions if the stride were 1. Taking every $S$-th one of those positions gives $\lfloor (W + 2P - F)/S \rfloor + 1$ valid placements — hence the formula (assuming it divides evenly, which architectures are designed to ensure). The same formula applies independently to height. `same` padding chooses $P$ so that $W_{\text{out}} = W$ when $S=1$; `valid` padding means $P = 0$, so the output necessarily shrinks.
+
+## Parameter Sharing and Local Connectivity — Why This Reduces Parameters
+
+Two constraints, applied together, are what make CNNs cheap:
+
+- **Local connectivity**: each output unit depends only on a small $F \times F$ patch of the input, not the entire image.
+- **Parameter sharing**: the *same* filter weights are used at every spatial location, rather than each location getting its own independent filter.
+
+**Concrete comparison.** Take a $224 \times 224 \times 3$ RGB image feeding a layer that produces $64$ output feature maps of the same spatial size.
+
+- **Fully-connected layer**, mapping every input pixel to every output unit: input has $224 \times 224 \times 3 = 150{,}528$ values; output has $224 \times 224 \times 64 = 3{,}211{,}264$ units. Naive full connectivity would need $150{,}528 \times 3{,}211{,}264 \approx 4.83 \times 10^{11}$ weights — roughly half a trillion parameters, for one layer.
+- **Convolutional layer**, $3\times3$ filters, 3 input channels, 64 output channels: parameter count is $F \times F \times C_{\text{in}} \times C_{\text{out}} = 3 \times 3 \times 3 \times 64 = 1{,}728$ weights (plus 64 biases), regardless of the image's spatial size.
+
+That's an eight-order-of-magnitude reduction, and it comes from two independent savings that both apply: local connectivity removes the $224\times224$ spatial extent from the weight count (a unit only connects to $3\times3$ nearby pixels instead of all $224\times224$), and parameter sharing removes the *output* spatial extent from the weight count (the same $3\times3\times3$ filter is reused at all $224\times224$ output positions instead of each position getting its own filter). Because the parameter count no longer scales with image size at all, a convolutional layer generalizes to any input resolution and needs vastly less data per parameter to train — the model only has to learn "what an edge looks like" once, not "what an edge looks like at pixel (17, 42)" and separately at every other pixel.
+
+## Pooling
+
+A pooling layer (typically max-pooling: take the maximum value in each small window, e.g. $2\times2$, stride 2) downsamples feature maps spatially. It serves three roles:
+
+1. **Reduces spatial resolution** progressively, so deeper layers operate on coarser, more abstract representations and computation stays tractable.
+2. **Builds in a degree of local translation invariance**: if the pattern that activated a filter shifts by one pixel, max-pooling over a $2\times2$ window will often still report the same maximum, since it only cares whether the feature is present somewhere in the window, not exactly where.
+3. **Enlarges the receptive field** of subsequent layers cheaply — after pooling, a $3\times3$ filter in the next layer effectively "sees" a $6\times6$ region of the original resolution.
+
+Modern architectures increasingly replace pooling with strided convolutions (learned downsampling) but the functional role — trading spatial resolution for channel depth and invariance — is the same.
+
+## A Full Convolutional Block
+
+<Mermaid chart={`
+graph TD
+  Input["Input image / feature map (H x W x C_in)"] --> Conv["Convolution (F x F filters, stride S, padding P) -> C_out feature maps"]
+  Conv --> BN["BatchNorm (optional)"]
+  BN --> Act["Nonlinearity (ReLU)"]
+  Act --> Pool["Pooling (e.g. 2x2 max-pool, stride 2)"]
+  Pool --> Next["Next block / deeper feature maps, smaller spatial size, more channels"]
+`} />
+
+Stacking many such blocks builds a hierarchy: early layers learn generic low-level features (edges, colors, gradients), middle layers combine these into textures and parts, and late layers combine parts into whole-object representations — each layer's receptive field is larger than the last, until the final layers "see" the entire image.
+
+## Code Sketch
+
+```python
+import torch.nn as nn
+
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = nn.ReLU(inplace=True)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+    def forward(self, x):
+        x = self.conv(x)     # local, weight-shared filters
+        x = self.bn(x)
+        x = self.act(x)
+        x = self.pool(x)     # spatial downsample + local invariance
+        return x
+
+class SimpleCNN(nn.Module):
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.features = nn.Sequential(
+            ConvBlock(3, 32),
+            ConvBlock(32, 64),
+            ConvBlock(64, 128),
+        )
+        self.classifier = nn.Linear(128, num_classes)  # after global pooling
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.mean(dim=[2, 3])       # global average pool -> (batch, 128)
+        return self.classifier(x)
+```
+
+<KeyTakeaways items={[
+  "Convolution computes a weighted sum over a small local patch, sliding one shared filter across all spatial positions — output size follows (W - F + 2P)/S + 1.",
+  "Local connectivity removes the input's spatial extent from the parameter count; parameter sharing removes the output's spatial extent from it — together they turn a would-be half-trillion-parameter layer into a few thousand parameters.",
+  "Because filters don't depend on position, CNNs are translation-equivariant by construction: shift the input, and the feature map shifts correspondingly, rather than requiring the network to relearn the pattern at every location.",
+  "Pooling trades spatial resolution for a larger receptive field and a degree of local translation invariance, at the cost of losing fine-grained spatial precision (a key motivation for skip connections in segmentation architectures like U-Net).",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Drastically fewer parameters than a fully-connected network for the same input size, which both reduces memory and makes the model far less prone to overfitting on limited data.",
+    "Translation equivariance is a genuinely correct assumption for natural images, so CNNs generalize well without needing to see every pattern at every location during training.",
+    "The hierarchical stack of receptive fields naturally builds increasingly abstract, increasingly global representations layer by layer.",
+  ]}
+  cons={[
+    "Forgetting that padding/stride choices change output size silently — mismatched shapes between conv and pooling layers are one of the most common bugs when hand-building architectures.",
+    "Assuming a single CNN layer has a large receptive field — a stack of small filters is needed; a single 3x3 filter only ever sees a 3x3 patch of its input.",
+    "The translation-equivariance assumption breaks down for tasks where absolute position matters (e.g. some medical imaging tasks) — plain CNNs need positional information injected explicitly for those cases.",
+    "Max-pooling discards exact spatial location, which is precisely why dense prediction tasks like segmentation need skip connections to recover it.",
+  ]}
+/>
+
+<Quiz questions={[
+  {
+    question: "A 32x32x3 image is passed through a convolutional layer with 16 filters of size 5x5, stride 1, no padding. What is the output spatial size, and how many learnable weights does the layer have (ignoring biases)?",
+    options: [
+      "Output 32x32, weights = 5*5*3*16 = 1200",
+      "Output 28x28, weights = 5*5*3*16 = 1200",
+      "Output 28x28, weights = 32*32*3*16",
+      "Output 27x27, weights = 5*5*16 = 400",
+    ],
+    answerIndex: 1,
+    explanation: "Output size = (W - F + 2P)/S + 1 = (32 - 5 + 0)/1 + 1 = 28, so 28x28. Each of the 16 filters has shape 5x5x3 (matching the 3 input channels), giving 5*5*3*16 = 1200 weights total — independent of the 32x32 spatial size.",
+  },
+  {
+    question: "Which statement best explains why parameter sharing reduces the parameter count of a convolutional layer compared to a fully-connected layer?",
+    options: [
+      "Parameter sharing removes the nonlinearity, which was the main source of parameters",
+      "The same filter weights are reused at every output spatial position instead of each position learning its own independent filter, so the weight count no longer scales with the output's spatial size",
+      "Parameter sharing means the layer has no learnable weights at all",
+      "It reduces the number of input channels, which reduces the weight count",
+    ],
+    answerIndex: 1,
+    explanation: "Without sharing, every output position would need its own F x F x C_in filter, so the weight count would scale with the number of output positions (i.e., the output's spatial size). Sharing ties all those positions to one filter, making the parameter count depend only on filter size and channel counts, not on image resolution.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Gradient-Based Learning Applied to Document Recognition (LeNet-5)", authors: "LeCun, Y. et al.", venue: "Proceedings of the IEEE", year: 1998, url: "https://ieeexplore.ieee.org/document/726791" },
+  { title: "ImageNet Classification with Deep Convolutional Neural Networks (AlexNet)", authors: "Krizhevsky, A., Sutskever, I., Hinton, G.", venue: "NeurIPS", year: 2012, url: "https://papers.nips.cc/paper/4824-imagenet-classification-with-deep-convolutional-neural-networks" },
+  { title: "Very Deep Convolutional Networks for Large-Scale Image Recognition (VGG)", authors: "Simonyan, K., Zisserman, A.", venue: "arXiv", year: 2014, url: "https://arxiv.org/abs/1409.1556" },
+]} />

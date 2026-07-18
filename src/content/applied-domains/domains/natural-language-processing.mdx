@@ -1,0 +1,141 @@
+---
+title: "Natural Language Processing"
+description: "How text gets turned into numbers a model can reason over, and how the same Transformer backbone splits into encoder, decoder, and encoder-decoder families to solve different language tasks."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["applied-ai", "nlp", "transformers", "language-models"]
+prerequisites: ["The Transformer Architecture", "Probability foundations"]
+---
+
+## Intuition
+
+Language is discrete, symbolic, and highly context-dependent — the same word means different things in different sentences, and meaning depends on long-range dependencies a fixed context window has to capture ("it" three sentences later referring back to a noun at the start of a paragraph). Natural Language Processing is the field concerned with building the numerical pipeline that turns raw text into representations a model can compute over, and the architectures that exploit those representations to do something useful: classify, translate, summarize, answer, or generate.
+
+Almost the entire modern history of NLP can be told as progressively better ways of capturing *context* — bag-of-words models that ignored order and context entirely, then recurrent models that processed text sequentially and carried a hidden state forward, then the Transformer, which discards sequential processing altogether and instead lets every token attend directly to every other token in the sequence, making long-range dependencies a single computational hop rather than a chain of many.
+
+<Callout type="tip" title="The one-sentence idea">
+  NLP is the problem of representing discrete, ambiguous, context-dependent symbols (words, subwords) as vectors that a model can compute over — and the entire architectural history of the field is a series of better answers to "how much context should each representation account for, and how cheaply?"
+</Callout>
+
+## Core Problem Formulations
+
+- **Tokenization:** splitting raw text into discrete units (tokens) a model can embed, since neural networks operate on numeric vectors, not raw character strings.
+- **Language modeling:** predicting the probability of the next token given previous context, $p(x_t \mid x_{<t})$ — the pretraining objective underlying essentially all modern generative language models.
+- **Sequence classification:** mapping a whole sequence (sentence, document) to a label — sentiment, topic, intent.
+- **Token-level tasks:** assigning a label to every token — named entity recognition, part-of-speech tagging.
+- **Sequence-to-sequence tasks:** mapping one variable-length sequence to another — machine translation, summarization, question answering with free-form answers.
+
+## Key Techniques and How They Connect
+
+**Tokenization** is the first and most consequential preprocessing step: text must be split into a finite vocabulary of subword units before it can be embedded. Byte-Pair Encoding (BPE) and WordPiece iteratively merge the most frequent adjacent symbol pairs into new vocabulary entries, striking a balance between word-level tokens (too large a vocabulary, poor handling of rare/unseen words) and character-level tokens (too long a sequence, weak per-token semantic content). Subword tokenization lets a model represent any string as a sequence of known pieces, even words it never saw during training, by falling back to smaller fragments. See [Tokenizers](/docs/llms/tokenization-representations/tokenizers) (roadmap).
+
+**The Transformer architecture** replaced recurrence with self-attention: every token computes a weighted combination of every other token's representation, with weights determined by learned query-key-value projections. Because attention is computed in parallel across all positions rather than sequentially, Transformers train far faster than RNNs on the same hardware, and their per-layer path length between any two tokens is constant rather than growing with sequence distance — the key reason they capture long-range dependencies more reliably. See [The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture) for the full attention derivation.
+
+**Encoder-only models (BERT family)** are trained with a bidirectional objective — masked language modeling, where random tokens are hidden and the model must predict them using context from *both* directions simultaneously. This bidirectionality makes encoder models well suited to understanding tasks (classification, extractive QA, NER) where the full input is available at once, but unsuitable for free-form generation, since generation requires producing tokens one at a time without seeing the future. See [BERT and Bidirectional Encoders](/docs/deep-learning/attention-transformers/bert) (roadmap).
+
+**Decoder-only models (GPT family)** use causal (unidirectional) self-attention: each token can only attend to itself and earlier tokens, enforced by masking out future positions in the attention computation. This matches the autoregressive generation process exactly — at inference time, tokens genuinely are produced one at a time — which is why decoder-only architectures dominate open-ended text generation and modern large language models. See [GPT and Decoder-Only Models](/docs/deep-learning/attention-transformers/gpt-decoder-only) (roadmap).
+
+**Encoder-decoder models** (the original Transformer, T5-style architectures) keep both halves: a bidirectional encoder reads the full source sequence, and a causal decoder generates the target sequence while cross-attending to the encoder's output. This structure maps naturally onto tasks with a clear source/target asymmetry, like translation (source sentence to target-language sentence) and abstractive summarization (long document to short summary).
+
+<Mermaid chart={`
+graph TD
+  Text["Raw text"] --> Tok["Tokenizer: BPE / WordPiece"]
+  Tok --> Emb["Token + positional embeddings"]
+  Emb --> Enc["Encoder-only: BERT-style bidirectional attention"]
+  Emb --> Dec["Decoder-only: GPT-style causal attention"]
+  Emb --> EncDec["Encoder-decoder: cross-attention"]
+  Enc --> Under["Understanding tasks: classification, NER, extractive QA"]
+  Dec --> Gen["Open-ended generation, chat, reasoning"]
+  EncDec --> Seq["Translation, summarization"]
+`} />
+
+## Practical Trade-offs
+
+<ComparisonTable
+  headers={["Architecture family", "Attention pattern", "Best for", "Weakness"]}
+  rows={[
+    ["Encoder-only (BERT-style)", "Bidirectional — sees full context both directions", "Classification, NER, extractive QA, embeddings for retrieval", "Cannot naturally generate free-form text"],
+    ["Decoder-only (GPT-style)", "Causal — each token sees only itself and the past", "Open-ended generation, chat, few-shot in-context learning", "Wastes some capacity re-deriving context a bidirectional pass gets for free"],
+    ["Encoder-decoder (T5 / original Transformer)", "Bidirectional encoder + causal decoder with cross-attention", "Translation, summarization, other clear source-to-target tasks", "More complex architecture and training pipeline than either half alone"],
+    ["Classical statistical NLP (TF-IDF, n-gram LM, CRF)", "No learned attention — hand-engineered or local statistics", "Lightweight baselines, very low-resource settings, interpretable features", "No semantic generalization beyond surface token statistics"],
+  ]}
+/>
+
+## Practical Example
+
+```python
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+
+tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+model = AutoModelForSequenceClassification.from_pretrained(
+    "distilbert-base-uncased-finetuned-sst-2-english"
+)
+
+inputs = tokenizer("This documentation is unexpectedly delightful.", return_tensors="pt")
+with torch.no_grad():
+    logits = model(**inputs).logits
+
+probs = torch.softmax(logits, dim=-1)
+print(model.config.id2label[probs.argmax().item()], probs.max().item())
+```
+
+<KeyTakeaways items={[
+  "Tokenization choice sets a hard ceiling on downstream model quality — a model can never recover information destroyed by poor subword splitting.",
+  "Attention pattern (bidirectional vs. causal) is the single architectural choice that determines whether a Transformer variant is suited to understanding tasks or generation tasks.",
+  "Encoder-decoder architectures exist specifically for tasks with an explicit source/target asymmetry — don't reach for one when a plain decoder-only model would do.",
+  "Modern decoder-only LLMs increasingly subsume classical encoder-only use cases (classification, NER) via prompting, but dedicated encoder models remain more compute-efficient for high-throughput, narrow tasks.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Subword tokenization elegantly handles rare and out-of-vocabulary words by falling back to smaller known fragments.",
+    "Pretraining on large unlabeled text corpora and fine-tuning on small labeled datasets (transfer learning) works remarkably well and has replaced training NLP models from scratch.",
+    "A single decoder-only LLM can now perform many tasks that once required separate specialized models, via prompting alone.",
+  ]}
+  cons={[
+    "Using a bidirectional encoder for autoregressive generation (or vice versa) is a fundamental architecture mismatch, not a tunable hyperparameter — it needs to be fixed at the architecture level.",
+    "Ignoring tokenizer-model mismatch (using a different vocabulary at inference than training) silently corrupts every downstream computation.",
+    "Treating a fixed context window as unlimited memory leads to silent truncation of long documents with no warning.",
+    "Benchmark performance on curated NLP datasets often overstates real-world robustness to informal text, code-mixing, and domain-specific jargon.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why can't a BERT-style encoder-only model be used directly for open-ended text generation the way a GPT-style decoder can?",
+    options: [
+      "BERT models are too small to generate coherent text",
+      "BERT is trained with bidirectional attention, letting every token see both past and future context — but generation must produce tokens one at a time without access to future tokens, which bidirectional pretraining doesn't match",
+      "BERT has no attention mechanism at all",
+      "Encoder-only models cannot be fine-tuned on new data",
+    ],
+    answerIndex: 1,
+    explanation: "BERT's masked-language-modeling pretraining lets every position attend in both directions, which is ideal for understanding tasks with the full input available, but is fundamentally mismatched with autoregressive generation, where at each step only past tokens exist. GPT-style models use causal (masked) attention specifically to match this generation-time constraint during training.",
+  },
+  {
+    question: "What is the primary architectural reason Transformers capture long-range dependencies more reliably than RNNs?",
+    options: [
+      "Transformers have strictly more parameters than any RNN",
+      "Self-attention gives every pair of tokens a constant-length computational path (one attention hop), whereas an RNN must propagate information sequentially through every intermediate hidden state, which can degrade over long distances",
+      "RNNs cannot process sequences longer than 10 tokens",
+      "Transformers do not use backpropagation, avoiding vanishing gradients entirely",
+    ],
+    answerIndex: 1,
+    explanation: "In an RNN, information about token 1 influencing token 100 must pass through 99 sequential hidden-state updates, so the signal can attenuate (vanishing gradient) or get overwritten. In a Transformer, token 100 can attend directly to token 1 in a single attention operation regardless of distance, which is the structural reason self-attention handles long-range dependencies more robustly.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Attention Is All You Need", authors: "Vaswani, A. et al.", venue: "NeurIPS", year: 2017, url: "https://arxiv.org/abs/1706.03762" },
+  { title: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding", authors: "Devlin, J. et al.", venue: "NAACL", year: 2019, url: "https://arxiv.org/abs/1810.04805" },
+  { title: "Language Models are Few-Shot Learners (GPT-3)", authors: "Brown, T. et al.", venue: "NeurIPS", year: 2020, url: "https://arxiv.org/abs/2005.14165" },
+  { title: "Deep Learning", authors: "Goodfellow, I., Bengio, Y., Courville, A.", venue: "MIT Press", year: 2016, url: "https://www.deeplearningbook.org/" },
+]} />

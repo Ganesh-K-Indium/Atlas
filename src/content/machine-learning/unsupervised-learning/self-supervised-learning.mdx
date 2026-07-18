@@ -1,0 +1,212 @@
+---
+title: "Self-Supervised Learning"
+description: "How models learn useful representations from unlabeled data alone, by inventing their own supervision — the mechanism behind modern foundation-model pretraining."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["machine-learning", "unsupervised-learning", "self-supervised-learning", "representation-learning", "contrastive-learning"]
+prerequisites: ["Neural network training basics", "Cross-entropy loss", "Convolutional or transformer encoders", "Clustering (roadmap concept familiarity)"]
+---
+
+<Prerequisites items={[
+  "Gradient descent and backpropagation",
+  "Cross-entropy and softmax",
+  "Basic encoder architectures (CNNs or Transformers)",
+  "Cosine similarity",
+]} />
+
+## Intuition
+
+Labeled data is expensive; raw, unlabeled data is nearly free. Self-supervised learning (SSL) resolves that mismatch by having the model generate its own supervisory signal directly from the structure of the unlabeled data itself — no human annotation required. The trick is to design a **pretext task** whose solution forces the model to learn something genuinely useful about the data's structure, even though the task itself is often not the thing you actually care about. Two broad families of pretext task have proven most effective in practice: making the model recognize that two different "views" of the same thing are the same (**contrastive learning**), and making the model reconstruct or predict a deliberately hidden part of the input (**predictive/generative pretext tasks**, e.g. masked prediction).
+
+<Callout type="tip" title="One-sentence core idea">
+  Self-supervised learning creates labels from the data itself — either by teaching a model that augmented views of the same instance should have similar representations while different instances should not (contrastive), or by hiding part of the input and training the model to predict it (predictive/generative) — producing representations useful far beyond the pretext task itself.
+</Callout>
+
+## Formal Definition / Theory
+
+Formally, given an unlabeled dataset $\{x_i\}_{i=1}^n$, self-supervised learning defines a pretext task with an automatically-derivable target $y_i = f(x_i)$ (e.g., a masked token, a rotation angle, or "does this pair come from the same source image") and trains an encoder $g_\theta$ to solve it. The premise is that a good solution to the pretext task requires the encoder to capture semantically meaningful structure — object identity, syntax, texture, composition — which transfers to downstream tasks (classification, detection, retrieval) via fine-tuning or simple linear probing, often with far fewer labeled examples than training from scratch.
+
+### Contrastive learning (SimCLR-style)
+
+Contrastive methods start from the assumption that two different augmented views of the *same* underlying instance should map to nearby points in representation space, while views from *different* instances should map far apart. Given a minibatch of $N$ images, each image $x_k$ is augmented twice (random crop, color jitter, blur, etc.) to produce a positive pair $(x_k^{(1)}, x_k^{(2)})$. Both augmented views pass through an encoder $g_\theta$ (e.g. a ResNet) followed by a small projection head $h_\phi$, producing embeddings $z_k^{(1)} = h_\phi(g_\theta(x_k^{(1)}))$ and $z_k^{(2)} = h_\phi(g_\theta(x_k^{(2)}))$.
+
+The **normalized temperature-scaled cross-entropy loss (NT-Xent)** treats every other augmented image in the batch (all $2(N-1)$ of them) as a negative for a given anchor, and trains the model to maximize agreement with its true positive against all negatives:
+
+$$
+\ell(i, j) = -\log \frac{\exp\left(\text{sim}(z_i, z_j) / \tau\right)}{\sum_{k=1}^{2N} \mathbb{1}_{[k \neq i]} \exp\left(\text{sim}(z_i, z_k) / \tau\right)}
+$$
+
+where $\text{sim}(u, v) = \frac{u^\top v}{\lVert u \rVert \lVert v \rVert}$ is cosine similarity and $\tau$ is a temperature hyperparameter controlling how sharply the loss penalizes near-miss negatives. This is exactly the softmax cross-entropy loss over a $2N$-way classification problem where the "correct class" is the true positive pair — the encoder is being trained as an implicit $2N$-way classifier with no labels other than "which sample was I augmented from."
+
+Two properties are essential in practice: (1) **strong, information-destroying augmentations** — if augmentations are too weak, the positive pairs are trivially close and the model learns nothing useful; if they destroy task-relevant information (e.g. color for a color-classification downstream task), representations transfer poorly; (2) **large batch sizes or memory banks**, since more negatives per anchor make the discrimination task harder and the learned representations correspondingly richer — this is precisely why contrastive frameworks are typically trained with very large batches or auxiliary negative-sample queues.
+
+### Predictive / generative pretext tasks (masked prediction)
+
+Rather than contrasting instances against each other, predictive approaches corrupt part of a single instance and train the model to reconstruct or predict the missing part from context. The canonical formalization: split input $x$ into observed context $x_{\text{obs}}$ and masked target $x_{\text{mask}}$ (a random subset of tokens, patches, or spans), and train:
+
+$$
+\mathcal{L} = -\log p_\theta(x_{\text{mask}} \mid x_{\text{obs}})
+$$
+
+For discrete tokens (as in masked-language-modeling-style objectives) this is a cross-entropy loss over a vocabulary at each masked position; for continuous signals (as in masked-image-modeling-style objectives) it is often a reconstruction loss (e.g. mean squared error in pixel or feature space) at masked patch locations. Crucially, solving this prediction problem well requires the model to build an internal representation that captures the statistical dependencies between parts of the input — syntax and semantics for text, object structure and texture for images — which is precisely the representation that transfers to downstream tasks.
+
+The core difference from contrastive learning is the *unit of comparison*: contrastive objectives operate **across instances** (is this the same underlying thing as that one?), whereas predictive/generative objectives operate **within a single instance** (given this part, what's the rest?). Some modern approaches (e.g. self-distillation style methods that predict a target network's output representation directly, without an explicit reconstruction target) sit conceptually between the two, avoiding both large negative-sample counts and explicit pixel/token reconstruction — but the same instance-internal-vs-across-instance distinction still roughly applies.
+
+## Mechanism, step by step (SimCLR-style contrastive pipeline)
+
+1. Sample a minibatch of $N$ unlabeled examples.
+2. Apply two independent random augmentations to each example, producing $2N$ views (each original contributes exactly one positive pair).
+3. Encode all $2N$ views with a shared-weight encoder + projection head to get embeddings $z_1, \dots, z_{2N}$.
+4. For each embedding, compute cosine similarity against all other $2N - 1$ embeddings in the batch.
+5. Apply the NT-Xent loss: pull the true positive pair's similarity up, push all other $2(N-1)$ pairs (negatives) down, scaled by temperature $\tau$.
+6. Backpropagate through both the projection head and the encoder; after pretraining, **discard the projection head** and keep only the encoder — it is the encoder's representations, not the projection head's, that transfer well to downstream tasks (an empirical finding across contrastive SSL work).
+7. For downstream use: either freeze the encoder and train a small linear classifier on top ("linear probing") or fine-tune the whole encoder on a labeled task with far fewer labels than would be needed training from scratch.
+
+<Mermaid chart={`
+graph TD
+  A["Unlabeled image x"] --> B1["Augmentation 1<br/>(crop, color jitter, blur)"]
+  A --> B2["Augmentation 2"]
+  B1 --> C1["Encoder g_theta"]
+  B2 --> C2["Encoder g_theta (shared weights)"]
+  C1 --> D1["Projection head h_phi -> z1"]
+  C2 --> D2["Projection head h_phi -> z2"]
+  D1 --> E["NT-Xent loss:<br/>pull z1,z2 together,<br/>push apart from other batch embeddings"]
+  D2 --> E
+  E --> F["Backprop through encoder + projection head"]
+  F --> G["Discard projection head;<br/>keep encoder as pretrained representation"]
+`} />
+
+## Why this matters: connection to foundation models
+
+Self-supervised pretraining is the mechanism that underlies most modern large-scale pretraining, in both language and vision. Predicting masked or next tokens from vast unlabeled text corpora is a predictive self-supervised objective at massive scale — it requires no human labels, only raw text, and the resulting representations transfer to a huge range of downstream language tasks via fine-tuning or in-context adaptation. Contrastive and masked-prediction objectives play an analogous role for vision encoders. The general pattern — cheap, automatically-derived supervision from unlabeled data, at a scale far beyond what human annotation could ever provide — is the primary reason foundation models can be pretrained on internet-scale data before any task-specific labels are introduced. (Specific architectures and training recipes vary considerably across models and evolve quickly, so treat this as the general mechanism rather than a claim about any particular current system.)
+
+## Code Example
+
+```python
+import torch
+import torch.nn.functional as F
+
+def nt_xent_loss(z1, z2, temperature=0.5):
+    """
+    z1, z2: (N, d) embeddings of two augmented views of the same N examples.
+    Returns the NT-Xent contrastive loss (SimCLR-style).
+    """
+    N = z1.shape[0]
+    z = torch.cat([z1, z2], dim=0)                      # (2N, d)
+    z = F.normalize(z, dim=1)
+    sim = z @ z.T / temperature                          # (2N, 2N) cosine similarities
+
+    # Mask out self-similarity
+    mask = torch.eye(2 * N, dtype=torch.bool, device=z.device)
+    sim.masked_fill_(mask, float("-inf"))
+
+    # Positive pairs: i <-> i+N (and i+N <-> i)
+    targets = torch.cat([torch.arange(N, 2 * N), torch.arange(0, N)]).to(z.device)
+
+    return F.cross_entropy(sim, targets)
+
+# Usage sketch:
+# z1 = projection_head(encoder(augment(batch)))
+# z2 = projection_head(encoder(augment(batch)))
+# loss = nt_xent_loss(z1, z2)
+```
+
+```python
+# Masked prediction pretext task sketch (conceptual, framework-agnostic)
+import numpy as np
+
+def mask_tokens(tokens, mask_prob=0.15, mask_id=-1):
+    tokens = np.array(tokens)
+    mask = np.random.rand(len(tokens)) < mask_prob
+    labels = np.where(mask, tokens, -100)  # -100 = ignore in loss for unmasked positions
+    inputs = np.where(mask, mask_id, tokens)
+    return inputs, labels
+
+# Train the model to predict `labels` from `inputs` at masked positions only,
+# using cross-entropy over the vocabulary (or MSE over pixel/feature targets
+# for continuous, image-style masked prediction).
+```
+
+## Complexity
+
+| Approach | Time complexity (per step) | Space complexity | Notes |
+| --- | --- | --- | --- |
+| Contrastive (batch size $N$) | $O(N^2 d)$ for pairwise similarity matrix | $O(N^2)$ for similarity matrix, $O(Nd)$ for embeddings | Quality scales strongly with batch size / negative count, driving high memory demand |
+| Masked prediction | $O(L)$ per sequence/image for forward pass ($L$ = tokens/patches), model-dependent | $O(Ld)$ for activations | No pairwise comparison needed; cost dominated by the base encoder architecture |
+
+<ComparisonTable
+  headers={["Property", "Contrastive (e.g. SimCLR-style)", "Predictive/Generative (e.g. masked prediction)"]}
+  rows={[
+    ["Supervisory signal source", "Across instances (same vs. different sample)", "Within an instance (context predicts masked part)"],
+    ["Needs negative samples", "Yes, typically many (large batch or memory bank)", "No"],
+    ["Sensitive to augmentation strategy", "Very — augmentations define what's invariant", "Less so — masking strategy matters but differently"],
+    ["Typical loss", "NT-Xent / InfoNCE (softmax cross-entropy over similarities)", "Cross-entropy (discrete) or reconstruction loss (continuous)"],
+    ["Compute bottleneck", "Pairwise similarity computation, large batches", "Sequence/patch length, model depth"],
+    ["Representative modality", "Popularized in vision (image augmentation pairs)", "Popularized in both language (masked/next-token) and vision (masked patches)"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Self-supervised learning derives its training signal from the unlabeled data itself, via a pretext task — the pretext task's solution is not the end goal; the representations learned to solve it are.",
+  "Contrastive learning (e.g. SimCLR) pulls together embeddings of augmented views of the same instance and pushes apart embeddings of different instances, optimized with the NT-Xent / InfoNCE loss — an implicit softmax classification problem with no human labels.",
+  "Predictive/generative pretext tasks (e.g. masked prediction) instead hide part of a single input and train the model to reconstruct or predict it from the remaining context, capturing structural dependencies within the data.",
+  "This same 'invent supervision from unlabeled data at scale' pattern is the general mechanism that enabled foundation-model pretraining across both language and vision — though specific architectures and objectives vary and evolve quickly.",
+]} />
+
+<ProsCons
+  pros={[
+    "Eliminates dependence on expensive human-labeled data for pretraining, unlocking internet-scale training sets.",
+    "Learned representations transfer well across many downstream tasks via linear probing or fine-tuning, often needing far fewer labels than training from scratch.",
+    "Contrastive methods explicitly encode invariances (via augmentation choice) that downstream tasks often want (e.g. invariance to crop, color).",
+  ]}
+  cons={[
+    "Contrastive methods are compute- and memory-hungry, often requiring very large batch sizes or auxiliary negative-sample structures to work well.",
+    "Pretext task design is a strong, somewhat brittle inductive bias — a poorly chosen augmentation set or masking strategy can produce representations that transfer poorly to the tasks you actually care about.",
+    "Evaluating self-supervised representations properly requires a downstream benchmark; the pretext task's own loss value is not a reliable proxy for representation quality.",
+]}
+/>
+
+## Common Mistakes
+
+- Confusing self-supervised learning with unsupervised learning in general — SSL still trains with a supervised-style loss (cross-entropy, reconstruction), the difference is that the labels are derived automatically from the data rather than provided by humans.
+- Assuming stronger augmentations are always better for contrastive learning — augmentations that destroy information relevant to the downstream task (e.g. removing all color information when color is a discriminative downstream feature) hurt transfer performance even though they make the pretext task itself harder.
+- Evaluating a pretrained encoder purely by its pretext-task loss (e.g. contrastive loss value) rather than downstream transfer performance (linear probe accuracy, fine-tuning results) — a lower pretext loss does not guarantee better representations.
+- Using a small batch size with a contrastive objective and expecting SimCLR-level quality — the number of negatives per anchor scales with batch size, and too few negatives makes the discrimination task too easy to be useful.
+- Treating the projection head's output as the representation to use downstream — empirically, the layer *before* the projection head (the encoder's own output) transfers better; the projection head is typically discarded after pretraining.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "In SimCLR-style contrastive learning, what role does the temperature parameter τ play in the NT-Xent loss, and what happens if it's set too low?",
+    options: [
+      "τ controls the learning rate of the encoder directly and has no effect on the loss shape",
+      "τ scales the cosine similarities before the softmax; a very low τ makes the softmax extremely peaked, so the loss focuses almost entirely on the hardest negative (the one most similar to the anchor) and becomes very sensitive to a small number of near-miss examples, which can destabilize training",
+      "τ determines the number of augmentations applied per image",
+      "τ has no practical effect and is only included for numerical stability",
+    ],
+    answerIndex: 1,
+    explanation: "Temperature rescales the logits (cosine similarities) before the softmax in the NT-Xent loss. Lower τ sharpens the softmax distribution, amplifying the gradient contribution from hard negatives — those most confusable with the positive. Too low a temperature over-emphasizes a few borderline negatives and can make training unstable or overly sensitive to noise in the embedding space; too high a temperature makes the loss nearly uniform over negatives and provides a weak training signal.",
+  },
+  {
+    question: "What is the fundamental difference in supervisory signal between contrastive self-supervised learning and masked-prediction self-supervised learning?",
+    options: [
+      "Contrastive learning requires labeled data while masked prediction does not",
+      "Contrastive learning derives its signal by comparing different instances (is this augmented view the same underlying sample as that one, or a different one?), while masked prediction derives its signal from within a single instance (predict a hidden part from the remaining observed context)",
+      "There is no meaningful difference — they are mathematically identical objectives",
+      "Masked prediction only works on images, while contrastive learning only works on text",
+    ],
+    answerIndex: 1,
+    explanation: "Contrastive objectives like NT-Xent are inherently cross-instance: the loss is defined over similarities between pairs drawn from a batch of different underlying samples. Masked-prediction objectives are inherently intra-instance: the target is derived from a single example by hiding part of it, and the loss only involves that one example's context and masked content. Both are self-supervised (labels are auto-derived, not human-provided), but the structural source of the supervisory signal differs.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "A Simple Framework for Contrastive Learning of Visual Representations (SimCLR)", authors: "Ting Chen, Simon Kornblith, Mohammad Norouzi, Geoffrey Hinton", venue: "ICML / arXiv", year: 2020, url: "https://arxiv.org/abs/2002.05709" },
+  { title: "Momentum Contrast for Unsupervised Visual Representation Learning (MoCo)", authors: "Kaiming He, Haoqi Fan, Yuxin Wu, Saining Xie, Ross Girshick", venue: "CVPR / arXiv", year: 2020 },
+  { title: "Representation Learning with Contrastive Predictive Coding", authors: "Aaron van den Oord, Yazhe Li, Oriol Vinyals", venue: "arXiv", year: 2018 },
+  { title: "Masked Autoencoders Are Scalable Vision Learners (MAE)", authors: "Kaiming He, Xinlei Chen, Saining Xie, Yanghao Li, Piotr Dollár, Ross Girshick", venue: "CVPR / arXiv", year: 2021 },
+]} />

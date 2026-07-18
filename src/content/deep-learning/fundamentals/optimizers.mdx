@@ -1,0 +1,232 @@
+---
+title: "Optimizers: SGD, Momentum, Adam, AdamW"
+description: "How exponential moving averages of gradients (momentum) and squared gradients (RMSProp) combine into Adam, and the subtle decoupling fix that makes AdamW work correctly with weight decay."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "optimization", "sgd", "adam", "adamw", "gradient-descent"]
+prerequisites: ["Gradient descent", "Backpropagation basics", "Basic probability (expectation)"]
+---
+
+<Prerequisites items={["Gradient Descent", "Backpropagation: Full Derivation", "Basic probability (expectation)"]} />
+
+## Intuition
+
+Plain gradient descent takes a step directly opposite the current gradient — but the current gradient is a noisy, myopic estimate: it only tells you about the loss landscape *right where you're standing*, and in deep learning it's often computed on a small random mini-batch, making it noisier still. Momentum fixes the noise problem by remembering a running average of recent gradients, so the optimizer keeps moving in a consistent direction even when any single gradient is misleading. Adam goes further, additionally keeping a running average of *squared* gradients to automatically shrink the step size in directions that have historically had large gradients (and grow it in flat directions). AdamW then fixes a subtle but consequential bug in how Adam interacts with weight decay (L2 regularization).
+
+<Callout type="tip" title="The one idea that matters">
+  Momentum smooths *direction* by averaging gradients over time; Adam additionally adapts *step size* per-parameter by averaging squared gradients; AdamW fixes a interaction bug where Adam's per-parameter adaptive scaling was inadvertently warping how weight decay is applied.
+</Callout>
+
+## Formal Definitions
+
+$$
+\text{SGD: } \quad \theta_{t+1} = \theta_t - \eta \, g_t, \qquad g_t = \nabla_\theta \mathcal{L}(\theta_t)
+$$
+
+$$
+\text{Momentum: } \quad v_t = \beta v_{t-1} + (1-\beta) g_t, \qquad \theta_{t+1} = \theta_t - \eta \, v_t
+$$
+
+$$
+\text{Adam: } \quad m_t = \beta_1 m_{t-1} + (1-\beta_1)g_t, \quad v_t = \beta_2 v_{t-1} + (1-\beta_2)g_t^2
+$$
+
+$$
+\hat{m}_t = \frac{m_t}{1-\beta_1^t}, \qquad \hat{v}_t = \frac{v_t}{1-\beta_2^t}, \qquad \theta_{t+1} = \theta_t - \eta \, \frac{\hat{m}_t}{\sqrt{\hat{v}_t}+\epsilon}
+$$
+
+$$
+\text{AdamW: } \quad \theta_{t+1} = \theta_t - \eta\left(\frac{\hat{m}_t}{\sqrt{\hat{v}_t}+\epsilon} + \lambda \theta_t\right)
+$$
+
+## Derivation and Mechanism
+
+### Momentum as an exponential moving average of gradients
+
+Unroll the momentum recursion $v_t = \beta v_{t-1} + (1-\beta)g_t$ by substitution:
+
+$$
+v_t = (1-\beta)\sum_{k=0}^{t} \beta^{t-k} g_k
+$$
+
+This is exactly an **exponential moving average (EMA)** of all past gradients, with older gradients discounted geometrically by $\beta^{t-k}$. A typical value $\beta = 0.9$ means each gradient's influence decays to about $37\%$ ($e^{-1}$) after roughly $1/(1-\beta) = 10$ steps — the "effective window" the EMA averages over. Averaging cancels out noise that points in inconsistent directions across mini-batches while reinforcing a *consistent* gradient direction across many steps, which is why momentum accelerates convergence particularly along directions where the gradient is persistent (e.g., a long shallow ravine in the loss surface) while damping oscillation in directions where the gradient keeps flipping sign.
+
+### Adam: combining first and second moment estimates
+
+Adam maintains two EMAs per parameter:
+
+- $m_t$: an EMA of the gradient itself (like momentum) — an estimate of $\mathbb{E}[g_t]$, the "first moment."
+- $v_t$: an EMA of the *squared* gradient — an estimate of $\mathbb{E}[g_t^2]$, the "second moment" (this is exactly RMSProp's mechanism).
+
+Dividing the step by $\sqrt{\hat{v}_t}$ adapts the effective learning rate **per parameter**: parameters with consistently large gradient magnitude get their steps shrunk (dividing by a large $\sqrt{v_t}$), while parameters with small, gentle gradients get relatively larger steps (dividing by a small $\sqrt{v_t}$). This is especially useful when different parameters (e.g., embedding vs. output-layer weights) naturally operate at very different gradient scales.
+
+### Why bias correction is necessary
+
+Both EMAs are initialized at $m_0 = v_0 = 0$. Unrolling $m_t$:
+
+$$
+m_t = (1-\beta_1)\sum_{k=1}^{t}\beta_1^{t-k}g_k
+$$
+
+Taking expectations (treating $g_k \approx g$ as roughly stationary near step $t$, a standard simplifying assumption used in the original derivation):
+
+$$
+\mathbb{E}[m_t] \approx \mathbb{E}[g]\,(1-\beta_1)\sum_{k=1}^{t}\beta_1^{t-k} = \mathbb{E}[g]\,(1-\beta_1)\cdot\frac{1-\beta_1^t}{1-\beta_1} = \mathbb{E}[g]\,(1-\beta_1^t)
+$$
+
+So $\mathbb{E}[m_t] = \mathbb{E}[g]\cdot(1-\beta_1^t)$ rather than $\mathbb{E}[g]$ itself — the raw EMA is **biased toward zero**, especially at early steps $t$ when $\beta_1^t$ is still close to 1 (e.g., at $t=1$ with $\beta_1=0.9$, $m_1 = 0.1\,g_1$ is only 10% of the true gradient magnitude). Dividing by $(1-\beta_1^t)$ exactly cancels this factor:
+
+$$
+\hat{m}_t = \frac{m_t}{1-\beta_1^t} \quad \Rightarrow \quad \mathbb{E}[\hat{m}_t] \approx \mathbb{E}[g]
+$$
+
+The identical argument applies to $v_t$ and $\hat{v}_t$ with $\beta_2$. Without this correction, Adam's effective step sizes would be artificially small during the first several dozen steps of training (until $\beta^t$ decays close to zero), distorting early optimization dynamics.
+
+### AdamW: decoupling weight decay from the adaptive update
+
+L2 regularization adds $\frac{\lambda}{2}\|\theta\|^2$ to the loss, which contributes $\lambda\theta$ to the gradient. **Vanilla Adam with "L2 regularization"** folds this directly into $g_t$ before computing the moment estimates:
+
+$$
+g_t \leftarrow \nabla_\theta\mathcal{L}(\theta_t) + \lambda\theta_t \qquad \text{(then proceed with Adam's } m_t, v_t \text{ as usual)}
+$$
+
+The problem: this $\lambda\theta_t$ term now gets divided by $\sqrt{\hat{v}_t}$ along with the rest of the gradient. For parameters with large historical gradient magnitude (large $v_t$), the weight-decay contribution to the step gets shrunk — exactly the parameters that arguably need decay the most (large, fast-moving weights) end up decayed the *least*. This couples weight decay's strength to each parameter's adaptive learning rate in an unintended, uncontrolled way.
+
+**AdamW's fix** (Loshchilov & Hutter, 2017): compute $m_t, v_t$ from the *task loss gradient only* (no $\lambda\theta$ mixed in), and apply weight decay as a separate, direct multiplicative shrinkage of the weights themselves:
+
+$$
+\theta_{t+1} = \theta_t - \eta\left(\frac{\hat{m}_t}{\sqrt{\hat{v}_t}+\epsilon} + \lambda\theta_t\right)
+$$
+
+Now $\lambda\theta_t$ is added *after* the adaptive scaling, not before, so every parameter is decayed by a consistent, predictable amount ($\eta\lambda$ times its current value) independent of that parameter's individual gradient history. This decoupling is why AdamW is the standard optimizer for training Transformers — it makes weight decay behave the way it does in plain SGD (where L2 regularization and weight decay actually are equivalent, unlike in adaptive methods).
+
+<Mermaid chart={`
+graph TD
+  g["gradient g_t"] --> m["m_t = EMA of g_t (first moment)"]
+  g --> v["v_t = EMA of g_t^2 (second moment)"]
+  m --> mhat["bias-corrected m_hat_t"]
+  v --> vhat["bias-corrected v_hat_t"]
+  mhat --> step["step = m_hat_t / (sqrt(v_hat_t) + eps)"]
+  vhat --> step
+  step --> adam["Adam: theta -= eta * step"]
+  step --> adamw["AdamW: theta -= eta * (step + lambda * theta)"]
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+
+class SGDMomentum:
+    def __init__(self, params, lr=0.01, beta=0.9):
+        self.lr, self.beta = lr, beta
+        self.v = [np.zeros_like(p) for p in params]
+
+    def step(self, params, grads):
+        for i, (p, g) in enumerate(zip(params, grads)):
+            self.v[i] = self.beta * self.v[i] + (1 - self.beta) * g
+            p -= self.lr * self.v[i]
+
+class Adam:
+    def __init__(self, params, lr=1e-3, beta1=0.9, beta2=0.999, eps=1e-8):
+        self.lr, self.b1, self.b2, self.eps = lr, beta1, beta2, eps
+        self.m = [np.zeros_like(p) for p in params]
+        self.v = [np.zeros_like(p) for p in params]
+        self.t = 0
+
+    def step(self, params, grads):
+        self.t += 1
+        for i, (p, g) in enumerate(zip(params, grads)):
+            self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * g
+            self.v[i] = self.b2 * self.v[i] + (1 - self.b2) * (g ** 2)
+            m_hat = self.m[i] / (1 - self.b1 ** self.t)   # bias correction
+            v_hat = self.v[i] / (1 - self.b2 ** self.t)   # bias correction
+            p -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+
+class AdamW(Adam):
+    def __init__(self, params, lr=1e-3, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.01):
+        super().__init__(params, lr, beta1, beta2, eps)
+        self.wd = weight_decay
+
+    def step(self, params, grads):
+        self.t += 1
+        for i, (p, g) in enumerate(zip(params, grads)):
+            self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * g
+            self.v[i] = self.b2 * self.v[i] + (1 - self.b2) * (g ** 2)
+            m_hat = self.m[i] / (1 - self.b1 ** self.t)
+            v_hat = self.v[i] / (1 - self.b2 ** self.t)
+            # Weight decay applied directly to the weights, NOT mixed into the gradient
+            p -= self.lr * (m_hat / (np.sqrt(v_hat) + self.eps) + self.wd * p)
+```
+
+## Complexity
+
+| Optimizer | Extra state per parameter | Convergence behavior |
+| --- | --- | --- |
+| SGD | None | Sensitive to learning rate; can oscillate in narrow ravines |
+| Momentum | 1 buffer ($v$) | Faster along consistent-gradient directions; damps oscillation |
+| Adam | 2 buffers ($m$, $v$) | Per-parameter adaptive step size; robust default, faster early progress |
+| AdamW | 2 buffers ($m$, $v$) | Same as Adam, but weight decay behaves predictably/consistently across parameters |
+
+<ComparisonTable
+  headers={["Optimizer", "Adapts step size per-parameter?", "Handles weight decay correctly?", "Memory overhead", "Typical use"]}
+  rows={[
+    ["SGD (plain)", "No", "N/A (L2 via gradient is exact for SGD)", "None", "Simple/convex problems, some vision models with tuned LR schedules"],
+    ["SGD + Momentum", "No", "N/A", "1x params", "CNNs (e.g. ResNet training recipes)"],
+    ["Adam", "Yes", "No — L2 term gets distorted by adaptive scaling", "2x params", "General deep learning default, especially early experimentation"],
+    ["AdamW", "Yes", "Yes — weight decay decoupled from adaptive scaling", "2x params", "Transformers, most modern large-model training"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Momentum is an exponential moving average of gradients, which smooths out mini-batch noise and accelerates progress along consistent gradient directions.",
+  "Adam adds a second EMA of squared gradients (RMSProp-style) to adapt the learning rate per parameter, dividing the step by sqrt of that EMA.",
+  "Both of Adam's EMAs are biased toward zero at initialization; bias correction (dividing by 1-β^t) is required to get unbiased estimates, especially in early training steps.",
+  "Vanilla Adam mixes L2 regularization into the gradient before adaptive scaling, which inconsistently shrinks weight decay for high-gradient-magnitude parameters.",
+  "AdamW decouples weight decay into a separate term applied directly to the weights, restoring the SGD-like behavior where decay strength doesn't depend on a parameter's gradient history.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Pitfalls">
+  - Using Adam with `weight_decay` in frameworks where it's implemented as L2-in-the-gradient (the historically common but flawed approach) instead of true AdamW — check your framework: PyTorch's `torch.optim.AdamW` is the decoupled version; `torch.optim.Adam(weight_decay=...)` is the older L2-in-gradient version.
+  - Forgetting bias correction when implementing Adam from scratch — without it, early training steps take artificially tiny steps, which can look like a learning-rate bug.
+  - Assuming Adam always outperforms tuned SGD+Momentum — for some vision architectures, well-tuned SGD with momentum and a learning rate schedule still generalizes at least as well, sometimes better, than Adam.
+  - Treating $\beta_1, \beta_2$ as unimportant hyperparameters — $\beta_2=0.999$ in particular gives a very long effective averaging window (~1000 steps) for the second moment, which interacts with how quickly the optimizer adapts step sizes to changing loss curvature.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does Adam require bias correction terms (1-β₁ᵗ) and (1-β₂ᵗ)?",
+    options: [
+      "To prevent numerical overflow when gradients are very large",
+      "Because the moment estimates m_t and v_t are initialized at zero, which biases their expected value toward zero especially in early steps — dividing by (1-β^t) corrects for this so the estimates are unbiased",
+      "To ensure the learning rate decreases monotonically over training",
+      "Because without it, the algorithm would not be differentiable",
+    ],
+    answerIndex: 1,
+    explanation: "Since m_0=v_0=0, unrolling the EMA recursion shows E[m_t] = E[g]·(1-β1^t), which is less than the true gradient expectation, especially when t is small and β1^t is still close to 1. Dividing by (1-β1^t) exactly cancels this bias.",
+  },
+  {
+    question: "What specifically does AdamW change relative to vanilla Adam with L2 regularization?",
+    options: [
+      "AdamW removes the second moment estimate entirely, reverting to plain momentum",
+      "AdamW applies weight decay as a separate term added directly to the parameter update, after the adaptive (sqrt(v_hat)) scaling, instead of mixing it into the gradient before that scaling — making decay strength independent of a parameter's gradient history",
+      "AdamW increases the learning rate over time instead of using a fixed schedule",
+      "AdamW replaces the Adam moment estimates with a single running average of the raw weights",
+    ],
+    answerIndex: 1,
+    explanation: "In vanilla Adam, L2 regularization is folded into the gradient before computing m_t, v_t, so the weight-decay term gets divided by sqrt(v_hat) along with everything else — shrinking decay for parameters with large historical gradients. AdamW instead adds λθ directly to the update after adaptive scaling, so every parameter decays consistently.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Adam: A Method for Stochastic Optimization", authors: "Kingma, D. P., & Ba, J.", venue: "arXiv:1412.6980", year: 2014 },
+  { title: "Decoupled Weight Decay Regularization", authors: "Loshchilov, I., & Hutter, F.", venue: "arXiv:1711.05101", year: 2017 },
+  { title: "Lecture 6.5 - RMSProp: Divide the Gradient by a Running Average of its Recent Magnitude", authors: "Tieleman, T., & Hinton, G.", venue: "Coursera: Neural Networks for Machine Learning", year: 2012 },
+]} />

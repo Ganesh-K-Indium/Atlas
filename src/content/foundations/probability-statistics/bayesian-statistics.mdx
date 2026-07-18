@@ -1,0 +1,200 @@
+---
+title: "Bayesian Statistics & Inference"
+description: "Treating unknown parameters as random variables with their own distributions — the framework behind uncertainty-aware ML, Bayesian optimization, and conjugate-prior updates you can compute in closed form."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["probability", "statistics", "math", "bayesian-inference", "conjugate-priors"]
+prerequisites: ["Probability Foundations", "Maximum Likelihood Estimation"]
+---
+
+## Intuition
+
+Maximum Likelihood Estimation returns a single number for a parameter and calls it done. But with limited data, that single number is often overconfident — it doesn't express how *uncertain* you should still be. Bayesian statistics treats the unknown parameter itself as a random variable, starting from a **prior** belief about it, and updates that belief into a **posterior** distribution once data arrives — using nothing more than Bayes' theorem, now applied to parameters instead of just events.
+
+<Callout type="tip" title="One-sentence definition">
+  Bayesian inference computes $p(\theta \mid \text{data}) \propto p(\text{data} \mid \theta)\, p(\theta)$ — a full distribution over the parameter, not just a point estimate, letting the model express calibrated uncertainty.
+</Callout>
+
+This matters practically: a Bayesian neural network can say "I'm not sure" on out-of-distribution inputs; Bayesian optimization (used to tune hyperparameters) needs a posterior over an unknown function to decide where to sample next; and A/B testing with Bayesian methods gives a direct probability that "variant A is better," rather than a p-value that's frequently misinterpreted as one.
+
+## Formal Definition
+
+Given a prior $p(\theta)$ over parameters and a likelihood $p(\mathcal{D} \mid \theta)$ for observed data $\mathcal{D}$, Bayes' theorem gives the **posterior**:
+
+$$
+p(\theta \mid \mathcal{D}) = \frac{p(\mathcal{D} \mid \theta)\, p(\theta)}{p(\mathcal{D})}, \qquad p(\mathcal{D}) = \int p(\mathcal{D} \mid \theta)\, p(\theta)\, d\theta
+$$
+
+The denominator $p(\mathcal{D})$ (the **marginal likelihood** or **evidence**) doesn't depend on $\theta$ — it's just a normalizing constant — so in practice we work with the proportionality:
+
+$$
+p(\theta \mid \mathcal{D}) \propto p(\mathcal{D} \mid \theta)\, p(\theta) \quad \text{(posterior} \propto \text{likelihood} \times \text{prior)}
+$$
+
+This proportionality is the entire computational engine of Bayesian inference: multiply likelihood and prior, then normalize (analytically if possible, otherwise via MCMC — see [Markov Chains & Monte Carlo](/docs/foundations/probability-statistics/markov-chains-monte-carlo) — or variational approximation).
+
+## Derivation: The Beta-Bernoulli Conjugate Update
+
+This is the cleanest fully-worked Bayesian update, and it underlies Bayesian A/B testing and Thompson sampling for bandits.
+
+**Setup.** We observe $n$ i.i.d. coin flips $x_1, \ldots, x_n \in \{0,1\}$ with unknown success probability $\theta$. We place a $\text{Beta}(\alpha, \beta)$ prior on $\theta$:
+
+$$
+p(\theta) = \frac{\theta^{\alpha-1}(1-\theta)^{\beta-1}}{B(\alpha,\beta)}, \qquad \theta \in [0,1]
+$$
+
+where $B(\alpha,\beta)$ is the Beta function (a normalizing constant depending only on $\alpha, \beta$).
+
+**Step 1 — write the likelihood.** With $k = \sum_i x_i$ successes out of $n$ trials:
+
+$$
+p(\mathcal{D} \mid \theta) = \theta^k (1-\theta)^{n-k}
+$$
+
+**Step 2 — multiply likelihood by prior:**
+
+$$
+p(\theta \mid \mathcal{D}) \propto \theta^k(1-\theta)^{n-k} \cdot \theta^{\alpha-1}(1-\theta)^{\beta-1} = \theta^{\alpha+k-1}(1-\theta)^{\beta+n-k-1}
+$$
+
+**Step 3 — recognize the form.** This is *exactly* the unnormalized kernel of a $\text{Beta}(\alpha + k,\ \beta + n - k)$ distribution. Since a probability distribution over $[0,1]$ with this kernel is unique (the normalizing constant is whatever makes it integrate to 1), we conclude:
+
+$$
+\theta \mid \mathcal{D} \sim \text{Beta}(\alpha + k,\ \beta + n - k)
+$$
+
+This is why Beta is called the **conjugate prior** for the Bernoulli/Binomial likelihood: the posterior stays in the same distributional family as the prior, just with updated parameters — no numerical integration required. Intuitively, $\alpha$ and $\beta$ act like "pseudo-counts" of prior successes and failures, and the update simply adds the observed successes/failures to them.
+
+**Posterior mean** (using the known mean formula for Beta): $\mathbb{E}[\theta \mid \mathcal{D}] = \frac{\alpha+k}{\alpha+\beta+n}$ — a weighted average of the prior mean $\frac{\alpha}{\alpha+\beta}$ and the MLE $\frac{k}{n}$, with weights determined by $\alpha+\beta$ (prior "strength") versus $n$ (data size). As $n \to \infty$, this converges to the MLE $k/n$ regardless of the prior — Bayesian and frequentist estimates agree asymptotically.
+
+<Mermaid chart={`
+graph TD
+  A["Prior: θ ~ Beta(α, β)"] --> C["Multiply by likelihood θ^k (1-θ)^(n-k)"]
+  B["Data: k successes in n trials"] --> C
+  C --> D["Recognize kernel matches Beta form"]
+  D --> E["Posterior: θ | data ~ Beta(α+k, β+n-k)"]
+  E --> F["Posterior mean → MLE k/n as n → ∞"]
+`} />
+
+## Common Conjugate Pairs
+
+<ComparisonTable
+  headers={["Likelihood", "Conjugate prior", "Posterior update"]}
+  rows={[
+    ["Bernoulli/Binomial(θ)", "Beta(α, β)", "Beta(α + successes, β + failures)"],
+    ["Categorical/Multinomial", "Dirichlet(α)", "Dirichlet(α + observed counts per category)"],
+    ["Gaussian, known variance", "Gaussian on μ", "Gaussian, precision-weighted average of prior and data means"],
+    ["Poisson(λ)", "Gamma(α, β)", "Gamma(α + Σxᵢ, β + n)"],
+  ]}
+/>
+
+## Point Estimates from a Posterior: MAP vs. Full Bayesian
+
+If a single point estimate is still needed, the **Maximum A Posteriori (MAP)** estimate is:
+
+$$
+\hat\theta_{\text{MAP}} = \arg\max_\theta p(\theta \mid \mathcal{D}) = \arg\max_\theta \left[\log p(\mathcal{D}\mid\theta) + \log p(\theta)\right]
+$$
+
+This is literally MLE plus a regularizer — $\log p(\theta)$ acts exactly like the penalty term in L2/L1-regularized regression. A Gaussian prior on weights yields the $\ell_2$ penalty (ridge regression); a Laplace prior yields the $\ell_1$ penalty (LASSO). This is the precise sense in which "regularization is a prior in disguise."
+
+But MAP still collapses the posterior to a point, discarding the uncertainty captured by its spread. **Full Bayesian inference** instead integrates over the entire posterior for downstream tasks — e.g. the posterior predictive distribution for a new point $x^*$:
+
+$$
+p(x^* \mid \mathcal{D}) = \int p(x^* \mid \theta)\, p(\theta \mid \mathcal{D})\, d\theta
+$$
+
+which averages predictions across all plausible $\theta$ weighted by their posterior probability, rather than betting everything on one $\hat\theta$.
+
+## Code Example
+
+```python
+import numpy as np
+from scipy import stats
+
+# Bayesian A/B test: two variants, Beta-Bernoulli conjugate update
+rng = np.random.default_rng(0)
+
+# Observed data: variant A converted 45/500, variant B converted 60/520
+alpha_prior, beta_prior = 1, 1     # uniform (uninformative) prior
+a_successes, a_trials = 45, 500
+b_successes, b_trials = 60, 520
+
+post_a = stats.beta(alpha_prior + a_successes, beta_prior + a_trials - a_successes)
+post_b = stats.beta(alpha_prior + b_successes, beta_prior + b_trials - b_successes)
+
+# Monte Carlo estimate of P(B > A) by sampling both posteriors
+samples_a = post_a.rvs(100_000, random_state=rng)
+samples_b = post_b.rvs(100_000, random_state=rng)
+p_b_better = (samples_b > samples_a).mean()
+
+print(f"P(variant B has higher true conversion rate) ≈ {p_b_better:.3f}")
+print(f"Posterior mean A: {post_a.mean():.4f}, B: {post_b.mean():.4f}")
+```
+
+## Complexity
+
+| Approach | Cost | When to use |
+| --- | --- | --- |
+| Conjugate prior | Closed-form, $O(1)$ update per observation | Whenever likelihood/prior form a known conjugate pair |
+| MAP estimation | Same cost as MLE (point optimization) | Fast point estimate with regularization interpretation |
+| Grid approximation | $O(g^d)$ for $g$ grid points, $d$ dimensions | Low-dimensional posteriors only |
+| MCMC (Metropolis-Hastings, HMC) | Many likelihood evaluations per sample | General posteriors, no conjugacy required |
+| Variational inference | Optimization-based, faster than MCMC, approximate | Large-scale/deep Bayesian models |
+
+<KeyTakeaways items={[
+  "Bayesian inference treats parameters as random variables: posterior ∝ likelihood × prior, normalized by the evidence.",
+  "Conjugate priors (like Beta for Bernoulli, Dirichlet for Categorical, Gamma for Poisson) give closed-form posterior updates — no numerical integration needed.",
+  "MAP estimation is MLE plus a prior-derived penalty term — Gaussian priors give L2 regularization, Laplace priors give L1 (LASSO) regularization.",
+  "As data grows, the posterior mean converges to the MLE regardless of the prior — but with limited data, the prior meaningfully shapes conclusions, which is both Bayesian statistics' strength (encodes real prior knowledge) and its main critique (subjectivity of prior choice).",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Using conjugate priors when applicable — they turn Bayesian updating into simple parameter arithmetic instead of requiring MCMC.",
+    "Reporting full posterior distributions (or credible intervals) rather than collapsing to MAP when uncertainty quantification matters downstream.",
+  ]}
+  cons={[
+    "Confusing a Bayesian credible interval ('there's a 95% probability θ is in this range, given the data and prior') with a frequentist confidence interval ('95% of such intervals constructed this way would contain the true θ across repeated sampling') — they answer different questions and are numerically different in general.",
+    "Choosing an 'uninformative' prior without checking it's actually uninformative in the parameterization that matters — e.g. a uniform prior on θ is not uniform on log-odds or on θ².",
+    "Ignoring that MAP still discards uncertainty — for downstream decisions sensitive to tail risk, using only the MAP estimate can be as overconfident as plain MLE.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is the Beta distribution called the 'conjugate prior' for a Bernoulli/Binomial likelihood?",
+    options: [
+      "Because Beta and Bernoulli distributions have the same mean",
+      "Because multiplying a Beta prior by a Bernoulli/Binomial likelihood produces a posterior that is again a Beta distribution (with updated parameters), avoiding the need for numerical integration",
+      "Because they were derived by the same mathematician",
+      "Conjugacy only refers to computational speed, not to the distributional family being preserved",
+    ],
+    answerIndex: 1,
+    explanation: "Multiplying θ^(α-1)(1-θ)^(β-1) (Beta prior kernel) by θ^k(1-θ)^(n-k) (Bernoulli/Binomial likelihood) gives θ^(α+k-1)(1-θ)^(β+n-k-1), which is exactly the kernel of a Beta(α+k, β+n-k) distribution — the posterior stays in the same family as the prior, which is the definition of conjugacy.",
+  },
+  {
+    question: "How does MAP (Maximum A Posteriori) estimation relate to L2-regularized (ridge) regression?",
+    options: [
+      "They are unrelated techniques that happen to produce similar-looking formulas",
+      "MAP estimation maximizes log-likelihood plus log-prior; when the prior on the weights is Gaussian, log p(θ) becomes a quadratic penalty term identical in form to the L2 regularization term, making ridge regression exactly MAP estimation under a Gaussian prior",
+      "MAP only works for classification, so it can't relate to regression",
+      "L2 regularization is a purely frequentist concept with no Bayesian interpretation",
+    ],
+    answerIndex: 1,
+    explanation: "MAP maximizes log p(D|θ) + log p(θ). A Gaussian prior p(θ) ∝ exp(-||θ||²/2τ²) contributes -||θ||²/2τ² to the objective (up to sign/scale), which is exactly the L2 penalty term used in ridge regression. This is the formal sense in which regularization corresponds to an implicit prior belief about parameter magnitudes.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Bayesian Data Analysis", authors: "Andrew Gelman, John B. Carlin, Hal S. Stern, David B. Dunson, Aki Vehtari, Donald B. Rubin", venue: "CRC Press", year: 2013 },
+  { title: "Pattern Recognition and Machine Learning", authors: "Christopher M. Bishop", venue: "Springer", year: 2006 },
+  { title: "Statistical Rethinking: A Bayesian Course with Examples in R and Stan", authors: "Richard McElreath", venue: "CRC Press", year: 2020 },
+]} />

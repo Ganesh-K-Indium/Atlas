@@ -1,0 +1,201 @@
+---
+title: "Activation Functions"
+description: "Why sigmoid and tanh strangle gradients in deep networks, why ReLU's fix creates a new failure mode of its own, and what GELU/SiLU do differently in modern Transformers."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "neural-networks", "activation-functions"]
+prerequisites: ["Basic calculus (derivatives)", "Perceptrons & multilayer perceptrons"]
+---
+
+<Prerequisites items={["Basic calculus (derivatives)", "Chain rule", "Perceptrons & Multilayer Perceptrons"]} />
+
+## Intuition
+
+An activation function is what turns a stack of linear layers into something that can represent curved, complex decision boundaries — without one, depth is pointless (see [Perceptrons & MLPs](/docs/deep-learning/fundamentals/perceptrons-mlp)). But *which* nonlinearity you choose has enormous practical consequences for whether a deep network trains at all. Early networks used sigmoid and tanh because they're smooth and biologically inspired, but they turned out to strangle gradients as depth increased. ReLU's simplicity solved that for positive inputs, at the cost of neurons that can permanently "die." Modern architectures use smoother variants (GELU, SiLU/Swish) that combine ReLU's gradient flow with a small amount of curvature.
+
+<Callout type="tip" title="The one idea that matters">
+  Every activation function is a trade-off between nonlinearity (needed for expressiveness) and gradient flow (needed for trainability). Sigmoid/tanh sacrifice gradient flow for smooth bounded outputs; ReLU sacrifices smoothness for gradient flow; GELU/SiLU try to get both.
+</Callout>
+
+## Formal Definitions
+
+$$
+\text{Sigmoid: } \sigma(z) = \frac{1}{1 + e^{-z}}, \qquad \text{Tanh: } \tanh(z) = \frac{e^{z} - e^{-z}}{e^{z} + e^{-z}} = 2\sigma(2z) - 1
+$$
+
+$$
+\text{ReLU: } \text{ReLU}(z) = \max(0, z), \qquad \text{Leaky ReLU: } \text{LReLU}(z) = \max(\alpha z, z), \ \alpha \approx 0.01
+$$
+
+$$
+\text{GELU: } \text{GELU}(z) = z \cdot \Phi(z), \qquad \text{SiLU/Swish: } \text{SiLU}(z) = z \cdot \sigma(z)
+$$
+
+where $\Phi(z)$ is the standard normal CDF. GELU is often approximated as $0.5z\left(1 + \tanh\left[\sqrt{2/\pi}\,(z + 0.044715 z^3)\right]\right)$ for speed.
+
+## Derivation: Vanishing Gradients in Sigmoid/Tanh
+
+### Bounding sigmoid's derivative
+
+$$
+\sigma'(z) = \sigma(z)\big(1 - \sigma(z)\big)
+$$
+
+Let $p = \sigma(z) \in (0,1)$. The function $p(1-p)$ is a downward parabola in $p$, maximized where its derivative $\frac{d}{dp}\big[p - p^2\big] = 1 - 2p = 0$, i.e. at $p = 0.5$ (which occurs at $z=0$). Its maximum value there is:
+
+$$
+\sigma'(0) = 0.5 \times 0.5 = 0.25
+$$
+
+So **$\sigma'(z) \leq 0.25$ for all $z$**, with the bound rapidly approaching 0 as $|z|$ grows (saturation).
+
+### Why this causes vanishing gradients
+
+During backpropagation, the error signal at layer $l$ is (see [backpropagation derivation](/docs/foundations/calculus-optimization/backpropagation-derivation)):
+
+$$
+\delta^{(l)} = \left(W^{(l+1)\top}\delta^{(l+1)}\right) \odot \sigma'(z^{(l)})
+$$
+
+Across $L$ layers, the gradient reaching the first layer involves a product of $L$ terms each $\leq 0.25$:
+
+$$
+\left\|\delta^{(1)}\right\| \lesssim \left(\prod_{l=1}^{L} \|W^{(l)}\|\right) \times (0.25)^L
+$$
+
+Even if the weight norms are moderate, $(0.25)^L \to 0$ exponentially fast as $L$ grows — a 10-layer sigmoid network already multiplies by $0.25^{10} \approx 10^{-6}$. Early layers receive a vanishingly small training signal and effectively stop learning. Tanh is a shifted, rescaled sigmoid ($\tanh(z) = 2\sigma(2z)-1$) with maximum derivative $\tanh'(0) = 1$ — better than sigmoid's 0.25, but it still saturates to 0 for $|z|$ large, so deep tanh networks suffer the same problem, just less severely.
+
+## Derivation: ReLU and the Dying ReLU Problem
+
+ReLU's derivative is a step function:
+
+$$
+\text{ReLU}'(z) = \begin{cases} 1 & z > 0 \\ 0 & z < 0 \end{cases} \quad \text{(undefined at } z=0\text{, conventionally taken as 0 or 1)}
+$$
+
+For any active neuron ($z>0$), the local gradient is exactly **1** — no shrinkage at all, regardless of how deep the network is. This is precisely why ReLU allows much deeper networks to train: the gradient signal passes through active units unattenuated.
+
+The cost: if a neuron's pre-activation $z$ becomes negative for *every* training example (which can happen after a large gradient update pushes its bias/weights too far negative), then $\text{ReLU}'(z) = 0$ for all of them. Its incoming gradient is permanently zero, so no future gradient update can ever change its weights again — the neuron is "dead" and stays dead for the rest of training. This is the **dying ReLU problem**. It's more likely with a high learning rate or poor initialization, both of which can push a large negative update through a unit in one step.
+
+**Leaky ReLU** and **Parametric ReLU (PReLU)** patch this by giving negative inputs a small nonzero slope $\alpha$, so $\text{LReLU}'(z) = \alpha$ for $z<0$ — a dead neuron can still receive (small) gradient and recover.
+
+## GELU and SiLU/Swish: The Modern Default
+
+Transformers (BERT, GPT, ViT, etc.) mostly use GELU or SiLU instead of plain ReLU. Both share the same idea: instead of a hard cutoff at zero, multiply the input by a smooth "gate" that is close to 0 for very negative $z$ and close to 1 for very positive $z$, transitioning smoothly around 0.
+
+$$
+\text{GELU}(z) = z\,\Phi(z), \qquad \text{SiLU}(z) = z\,\sigma(z)
+$$
+
+Both are **non-monotonic** — they dip slightly negative for small negative $z$ before flattening to 0 — which lets a "dead"-looking unit still carry a small gradient (its derivative isn't identically zero the way ReLU's is for $z<0$), mitigating dying units while keeping ReLU-like behavior for large $|z|$. GELU weights inputs by how likely they are to be "kept" under a standard normal (a soft, stochastic-regularization-flavored interpretation used in the original paper); SiLU/Swish was found via automated architecture search over activation functions and is identical in spirit but uses the logistic sigmoid instead of the Gaussian CDF as the gate.
+
+<Mermaid chart={`
+graph LR
+  z["pre-activation z"] --> sig["sigmoid: saturates both ends, max slope 0.25"]
+  z --> tanh["tanh: saturates both ends, max slope 1"]
+  z --> relu["ReLU: slope 1 for z>0, slope 0 for z<0 (can die)"]
+  z --> gelu["GELU / SiLU: smooth gate, small negative dip, no hard zero region"]
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+
+def sigmoid(z):
+    return 1 / (1 + np.exp(-z))
+
+def sigmoid_grad(z):
+    s = sigmoid(z)
+    return s * (1 - s)
+
+def relu(z):
+    return np.maximum(0, z)
+
+def relu_grad(z):
+    return (z > 0).astype(float)
+
+def silu(z):
+    return z * sigmoid(z)
+
+def gelu_tanh_approx(z):
+    return 0.5 * z * (1 + np.tanh(np.sqrt(2 / np.pi) * (z + 0.044715 * z**3)))
+
+z = np.linspace(-6, 6, 7)
+print("max sigmoid'(z) over this range:", sigmoid_grad(z).max())  # <= 0.25
+print("ReLU'(z):", relu_grad(z))                                   # 0s and 1s only
+print("SiLU(z):", silu(z))
+print("GELU(z):", gelu_tanh_approx(z))
+```
+
+## Complexity / Practical Comparison
+
+<ComparisonTable
+  headers={["Activation", "Max |derivative|", "Vanishing gradient risk", "Dead-unit risk", "Typical use"]}
+  rows={[
+    ["Sigmoid", "0.25", "Severe in deep nets", "No (never exactly 0 gradient)", "Output layer for binary probabilities, gates in LSTMs"],
+    ["Tanh", "1.0", "Moderate-severe in deep nets", "No", "RNN hidden states (legacy), zero-centered outputs"],
+    ["ReLU", "1.0 (for z>0)", "Minimal for active units", "Yes — dying ReLU", "CNNs, general-purpose default for years"],
+    ["Leaky ReLU / PReLU", "1.0 (max(1, α))", "Minimal", "Reduced (small slope for z<0)", "CNNs where dying ReLU is observed"],
+    ["GELU", "~1.1 (smooth)", "Minimal", "Greatly reduced (non-zero derivative almost everywhere)", "Transformers (BERT, GPT)"],
+    ["SiLU/Swish", "~1.1 (smooth)", "Minimal", "Greatly reduced", "EfficientNet, some Transformer variants"],
+  ]}
+/>
+
+<ProsCons
+  pros={[
+    "ReLU is extremely cheap to compute (a single max operation) and empirically trains deep networks far better than sigmoid/tanh.",
+    "GELU/SiLU retain ReLU's gradient-flow benefits while smoothing out the discontinuity at zero, which empirically improves optimization in very deep Transformer stacks.",
+    "Sigmoid/tanh remain useful precisely where a bounded output is semantically required (gates in LSTMs, output probabilities).",
+  ]}
+  cons={[
+    "Sigmoid/tanh saturate and vanish gradients, making them poor choices for hidden layers in deep networks.",
+    "ReLU units can die permanently if pushed into the all-negative regime, wasting model capacity.",
+    "GELU/SiLU are more expensive to compute than ReLU (involve erf/Gaussian-CDF or sigmoid evaluations), though this is usually negligible next to the matmul cost of large models.",
+  ]}
+/>
+
+## Common Mistakes
+
+<Callout type="warning" title="Pitfalls">
+  - Using sigmoid/tanh in the hidden layers of a deep network "because that's what neural nets use" — this is a common source of untrainable models on anything beyond a few layers.
+  - Diagnosing a stuck loss without checking whether a large fraction of ReLU units have zero activation across the whole batch (a quick way to detect dying ReLU).
+  - Confusing GELU's exact form (uses the Gaussian CDF $\Phi$) with its tanh-based approximation — they're close but not numerically identical; some published results depend on which one was used.
+  - Forgetting that ReLU's derivative at exactly $z=0$ is a convention (implementations differ, typically 0 or 1) rather than a mathematically defined quantity — irrelevant in practice since $z=0$ almost never occurs exactly with floating-point inputs.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What is the maximum value of the sigmoid function's derivative, and why does this cause vanishing gradients in deep networks?",
+    options: [
+      "1.0; because gradients accumulate additively across layers",
+      "0.25; because it occurs where sigmoid(z)=0.5, and multiplying many such factors (≤0.25) across layers during backpropagation shrinks the gradient exponentially with depth",
+      "0.5; because sigmoid is symmetric around 0",
+      "It has no maximum; it grows unboundedly for large |z|",
+    ],
+    answerIndex: 1,
+    explanation: "σ'(z) = σ(z)(1-σ(z)) is maximized at σ(z)=0.5 (i.e., z=0), giving 0.25. Backprop multiplies this factor once per layer, so an L-layer sigmoid network attenuates gradients by roughly 0.25^L.",
+  },
+  {
+    question: "What causes 'dying ReLU' and how do GELU/SiLU mitigate it?",
+    options: [
+      "Dying ReLU happens when the learning rate is too small; GELU fixes it by increasing the learning rate",
+      "A ReLU unit dies when its pre-activation is negative for every training example, making its gradient permanently zero; GELU/SiLU mitigate this with a smooth, non-monotonic gate whose derivative is rarely exactly zero",
+      "Dying ReLU is caused by using too few layers; it cannot be fixed by changing the activation function",
+      "GELU and SiLU eliminate dying units entirely by clipping negative inputs to a small positive constant",
+    ],
+    answerIndex: 1,
+    explanation: "ReLU'(z)=0 for all z<0, so once a unit's input is always negative, its weights receive zero gradient forever. GELU/SiLU replace the hard cutoff with a smooth gate that has nonzero (if small) gradient almost everywhere, including for moderately negative inputs.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Deep Sparse Rectifier Neural Networks", authors: "Glorot, X., Bordes, A., & Bengio, Y.", venue: "AISTATS", year: 2011 },
+  { title: "Gaussian Error Linear Units (GELUs)", authors: "Hendrycks, D., & Gimpel, K.", venue: "arXiv:1606.08415", year: 2016 },
+  { title: "Searching for Activation Functions (Swish/SiLU)", authors: "Ramachandran, P., Zoph, B., & Le, Q. V.", venue: "arXiv:1710.05941", year: 2017 },
+]} />

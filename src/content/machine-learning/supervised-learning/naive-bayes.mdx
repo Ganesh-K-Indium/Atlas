@@ -1,0 +1,211 @@
+---
+title: "Naive Bayes"
+description: "A probabilistic classifier that gets its power (and its name) from a deliberately unrealistic independence assumption — and works remarkably well anyway, especially on text."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["machine-learning", "supervised-learning", "classification", "probabilistic-models", "text-classification"]
+prerequisites: ["Bayes' theorem", "Basic probability (joint vs. conditional probability)", "Logarithms"]
+---
+
+<Prerequisites items={["Bayes' theorem", "Basic probability (joint vs. conditional probability)", "Logarithms"]} />
+
+## Intuition
+
+To classify an email as spam or not spam, you'd ideally want $P(\text{spam} \mid \text{every word and its position and its interactions with every other word})$ — but estimating that joint distribution from a finite dataset is hopeless; there are exponentially many possible word combinations. Naive Bayes sidesteps this by simply *pretending* that, given the class, every feature is independent of every other feature. That assumption is almost always false in reality (word choice absolutely is correlated), which is exactly why the model is called "naive" — yet the classifier that results from this simplification is fast, needs very little data, and is a genuinely strong baseline for text and other high-dimensional sparse data.
+
+<Callout type="tip" title="The core idea">
+  Naive Bayes converts a hard joint-probability estimation problem into $d$ easy univariate ones by assuming features are conditionally independent given the class. It then picks whichever class maximizes the product of those individual per-feature likelihoods, weighted by the class's prior probability.
+</Callout>
+
+## Formal Definition
+
+Given a feature vector $x = (x_1, \dots, x_d)$ and class label $y \in \{1, \dots, K\}$, Bayes' theorem gives the posterior class probability as:
+
+$$
+P(y \mid x) = \frac{P(x \mid y)\,P(y)}{P(x)}
+$$
+
+Since $P(x)$ is the same normalizing constant regardless of which class we're scoring, classification reduces to:
+
+$$
+\hat{y} = \arg\max_y \; P(x \mid y)\,P(y)
+$$
+
+The entire difficulty is in $P(x \mid y) = P(x_1, \dots, x_d \mid y)$ — the joint likelihood of all $d$ features given the class, which in general requires modeling every feature interaction.
+
+## Derivation: from Bayes' theorem to the naive classifier
+
+By the chain rule of probability, the joint likelihood can always be factored exactly (no assumption yet) as:
+
+$$
+P(x_1, \dots, x_d \mid y) = P(x_1 \mid y)\, P(x_2 \mid x_1, y)\, P(x_3 \mid x_1, x_2, y)\cdots P(x_d \mid x_1,\dots,x_{d-1}, y)
+$$
+
+This is exact but useless in practice — the later terms condition on an ever-growing combination of prior features, and we would need to have observed enough data to estimate every such combination. This is where the **"naive" conditional independence assumption** is introduced explicitly:
+
+$$
+\text{Assume: } \; x_i \perp x_j \mid y \quad \text{for all } i \neq j
+$$
+
+i.e., once you know the class, knowing the value of one feature tells you nothing about any other feature's value. Under this assumption every conditioning term above collapses to just $P(x_i \mid y)$:
+
+$$
+P(x_1, \dots, x_d \mid y) \approx \prod_{i=1}^d P(x_i \mid y)
+$$
+
+Substituting back into the Bayes' rule decision rule gives the **Naive Bayes classifier**:
+
+$$
+\hat{y} = \arg\max_y \; P(y) \prod_{i=1}^d P(x_i \mid y)
+$$
+
+In practice this product is computed in log space to avoid numerical underflow from multiplying many small probabilities:
+
+$$
+\hat{y} = \arg\max_y \; \left[ \log P(y) + \sum_{i=1}^d \log P(x_i \mid y) \right]
+$$
+
+Note this is now a **linear function of the log-likelihoods**, which is why Naive Bayes decision boundaries are linear for many common choices of $P(x_i \mid y)$ (e.g., when features are Bernoulli or when they're Gaussian with shared variance across classes).
+
+**Why "naive" and why it works anyway:** the independence assumption is almost never true — in a spam email, the words "free" and "money" absolutely tend to co-occur, so treating them as independent double-counts (or under-counts) evidence. But for *classification* what matters is not the accuracy of the estimated probabilities themselves but whether $\arg\max_y$ picks the correct class — Naive Bayes probabilities are frequently badly calibrated (miscalibrated near 0 or 1) even when the resulting *decisions* are correct, because the ranking across classes is often preserved even under the wrong independence assumption. It also needs far fewer training examples than a full joint model since it estimates $d$ one-dimensional distributions rather than one $d$-dimensional distribution.
+
+### Variants: how $P(x_i \mid y)$ is modeled
+
+- **Multinomial NB**: $x_i$ is a count (e.g., word frequency in a document); $P(x_i \mid y)$ follows a multinomial distribution — the standard choice for bag-of-words text classification.
+- **Bernoulli NB**: $x_i \in \{0, 1\}$ indicates feature presence/absence, ignoring counts.
+- **Gaussian NB**: continuous $x_i$ is modeled as $x_i \mid y \sim \mathcal{N}(\mu_{y,i}, \sigma_{y,i}^2)$, estimated per class per feature from the training data.
+
+### Laplace (additive) smoothing
+
+If a word never appears in training documents of a given class, its estimated likelihood $P(x_i \mid y) = 0$, which zeroes out the *entire* product for that class regardless of all other evidence — a single unseen word can veto an otherwise overwhelming case. Laplace smoothing fixes this by adding a pseudocount $\alpha$ (typically 1) to every count:
+
+$$
+P(x_i \mid y) = \frac{\text{count}(x_i, y) + \alpha}{\text{count}(y) + \alpha \cdot |V|}
+$$
+
+where $|V|$ is the vocabulary size, ensuring every probability stays strictly positive.
+
+<Mermaid chart={`graph TD
+  A["Document x = (x1...xd)"] --> B["For each class y: compute log P(y)"]
+  B --> C["Add sum of log P(xi | y) for every feature, assuming independence"]
+  C --> D["Score(y) = log P(y) + sum_i log P(xi | y)"]
+  D --> E["Predict y with the highest Score(y)"]
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+from sklearn.naive_bayes import MultinomialNB, GaussianNB
+from sklearn.feature_extraction.text import CountVectorizer
+
+# --- Text classification with Multinomial Naive Bayes ---
+docs = ["free money now", "meeting agenda attached", "free free free win money",
+        "project deadline tomorrow", "win a free prize", "quarterly report attached"]
+labels = [1, 0, 1, 0, 1, 0]  # 1 = spam, 0 = not spam
+
+vectorizer = CountVectorizer()
+X = vectorizer.fit_transform(docs)
+clf = MultinomialNB(alpha=1.0)  # alpha = Laplace smoothing pseudocount
+clf.fit(X, labels)
+print(clf.predict(vectorizer.transform(["free free win"])))
+
+# --- From-scratch Multinomial Naive Bayes with Laplace smoothing ---
+def fit_naive_bayes(X, y, alpha=1.0):
+    classes = np.unique(y)
+    class_priors = {c: np.mean(y == c) for c in classes}
+    feature_probs = {}
+    for c in classes:
+        X_c = X[y == c]
+        counts = X_c.sum(axis=0) + alpha           # additive smoothing
+        feature_probs[c] = counts / counts.sum()
+    return class_priors, feature_probs
+
+def predict_naive_bayes(X, class_priors, feature_probs):
+    scores = []
+    for x in X:
+        class_scores = {
+            c: np.log(class_priors[c]) + np.sum(x * np.log(feature_probs[c]))
+            for c in class_priors
+        }
+        scores.append(max(class_scores, key=class_scores.get))
+    return scores
+
+X_dense = X.toarray()
+priors, probs = fit_naive_bayes(X_dense, np.array(labels))
+print(predict_naive_bayes(X_dense, priors, probs))
+```
+
+## Complexity
+
+| Operation | Time | Space | Notes |
+| --- | --- | --- | --- |
+| Training | $O(n \cdot d)$ | $O(K \cdot d)$ | One pass over the data to count/estimate per-class, per-feature statistics |
+| Inference (per example) | $O(K \cdot d)$ | $O(K \cdot d)$ | Sum of $d$ log-likelihoods for each of $K$ classes |
+
+<ComparisonTable
+  headers={["Variant", "Feature type", "Typical use case"]}
+  rows={[
+    ["Multinomial NB", "Counts / frequencies", "Text classification with bag-of-words or TF counts"],
+    ["Bernoulli NB", "Binary presence/absence", "Short text, feature presence matters more than frequency"],
+    ["Gaussian NB", "Continuous", "Tabular numeric data with roughly bell-shaped per-class feature distributions"],
+  ]}
+/>
+
+<ProsCons
+  pros={[
+    "Trains in a single linear pass over the data and needs very little training data relative to the number of features — ideal for high-dimensional sparse data like text.",
+    "Naturally handles multi-class problems and streaming/online updates (counts can be updated incrementally).",
+    "A genuinely strong, fast baseline for spam filtering, sentiment analysis, and document categorization.",
+  ]}
+  cons={[
+    "The independence assumption is almost always violated, which can produce poorly calibrated probability estimates even when classification accuracy remains good.",
+    "Zero-frequency features would veto a class entirely without smoothing.",
+    "Struggles when features are strongly correlated and that correlation itself carries class-discriminative information (e.g., XOR-like feature interactions).",
+  ]}
+/>
+
+## Common Mistakes
+
+<Callout type="warning" title="Frequent errors">
+  - Forgetting Laplace/additive smoothing, causing unseen words at test time to zero out an entire class's score.
+  - Using Gaussian NB on features that are clearly not unimodal/bell-shaped per class — check the assumption or bin/transform the feature first.
+  - Treating Naive Bayes's output probabilities as well-calibrated — they are often overconfident (pushed toward 0 or 1) due to the independence assumption compounding correlated evidence.
+  - Mixing count-based features with Multinomial NB's Bernoulli-style presence features without picking the matching variant.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What specific assumption makes Naive Bayes 'naive,' and why is it introduced?",
+    options: [
+      "That the class prior is uniform across all classes",
+      "That features are conditionally independent given the class label, which reduces estimating one hard d-dimensional joint distribution to estimating d easy one-dimensional distributions",
+      "That the data is linearly separable",
+      "That there are only two classes",
+    ],
+    answerIndex: 1,
+    explanation: "The exact chain-rule factorization of P(x|y) requires conditioning each feature on all previous features, which is infeasible to estimate from finite data. Assuming x_i is independent of x_j given y collapses the joint likelihood into a simple product of per-feature likelihoods, at the cost of an assumption that is almost never literally true.",
+  },
+  {
+    question: "Why does Naive Bayes often classify correctly even though its independence assumption is violated and its probability estimates are poorly calibrated?",
+    options: [
+      "It doesn't — Naive Bayes always performs poorly when features are correlated",
+      "Classification only requires the argmax over classes to be correct, and the relative ranking of class scores is frequently preserved even when the absolute probability estimates are distorted by the independence assumption",
+      "The Laplace smoothing term corrects all calibration errors",
+      "Naive Bayes secretly models feature correlations internally",
+    ],
+    answerIndex: 1,
+    explanation: "Miscalibration affects the magnitude of P(x|y) for each class similarly in many practical cases, so the argmax decision boundary can remain correct even when the underlying probabilities are systematically over- or under-confident.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "The Elements of Statistical Learning", authors: "Hastie, T., Tibshirani, R., & Friedman, J.", venue: "Springer", year: 2009 },
+  { title: "Pattern Recognition and Machine Learning", authors: "Bishop, C. M.", venue: "Springer", year: 2006 },
+  { title: "Introduction to Information Retrieval (Chapter 13: Text Classification and Naive Bayes)", authors: "Manning, C. D., Raghavan, P., & Schütze, H.", venue: "Cambridge University Press", year: 2008 },
+]} />

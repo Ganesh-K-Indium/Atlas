@@ -1,0 +1,178 @@
+---
+title: "T5 & Encoder-Decoder LLMs"
+description: "How T5 reframed every NLP task as text-in, text-out, and why an encoder-decoder architecture is the natural fit for tasks that need both bidirectional input understanding and autoregressive generation."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "nlp", "transformers", "t5", "encoder-decoder", "transfer-learning"]
+prerequisites: ["The Transformer Architecture", "BERT & Encoder-Only Models", "GPT & Decoder-Only Models"]
+---
+
+<Prerequisites items={["The Transformer Architecture", "BERT & Encoder-Only Models", "GPT & Decoder-Only Models"]} />
+
+## Intuition
+
+By the time T5 (Raffel et al., 2019) was published, NLP had a proliferation problem: translation used encoder-decoder models, classification used encoder-only models with task-specific heads, summarization used yet another setup, and each task tended to come with its own architecture, loss function, and output format. T5's proposal was almost provocatively simple: **stop customizing the architecture per task. Instead, reframe every task — classification, translation, summarization, regression, anything — as converting one piece of text into another piece of text**, and use a single model, a single objective, and a single decoding procedure for all of them.
+
+<Callout type="tip" title="The one-sentence idea">
+  T5 treats every NLP task as "text in, text out" — even a task like sentiment classification, whose natural output is a label, gets reframed as generating the literal string "positive" or "negative" — which lets one encoder-decoder Transformer, trained one way, be applied unchanged to any task by just changing the input text and a short task prefix.
+</Callout>
+
+## The Text-to-Text Unification
+
+Concretely, every training example becomes an (input text, target text) pair, with a short prefix indicating the task:
+
+- Translation: input `"translate English to German: That is good."` → target `"Das ist gut."`
+- Summarization: input `"summarize: <long article text>"` → target `"<short summary>"`
+- Classification (e.g., sentence acceptability): input `"cola sentence: The dog barked loudly."` → target `"acceptable"`
+- Regression-like similarity scoring: input `"stsb sentence1: ... sentence2: ..."` → target a string like `"3.8"`
+
+Every one of these is trained with the *same* objective — maximize the likelihood of generating the correct target text token by token — and the *same* architecture and loss function, with no task-specific output heads or architecture changes. What used to require bespoke classification heads, regression heads, and generation heads collapses into one shared interface: text goes in, text comes out, and the "task" is communicated entirely through the input text itself (the prefix).
+
+<Callout type="note">
+  This is the same principle behind modern instruction-following LLMs prompted purely in natural language — T5 is an early, systematic demonstration that a huge swath of NLP tasks can be losslessly reframed as text generation, removing the need for task-specific architecture.
+</Callout>
+
+## Why Encoder-Decoder, Not Encoder-Only or Decoder-Only
+
+T5 deliberately kept the full encoder-decoder architecture from the original Transformer (see [The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture)) rather than adopting either of the single-stack designs. The reasoning follows directly from what each stack is good at:
+
+- **Encoder-only (BERT-style)** gives every input token full bidirectional context — ideal for *understanding* the input — but has no generation mechanism at all: there's no way to autoregressively produce a novel output sequence of arbitrary length from a BERT-style stack (see [BERT & Encoder-Only Models](/docs/deep-learning/attention-transformers/bert)). Fine for classification, unusable for translation or summarization where the output is a new sequence.
+- **Decoder-only (GPT-style)** can generate arbitrary-length output autoregressively, but every token — including tokens that are part of the "input" if input and output are just concatenated into one sequence — is restricted to causal, left-to-right attention (see [GPT & Decoder-Only Models](/docs/deep-learning/attention-transformers/gpt-decoder-only)). That means even the *input* portion of the sequence can't be processed with full bidirectional context under a pure causal mask, which is a real disadvantage for tasks like translation where understanding the *entire* source sentence — including words that come later in it — before generating anything is valuable.
+- **Encoder-decoder** gets both properties at once by *architecturally splitting the two jobs*: the encoder processes the entire input with full bidirectional self-attention (no causal mask — every input token sees every other input token, exactly like BERT), producing a rich representation of the whole input. The decoder then generates the output autoregressively with causal self-attention (exactly like GPT) over its own previously generated tokens, while also **cross-attending** to the encoder's bidirectional representations at every decoding step — the same query-attends-to-a-different-sequence's-keys/values mechanism introduced by attention in [Seq2Seq & Encoder-Decoder Models](/docs/deep-learning/sequence-models/seq2seq), just implemented with Transformer blocks instead of RNNs.
+
+This gives T5 (and encoder-decoder models generally) bidirectional understanding of a *distinct* input sequence, combined with autoregressive generation of an output sequence — precisely the two properties that neither single-stack architecture provides simultaneously.
+
+<Mermaid chart={`
+graph TD
+  In["Input text + task prefix"] --> Enc["Encoder: bidirectional self-attention (no causal mask)"]
+  Enc --> EncOut["Encoder hidden states (full input representation)"]
+  EncOut --> CrossAttn["Decoder cross-attention (query=decoder, key/value=encoder states)"]
+  PrevOut["Previously generated output tokens"] --> DecSelf["Decoder: causal self-attention"]
+  DecSelf --> CrossAttn
+  CrossAttn --> DecFF["Decoder feed-forward"]
+  DecFF --> NextTok["Next output token"]
+  NextTok -.fed back as input.-> PrevOut
+`} />
+
+## Pretraining Objective: Span Corruption
+
+T5's pretraining objective generalizes BERT's masked language modeling to the text-to-text setting: instead of masking individual tokens and predicting them in place, T5 corrupts **contiguous spans** of the input, replaces each corrupted span with a single sentinel token, and trains the decoder to *generate* the missing spans (each preceded by its sentinel) as the target output:
+
+- Input (corrupted): `"Thank you <X> me to your party <Y> week."`
+- Target (to generate): `"<X> for inviting <Y> last <Z>"`
+
+This keeps the same "text in, text out" framing even for pretraining — the encoder sees the corrupted input bidirectionally, and the decoder autoregressively generates the reconstruction, giving the model practice at exactly the encoder-decoder mechanics it will use for every downstream task.
+
+## Encoder-Only vs. Decoder-Only vs. Encoder-Decoder
+
+<ComparisonTable
+  headers={["Architecture", "Input processing", "Output generation", "Examples", "Best for"]}
+  rows={[
+    ["Encoder-only", "Full bidirectional attention", "None — no autoregressive generation mechanism", "BERT, RoBERTa", "Classification, extraction, embeddings"],
+    ["Decoder-only", "Causal attention (even over the 'input' portion, if concatenated)", "Autoregressive, causal self-attention", "GPT family, Llama, DeepSeek, Qwen", "Open-ended generation; single unified stack for prompt + completion"],
+    ["Encoder-decoder", "Encoder: full bidirectional attention over input", "Decoder: causal self-attention + cross-attention to encoder output", "T5, original Transformer, BART", "Tasks needing both deep bidirectional input understanding and separate autoregressive output generation: translation, summarization"],
+  ]}
+/>
+
+<Callout type="warning" title="Not a strict superiority ranking">
+  Encoder-decoder is not "strictly better" than decoder-only — it's a different set of tradeoffs. Decoder-only architectures dominate modern general-purpose LLMs partly because a single causal stack over a concatenated prompt+completion is simpler to scale, cache, and serve, and in practice performs strongly on many input-understanding-plus-generation tasks too via careful prompting — even without a separate bidirectional encoder. Encoder-decoder architectures remain a strong, sometimes more parameter-efficient choice specifically when the input and output are clearly distinct sequences with a fixed input-then-generate structure, like translation.
+</Callout>
+
+## Complexity
+
+| Component | Time | Notes |
+| --- | --- | --- |
+| Encoder self-attention | $O(n_{\text{in}}^2 \cdot d)$ | Computed once per input, bidirectional, fully parallel |
+| Decoder self-attention (causal) | $O(n_{\text{out}}^2 \cdot d)$ | Sequential at inference, one token at a time |
+| Decoder cross-attention | $O(n_{\text{out}} \cdot n_{\text{in}} \cdot d)$ per full generation | Recomputed (or cached) at every decoding step against the fixed encoder output |
+
+Because the encoder only needs to run once per input (its output can be cached and reused across every decoding step), encoder-decoder models don't pay the encoder's cost repeatedly during generation — only the decoder and cross-attention costs recur per output token.
+
+## Code Sketch
+
+```python
+import torch
+import torch.nn as nn
+
+class T5StyleModel(nn.Module):
+    def __init__(self, encoder, decoder, output_head):
+        super().__init__()
+        self.encoder = encoder          # bidirectional Transformer encoder, no causal mask
+        self.decoder = decoder          # causal self-attention + cross-attention to encoder output
+        self.output_head = output_head  # projects to vocab logits
+
+    def forward(self, input_ids, decoder_input_ids):
+        encoder_hidden = self.encoder(input_ids)                 # full bidirectional pass, once
+        decoder_hidden = self.decoder(decoder_input_ids, encoder_hidden)  # causal self-attn + cross-attn
+        logits = self.output_head(decoder_hidden)
+        return logits
+
+
+def format_as_text_to_text(task, **fields):
+    """Every task becomes a (prefix + input text) -> target text pair."""
+    if task == "translate_en_de":
+        return f"translate English to German: {fields['text']}"
+    if task == "summarize":
+        return f"summarize: {fields['text']}"
+    if task == "cola":  # linguistic acceptability, framed as text generation
+        return f"cola sentence: {fields['text']}"
+    raise ValueError(f"Unknown task: {task}")
+
+
+# Training: identical cross-entropy loss over generated tokens for every task type
+def compute_loss(model, input_ids, target_ids):
+    decoder_input = target_ids[:, :-1]
+    labels = target_ids[:, 1:]
+    logits = model(input_ids, decoder_input)
+    return nn.functional.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
+```
+
+<KeyTakeaways items={[
+  "T5 reframes every NLP task — classification, regression, translation, summarization — as text-in, text-out, using a task prefix in the input and generating the answer as literal text, eliminating task-specific output heads.",
+  "Encoder-decoder architecture gives both properties that neither single-stack design provides alone: full bidirectional attention over the input (via the encoder, like BERT) and autoregressive generation of a distinct output sequence (via the causal decoder, like GPT), linked by cross-attention.",
+  "T5's pretraining objective (span corruption) generalizes BERT's masked language modeling into the text-to-text framing: corrupt contiguous spans, train the decoder to generate the missing spans as output text.",
+  "Encoder-decoder is a strong fit specifically when input and output are clearly distinct sequences (translation, summarization); decoder-only remains the dominant choice for general-purpose, open-ended interaction due to serving and scaling simplicity.",
+]} />
+
+## Common Mistakes
+
+- **Assuming text-to-text framing is just a data formatting trick with no real effect.** It genuinely unifies the loss function and architecture across tasks — before this, classification and generation typically needed different heads and losses entirely; T5 needs neither.
+- **Thinking encoder-decoder models can't do classification.** They can — the task is just reframed as generating the label text (e.g., the literal string "acceptable"), decoded the same way any other output would be.
+- **Believing decoder-only models can't process input bidirectionally at all.** Some decoder-only variants use a "prefix" trick (bidirectional attention within the prompt portion, causal thereafter) to partially recover this — but the standard, fully causal decoder-only setup does restrict even the input portion to causal attention if input and output are simply concatenated.
+- **Treating encoder-decoder as strictly superior to decoder-only.** It's a different tradeoff, not a strict improvement — see the callout above; modern general-purpose LLMs are overwhelmingly decoder-only for serving-efficiency and scaling reasons, not because encoder-decoder is worse in principle at translation-shaped tasks.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What does T5's 'text-to-text' framing actually change about how different NLP tasks are handled?",
+    options: [
+      "It only changes the tokenizer used for different tasks",
+      "It reframes every task's output — including labels for classification or numeric scores for regression — as literal generated text, so one shared architecture, loss function, and decoding procedure can be used for all tasks instead of task-specific output heads",
+      "It restricts T5 to only generation tasks, excluding classification",
+      "It removes the need for any pretraining before fine-tuning",
+    ],
+    answerIndex: 1,
+    explanation: "Under text-to-text framing, a classification task's output (e.g., 'positive'/'negative') and a translation task's output are both just generated text, scored with the same cross-entropy generation loss — eliminating the need for separate classification/regression heads per task.",
+  },
+  {
+    question: "Why does T5 use an encoder-decoder architecture rather than encoder-only or decoder-only?",
+    options: [
+      "Encoder-decoder models train faster than either single-stack design",
+      "The encoder provides full bidirectional attention over the entire input (which encoder-only lacks a generation mechanism to exploit, and decoder-only can't provide under a fully causal mask), while the causal decoder with cross-attention provides autoregressive generation of a distinct output sequence (which encoder-only cannot do at all) — encoder-decoder is the only one of the three that supplies both properties at once",
+      "Encoder-decoder models require fewer parameters than decoder-only models for the same task",
+      "Decoder-only models cannot be pretrained on unlabeled text",
+    ],
+    answerIndex: 1,
+    explanation: "Encoder-only (BERT-style) has bidirectional understanding but no generation mechanism. Decoder-only (GPT-style) can generate but under a fully causal mask, even the input portion doesn't get full bidirectional processing if simply concatenated. Encoder-decoder architecturally separates the two jobs: bidirectional encoder for input understanding, causal decoder with cross-attention for output generation.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer (T5)", authors: "Raffel, C. et al.", venue: "JMLR", year: 2020, url: "https://arxiv.org/abs/1910.10683" },
+  { title: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding", authors: "Devlin, J. et al.", venue: "NAACL", year: 2019, url: "https://arxiv.org/abs/1810.04805" },
+  { title: "Attention Is All You Need", authors: "Vaswani, A. et al.", venue: "NeurIPS", year: 2017, url: "https://arxiv.org/abs/1706.03762" },
+]} />

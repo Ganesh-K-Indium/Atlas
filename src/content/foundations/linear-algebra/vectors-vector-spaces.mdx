@@ -1,0 +1,203 @@
+---
+title: "Vectors & Vector Spaces"
+description: "The single abstraction — points as arrows, arrows as lists of numbers — that every model architecture, embedding, and gradient update is quietly built on."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["linear-algebra", "math", "vectors"]
+prerequisites: ["High-school algebra", "Basic set notation"]
+---
+
+## Intuition
+
+Before a neural network can learn anything, every piece of data it touches — a word, a pixel, a user, a sentence — has to become a list of numbers. That list is a **vector**. Everything downstream (dot products, matrix multiplies, gradients, attention scores) is arithmetic performed on these lists, so understanding what a vector *is*, and what rules it obeys, is the actual foundation everything else in this section stands on.
+
+<Callout type="tip" title="One-sentence definition">
+  A vector is an element of a set (a "vector space") that you're allowed to add to other elements of that set and scale by a number, and those two operations behave the way addition and scaling intuitively should.
+</Callout>
+
+Geometrically, in $\mathbb{R}^2$ or $\mathbb{R}^3$, a vector is an arrow with a length and a direction — equivalently, a point relative to the origin. Algebraically, in $\mathbb{R}^n$, a vector is just an ordered tuple of $n$ real numbers, $v = (v_1, v_2, \ldots, v_n)$. Both pictures are useful: the geometric one builds intuition, the algebraic one is what actually gets implemented in code.
+
+## Formal Definition
+
+A **vector space** $V$ over a field $\mathbb{F}$ (for our purposes, always $\mathbb{R}$) is a set equipped with two operations — vector addition $+: V \times V \to V$ and scalar multiplication $\cdot: \mathbb{F} \times V \to V$ — satisfying eight axioms for all $u, v, w \in V$ and $a, b \in \mathbb{F}$:
+
+1. **Associativity of addition:** $(u + v) + w = u + (v + w)$
+2. **Commutativity of addition:** $u + v = v + u$
+3. **Additive identity:** there exists $0 \in V$ such that $v + 0 = v$
+4. **Additive inverse:** for every $v$, there exists $-v$ such that $v + (-v) = 0$
+5. **Compatibility of scalar multiplication:** $a(bv) = (ab)v$
+6. **Identity element of scalar multiplication:** $1v = v$
+7. **Distributivity over vector addition:** $a(u + v) = au + av$
+8. **Distributivity over scalar addition:** $(a + b)v = av + bv$
+
+Any set with operations obeying these eight rules is a vector space — the elements don't have to look like arrows at all. Polynomials of degree $\le n$, $m \times n$ matrices, and continuous functions on $[0, 1]$ are all vector spaces under ordinary addition and scalar multiplication. This is precisely why linear algebra generalizes so far beyond "lists of numbers": once you prove a theorem using only the eight axioms, it holds for every vector space, including ones whose "vectors" are functions.
+
+The most important vector space in applied ML is simply $\mathbb{R}^n$: $n$-tuples of real numbers with componentwise addition and scaling. Every embedding vector, weight vector, and feature vector you'll encounter lives here.
+
+### Linear Combinations, Span, and Independence
+
+Given vectors $v_1, \ldots, v_k \in V$ and scalars $c_1, \ldots, c_k \in \mathbb{R}$, the expression
+
+$$
+c_1 v_1 + c_2 v_2 + \cdots + c_k v_k
+$$
+
+is a **linear combination**. The set of *all* linear combinations of $v_1, \ldots, v_k$ is their **span**, $\text{span}(v_1, \ldots, v_k)$ — a subspace of $V$.
+
+The vectors $v_1, \ldots, v_k$ are **linearly independent** if the only linear combination equal to the zero vector is the trivial one:
+
+$$
+c_1 v_1 + \cdots + c_k v_k = 0 \implies c_1 = c_2 = \cdots = c_k = 0
+$$
+
+Equivalently: no vector in the set can be written as a linear combination of the others. If they *are* dependent, at least one vector is redundant — it carries no information the others don't already provide.
+
+A **basis** of $V$ is a linearly independent set that spans $V$. Every vector in $V$ can then be written as a linear combination of basis vectors in *exactly one way*. The number of vectors in any basis of $V$ is an invariant called the **dimension** of $V$, written $\dim(V)$.
+
+### Inner (Dot) Product, Norm, and Angle
+
+The **dot product** (a specific inner product) of $u, v \in \mathbb{R}^n$ is
+
+$$
+u \cdot v = u^\top v = \sum_{i=1}^n u_i v_i
+$$
+
+It induces a notion of length (the **Euclidean norm**):
+
+$$
+\|v\| = \sqrt{v \cdot v} = \sqrt{\sum_{i=1}^n v_i^2}
+$$
+
+and a notion of angle between two nonzero vectors:
+
+$$
+\cos\theta = \frac{u \cdot v}{\|u\|\,\|v\|}
+$$
+
+Two vectors are **orthogonal** if $u \cdot v = 0$ (i.e. $\theta = 90°$). This single number — the dot product — is the arithmetic core of nearly every similarity measure in ML: cosine similarity between embeddings, attention scores in transformers, and the linear map $Wx$ itself are all sums of dot products.
+
+## Worked Example: Checking Independence and Finding a Basis
+
+Consider three vectors in $\mathbb{R}^3$:
+
+$$
+v_1 = \begin{pmatrix}1\\0\\1\end{pmatrix}, \quad
+v_2 = \begin{pmatrix}0\\1\\1\end{pmatrix}, \quad
+v_3 = \begin{pmatrix}1\\1\\2\end{pmatrix}
+$$
+
+**Step 1 — set up the dependence equation.** We ask whether $c_1 v_1 + c_2 v_2 + c_3 v_3 = 0$ has a nontrivial solution:
+
+$$
+c_1\begin{pmatrix}1\\0\\1\end{pmatrix} + c_2\begin{pmatrix}0\\1\\1\end{pmatrix} + c_3\begin{pmatrix}1\\1\\2\end{pmatrix} = \begin{pmatrix}0\\0\\0\end{pmatrix}
+$$
+
+This gives the system:
+
+$$
+c_1 + c_3 = 0, \qquad c_2 + c_3 = 0, \qquad c_1 + c_2 + 2c_3 = 0
+$$
+
+**Step 2 — solve.** From the first two equations, $c_1 = -c_3$ and $c_2 = -c_3$. Substituting into the third: $-c_3 - c_3 + 2c_3 = 0$, which is satisfied for *any* $c_3$. Choosing $c_3 = 1$ gives $c_1 = -1, c_2 = -1, c_3 = 1$ — a nontrivial solution.
+
+**Conclusion:** $v_1, v_2, v_3$ are **linearly dependent**; specifically $v_3 = v_1 + v_2$ (check: $(1,0,1) + (0,1,1) = (1,1,2)$ ✓). So $\{v_1, v_2, v_3\}$ spans only a 2-dimensional subspace of $\mathbb{R}^3$, even though we started with three vectors. $\{v_1, v_2\}$ alone is a linearly independent set and forms a basis for that subspace (a plane through the origin).
+
+<Mermaid chart={`
+graph TD
+  A["Set of vectors v1...vk"] --> B{"Any nontrivial linear combo = 0?"}
+  B -->|"No"| C["Linearly independent"]
+  B -->|"Yes"| D["Linearly dependent — at least one vector is redundant"]
+  C --> E{"Do they span V?"}
+  E -->|"Yes"| F["Basis of V — dim(V) = k"]
+  E -->|"No"| G["Basis of a smaller subspace"]
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+
+v1 = np.array([1, 0, 1])
+v2 = np.array([0, 1, 1])
+v3 = np.array([1, 1, 2])
+
+V = np.column_stack([v1, v2, v3])   # 3x3 matrix, vectors as columns
+rank = np.linalg.matrix_rank(V)
+print(rank)  # 2 -> the three vectors span only a 2-D subspace, so they're dependent
+
+# Dot product, norm, and angle
+u = np.array([1.0, 2.0, 3.0])
+w = np.array([-1.0, 0.0, 2.0])
+
+dot = u @ w
+norm_u = np.linalg.norm(u)
+norm_w = np.linalg.norm(w)
+cos_theta = dot / (norm_u * norm_w)
+print(dot, norm_u, norm_w, cos_theta)
+```
+
+## Complexity
+
+| Operation | Time complexity | Space |
+| --- | --- | --- |
+| Vector addition / scaling ($\mathbb{R}^n$) | $O(n)$ | $O(n)$ |
+| Dot product | $O(n)$ | $O(1)$ extra |
+| Norm | $O(n)$ | $O(1)$ extra |
+| Checking linear independence of $k$ vectors in $\mathbb{R}^n$ (via rank / Gaussian elimination) | $O(k^2 n)$ (roughly, dominated by elimination) | $O(kn)$ |
+
+<KeyTakeaways items={[
+  "A vector space is defined by two operations (addition, scalar multiplication) obeying eight axioms — 'vectors' can be arrows, tuples, matrices, or even functions.",
+  "Linear independence means no vector in a set is redundant; a basis is an independent spanning set, and its size is the dimension of the space.",
+  "The dot product is the single arithmetic primitive behind norms, angles, cosine similarity, and every linear layer's forward pass.",
+  "Embeddings in ML are just vectors in R^n; two embeddings being 'similar' almost always means their dot product or cosine similarity is large.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Recognizing that 'linear' operations preserve the vector-space structure — this is what makes composing linear layers, PCA projections, and attention mechanisms tractable to reason about.",
+    "Using rank/independence checks to catch redundant or collinear features before feeding them into a model.",
+  ]}
+  cons={[
+    "Confusing a spanning set with a basis — a spanning set can contain redundant vectors; only a *linearly independent* spanning set is a basis.",
+    "Assuming any n vectors in R^n automatically form a basis — they only do if they're linearly independent (equivalently, if the matrix they form has full rank).",
+    "Treating the dot product as inherently a 'similarity' measure without normalizing — an unnormalized dot product is dominated by vector magnitude, not just direction, which is why cosine similarity divides it out.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Given three vectors in R^3, what does it mean if the matrix formed by stacking them as columns has rank 2?",
+    options: [
+      "The vectors are linearly independent and form a basis for R^3",
+      "The vectors are linearly dependent; they span only a 2-dimensional subspace of R^3",
+      "The vectors are orthogonal to each other",
+      "The matrix is not invertible, which has no implication for the vectors' independence",
+    ],
+    answerIndex: 1,
+    explanation: "Rank equals the dimension of the column space, i.e. the span of the vectors. Rank 2 with 3 vectors means one vector is a linear combination of the other two — they're dependent and only span a plane, not all of R^3.",
+  },
+  {
+    question: "Why must a vector space's addition operation be commutative and associative rather than just 'defined somehow'?",
+    options: [
+      "These axioms are arbitrary conventions with no practical consequence",
+      "Without them, expressions like linear combinations (sums of scaled vectors) would depend on the order and grouping of terms, breaking basic algebraic manipulations that all of linear algebra relies on",
+      "They are only needed for infinite-dimensional spaces like function spaces",
+      "Only scalar multiplication needs to be well-behaved; addition axioms are optional",
+    ],
+    answerIndex: 1,
+    explanation: "Linear combinations, spans, and bases are all defined via sums of scaled vectors. If addition weren't commutative/associative, 'the' linear combination c1v1 + c2v2 + c3v3 wouldn't even be well-defined independent of evaluation order, and nearly every subsequent theorem (dimension, uniqueness of coordinates, etc.) would collapse.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Introduction to Linear Algebra", authors: "Gilbert Strang", venue: "Wellesley-Cambridge Press", year: 2023 },
+  { title: "Linear Algebra Done Right", authors: "Sheldon Axler", venue: "Springer", year: 2015 },
+  { title: "Mathematics for Machine Learning", authors: "Marc Peter Deisenroth, A. Aldo Faisal, Cheng Soon Ong", venue: "Cambridge University Press", year: 2020 },
+]} />

@@ -1,0 +1,206 @@
+---
+title: "Support Vector Machines"
+description: "A classifier built entirely around one geometric question — which hyperplane leaves the widest possible margin between classes — and the kernel trick that lets it draw curved boundaries without ever leaving that linear framework."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["machine-learning", "supervised-learning", "classification", "svm", "kernel-methods"]
+prerequisites: ["Linear algebra (dot products, hyperplanes)", "Convex optimization / Lagrange multipliers basics", "Linear regression or logistic regression"]
+---
+
+<Prerequisites items={["Linear algebra (dot products, hyperplanes)", "Convex optimization / Lagrange multipliers basics", "Linear regression or logistic regression"]} />
+
+## Intuition
+
+Many hyperplanes can separate two linearly separable classes perfectly. A Support Vector Machine (SVM) picks the *one specific* hyperplane that maximizes the distance ("margin") to the nearest point of either class. Intuitively, a wide margin means the decision boundary has the most breathing room before it starts misclassifying points near the boundary — this tends to generalize better than a boundary that just barely threads between the classes. Only the points closest to the boundary — the **support vectors** — actually determine where that boundary sits; every other point could be moved (or deleted) without changing the solution at all.
+
+<Callout type="tip" title="The core idea">
+  SVMs solve for the hyperplane that maximizes the margin between classes, and only the closest points (the support vectors) matter for the solution. The **kernel trick** then lets this same linear-margin machinery draw arbitrarily curved decision boundaries, by implicitly computing dot products as if the data had been mapped into a much higher-dimensional space — without ever actually constructing that mapping.
+</Callout>
+
+## Formal Definition
+
+For linearly separable data $\{(x_i, y_i)\}_{i=1}^n$ with $y_i \in \{-1, +1\}$, a separating hyperplane is $w^\top x + b = 0$. The (signed) distance from a point $x_i$ to this hyperplane is $\frac{y_i(w^\top x_i + b)}{\lVert w \rVert}$. The margin is defined as the distance from the hyperplane to the nearest point of either class.
+
+## Derivation: margin maximization
+
+By rescaling $w$ and $b$, we can always choose the scale such that the closest points satisfy $y_i(w^\top x_i + b) = 1$ exactly (this is just a normalization convention, not a new assumption). Under this scaling, every training point must satisfy:
+
+$$
+y_i(w^\top x_i + b) \geq 1 \quad \text{for all } i
+$$
+
+and the margin (distance from the hyperplane to the nearest correctly-scaled point) becomes exactly $\frac{1}{\lVert w \rVert}$. Maximizing the margin is therefore equivalent to minimizing $\lVert w \rVert$, or more conveniently (for a smooth, differentiable objective) minimizing $\frac{1}{2}\lVert w \rVert^2$:
+
+$$
+\min_{w, b} \; \frac{1}{2}\lVert w \rVert^2 \quad \text{subject to} \quad y_i(w^\top x_i + b) \geq 1 \; \; \forall i
+$$
+
+This is the **hard-margin SVM**: a convex quadratic program. Introducing Lagrange multipliers $\alpha_i \geq 0$ for each constraint gives the Lagrangian $\mathcal{L} = \frac{1}{2}\lVert w \rVert^2 - \sum_i \alpha_i\big[y_i(w^\top x_i + b) - 1\big]$. Setting $\partial \mathcal{L}/\partial w = 0$ and $\partial \mathcal{L}/\partial b = 0$ gives:
+
+$$
+w = \sum_i \alpha_i y_i x_i, \qquad \sum_i \alpha_i y_i = 0
+$$
+
+Substituting back yields the **dual problem**, which depends on the data *only through pairwise dot products* $x_i^\top x_j$:
+
+$$
+\max_{\alpha} \; \sum_i \alpha_i - \frac{1}{2}\sum_{i,j}\alpha_i \alpha_j y_i y_j (x_i^\top x_j) \quad \text{s.t. } \alpha_i \geq 0, \; \sum_i \alpha_i y_i = 0
+$$
+
+By the KKT complementary slackness conditions, $\alpha_i > 0$ only for points sitting exactly on the margin boundary (where the inequality constraint is tight) — these are precisely the **support vectors**. Every other point has $\alpha_i = 0$ and contributes nothing to $w$, which is why the solution depends only on the support vectors and is unaffected by moving or removing any non-support-vector point.
+
+### Soft margin and hinge loss
+
+Real data is rarely perfectly separable. The **soft-margin SVM** introduces slack variables $\xi_i \geq 0$ allowing some points to violate the margin, penalized linearly:
+
+$$
+\min_{w,b,\xi} \; \frac{1}{2}\lVert w \rVert^2 + C\sum_i \xi_i \quad \text{s.t. } y_i(w^\top x_i + b) \geq 1 - \xi_i, \; \xi_i \geq 0
+$$
+
+At the optimum, $\xi_i = \max(0,\, 1 - y_i(w^\top x_i + b))$ — solving out the slack variable this way turns the constrained problem into the equivalent unconstrained form:
+
+$$
+\min_{w,b} \; \frac{1}{2}\lVert w \rVert^2 + C\sum_i \max\big(0,\, 1 - y_i(w^\top x_i + b)\big)
+$$
+
+The term $\max(0, 1-z)$ is the **hinge loss**. It is exactly zero once a point is correctly classified *and* outside the margin ($z = y_i(w^\top x_i+b) \geq 1$), and grows linearly as a point moves inside the margin or is misclassified. Unlike logistic regression's log-loss, which keeps demanding ever-higher confidence forever, hinge loss stops penalizing a point the instant it clears the margin — this "gives up early" once a point is safely classified, which is exactly why only points near or inside the margin end up as support vectors (all others incur zero loss and zero gradient). $C$ controls the tradeoff: large $C$ penalizes margin violations heavily (narrower margin, fits training data more tightly); small $C$ tolerates more violations for a wider, more regularized margin.
+
+### The kernel trick
+
+The dual objective and the final decision function $f(x) = \text{sign}\left(\sum_i \alpha_i y_i (x_i^\top x) + b\right)$ depend on the data **exclusively through dot products**. This is the key structural fact that makes kernels possible. Suppose we first map every point through some (possibly infinite-dimensional) feature transform $\phi(x)$ to make the data linearly separable in that new space. We would need $\phi(x_i)^\top \phi(x_j)$ everywhere a dot product appears. A **kernel function** $K(x_i, x_j)$ is defined to directly compute this quantity:
+
+$$
+K(x_i, x_j) = \phi(x_i)^\top \phi(x_j)
+$$
+
+The crucial insight is that we never need to know or compute $\phi$ explicitly — only $K$. For example, the RBF (Gaussian) kernel $K(x_i,x_j) = \exp(-\gamma \lVert x_i - x_j\rVert^2)$ corresponds to an *infinite-dimensional* $\phi$ (expandable via a Taylor series of the exponential), yet $K$ itself is a single closed-form scalar computation that costs the same as an ordinary dot product. By **Mercer's theorem**, any function $K$ that is symmetric and positive semi-definite (as a Gram matrix over any finite set of points) is guaranteed to correspond to *some* valid inner product in *some* feature space, even if that space is never constructed. This is what lets SVMs fit highly non-linear decision boundaries in the original input space while the optimization problem itself never changes — every $x_i^\top x_j$ in the dual is simply replaced by $K(x_i, x_j)$:
+
+$$
+\max_{\alpha} \; \sum_i \alpha_i - \frac{1}{2}\sum_{i,j}\alpha_i \alpha_j y_i y_j\, K(x_i, x_j)
+$$
+
+<ComparisonTable
+  headers={["Kernel", "Formula", "Effect"]}
+  rows={[
+    ["Linear", "K(x_i, x_j) = x_i^T x_j", "Standard linear SVM; no implicit mapping"],
+    ["Polynomial (degree d)", "K(x_i, x_j) = (x_i^T x_j + c)^d", "Captures feature interactions up to degree d"],
+    ["RBF / Gaussian", "K(x_i, x_j) = exp(-gamma * ||x_i - x_j||^2)", "Corresponds to an infinite-dimensional feature space; highly flexible, local similarity"],
+  ]}
+/>
+
+<Mermaid chart={`graph TD
+  A["Input data (not linearly separable)"] --> B["Implicit mapping via kernel K(xi, xj) = phi(xi)^T phi(xj)"]
+  B --> C["Linearly separable in (implicit) high-dimensional space"]
+  C --> D["Solve dual QP using only kernel values, never computing phi explicitly"]
+  D --> E["Support vectors: points with alpha_i > 0"]
+  E --> F["Decision boundary: sign of sum(alpha_i * y_i * K(xi, x) + b)"]
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+
+X = np.random.randn(300, 2)
+y = ((X[:, 0]**2 + X[:, 1]**2) > 1.5).astype(int)  # circular boundary — not linearly separable
+
+# RBF kernel implicitly maps into an infinite-dimensional space to separate this
+clf = make_pipeline(StandardScaler(), SVC(kernel="rbf", C=1.0, gamma="scale"))
+clf.fit(X, y)
+print(f"Support vectors: {clf.named_steps['svc'].support_vectors_.shape[0]} / {len(X)}")
+
+# --- Hinge loss and subgradient descent, from scratch (linear SVM) ---
+def hinge_loss(w, b, X, y, C=1.0):
+    margins = y * (X @ w + b)
+    return 0.5 * np.dot(w, w) + C * np.sum(np.maximum(0, 1 - margins))
+
+def fit_linear_svm(X, y, C=1.0, lr=0.001, epochs=1000):
+    w, b = np.zeros(X.shape[1]), 0.0
+    for _ in range(epochs):
+        margins = y * (X @ w + b)
+        violated = margins < 1                     # active hinge-loss points only
+        grad_w = w - C * (y[violated] @ X[violated]) if violated.any() else w
+        grad_b = -C * np.sum(y[violated]) if violated.any() else 0.0
+        w -= lr * grad_w
+        b -= lr * grad_b
+    return w, b
+
+w, b = fit_linear_svm(X, np.where(y == 0, -1, 1))
+```
+
+## Complexity
+
+| Operation | Time | Space | Notes |
+| --- | --- | --- | --- |
+| Training (QP solver, e.g., SMO) | $O(n^2)$ to $O(n^3)$ | $O(n^2)$ | Dominated by the kernel (Gram) matrix; scales poorly past ~$10^5$ samples |
+| Training (linear SVM, e.g., liblinear/SGD) | $O(nd)$ per epoch | $O(d)$ | No kernel matrix needed for the linear kernel |
+| Inference | $O(n_{sv} \cdot d)$ | $O(n_{sv} \cdot d)$ | Only support vectors ($n_{sv} \le n$) are needed at prediction time |
+
+<ProsCons
+  pros={[
+    "The margin-maximization objective gives strong theoretical generalization guarantees and tends to work well even with relatively few training examples in high dimensions.",
+    "The kernel trick lets a linear-optimization framework fit highly non-linear decision boundaries without ever explicitly constructing the high-dimensional feature space.",
+    "Effective and memory-efficient at inference: the decision function depends only on the support vectors, typically a small subset of the training data.",
+  ]}
+  cons={[
+    "Training scales poorly (quadratic-to-cubic) with the number of samples, since it involves the full pairwise kernel (Gram) matrix — a practical bottleneck beyond roughly $10^5$ examples.",
+    "No natural probabilistic output; Platt scaling (fitting a logistic regression on top of the decision function) is needed to get calibrated probabilities.",
+    "Highly sensitive to the choice of kernel and its hyperparameters ($C$, $\\gamma$), typically requiring a careful grid search.",
+    "Doesn't scale gracefully to multi-class problems natively — typically handled via one-vs-rest or one-vs-one wrappers.",
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Maximizing the margin 1/||w|| is equivalent to minimizing (1/2)||w||^2, turning the geometric goal into a convex quadratic program.",
+  "Only points with a nonzero Lagrange multiplier alpha_i (the support vectors, sitting on or inside the margin) determine the decision boundary.",
+  "Hinge loss stops penalizing a point once it clears the margin, unlike log-loss — this sparsity is exactly why only a subset of points become support vectors.",
+  "The kernel trick works because the SVM's dual objective and decision function depend on the data only through dot products, which a kernel function can compute directly without ever materializing the (possibly infinite-dimensional) feature map.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Frequent errors">
+  - Forgetting to scale features before fitting an SVM — margin-based methods are highly sensitive to feature scale since distance/dot products drive everything.
+  - Treating $C$ and $\gamma$ as independent knobs to tune one at a time rather than jointly via grid or random search — they interact strongly.
+  - Using an RBF kernel by default on very large datasets without considering the $O(n^2)$–$O(n^3)$ training cost, when a linear kernel (or a linear SVM solver like liblinear/SGD) would train in a fraction of the time.
+  - Assuming SVM decision scores are calibrated probabilities without applying Platt scaling or isotonic calibration first.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does maximizing the margin reduce to minimizing (1/2)||w||^2 subject to y_i(w^T x_i + b) >= 1?",
+    options: [
+      "It's an arbitrary simplification with no geometric meaning",
+      "After rescaling w and b so the closest points satisfy y_i(w^T x_i + b) = 1, the margin equals 1/||w||, so maximizing the margin is equivalent to minimizing ||w|| (written as (1/2)||w||^2 for a smooth convex objective)",
+      "Because ||w||^2 is always proportional to the number of support vectors",
+      "Because logistic regression and SVMs share the same loss function",
+    ],
+    answerIndex: 1,
+    explanation: "Under the normalization where the nearest points satisfy y_i(w^T x_i+b)=1, the geometric margin (distance from hyperplane to nearest point) is exactly 1/||w||. Maximizing 1/||w|| is the same as minimizing ||w||, and squaring plus a 1/2 factor makes the objective smooth and convex without changing the minimizer.",
+  },
+  {
+    question: "Why does the kernel trick allow SVMs to fit non-linear decision boundaries without explicitly computing the high-dimensional feature mapping?",
+    options: [
+      "Because SVMs don't actually use kernels for non-linear boundaries",
+      "Because the SVM's dual objective and decision function depend on the training data only through pairwise dot products, and a kernel function can compute the dot product phi(xi)^T phi(xj) directly and cheaply, without ever constructing phi",
+      "Because kernels reduce the dimensionality of the data before training",
+      "Because kernels replace the margin-maximization objective entirely",
+    ],
+    answerIndex: 1,
+    explanation: "The dual SVM formulation and the final decision rule reference the data exclusively via inner products x_i^T x_j. A kernel K(x_i, x_j) computes what would be phi(x_i)^T phi(x_j) in some (possibly infinite-dimensional) space directly, in closed form, sidestepping the need to ever construct phi itself — this is valid whenever K is a Mercer (symmetric, positive semi-definite) kernel.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Support-Vector Networks", authors: "Cortes, C., & Vapnik, V.", venue: "Machine Learning", year: 1995 },
+  { title: "The Elements of Statistical Learning", authors: "Hastie, T., Tibshirani, R., & Friedman, J.", venue: "Springer", year: 2009 },
+  { title: "Pattern Recognition and Machine Learning", authors: "Bishop, C. M.", venue: "Springer", year: 2006 },
+]} />

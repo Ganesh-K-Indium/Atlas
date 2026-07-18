@@ -1,0 +1,167 @@
+---
+title: "RLHF: Reward Modeling & PPO"
+description: "The three-stage pipeline that turns scattered human preferences into a scalar reward signal, then uses PPO — with a KL leash back to the SFT model — to optimize a policy against it."
+difficulty: "expert"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "rlhf", "reward-model", "ppo", "alignment"]
+prerequisites: ["Supervised Fine-Tuning (SFT)", "KL divergence", "Policy gradient methods / PPO basics"]
+---
+
+## Intuition
+
+SFT teaches a model to produce well-formatted, on-topic responses, but it can't teach the model *which of two reasonable responses is better* — SFT's training data is just a set of target responses, with no notion of "better" or "worse" built in. Humans, on the other hand, are much better at *comparing* two responses than at writing a perfect one from scratch — ranking is an easier, more reliable annotation task than authorship.
+
+Reinforcement Learning from Human Feedback (RLHF) is built around that observation. Rather than trying to collect a dataset of "ideal" responses (which is what SFT does), it collects **comparisons**: for a given prompt, which of two candidate responses do humans prefer? Those comparisons train a separate model — the **reward model** — to predict human preference as a scalar score, and that scalar score becomes the reward signal for reinforcement learning.
+
+<Callout type="tip" title="The one-sentence idea">
+  RLHF turns pairwise human preferences into a learned scalar reward function, then uses reinforcement learning (PPO) to push the language model's outputs toward whatever the reward model scores highly — while a KL penalty against the original SFT model keeps the policy from drifting so far that it starts exploiting quirks in the reward model instead of genuinely improving.
+</Callout>
+
+## Stage 1: Start From an SFT Model
+
+RLHF never starts from a raw pretrained base model — it starts from a model that has already been through supervised fine-tuning (see the SFT page). This SFT model, denoted $\pi^{\text{SFT}}$, serves two roles going forward: it's the initialization for the RL policy, *and* it's the fixed reference point the KL penalty in Stage 3 measures distance against.
+
+## Stage 2: Train a Reward Model on Pairwise Preferences
+
+For a given prompt $x$, generate multiple candidate responses from the SFT model, and have human labelers pick which of a pair they prefer — producing a dataset of triples $(x, y_w, y_l)$ where $y_w$ ("winner") is the preferred response and $y_l$ ("loser") is the rejected one.
+
+The reward model $r_\phi(x, y)$ is trained to assign a higher scalar score to the preferred response, using a **Bradley-Terry** model of pairwise comparison — a standard statistical model for "probability that A beats B" derived from underlying scalar scores:
+
+$$
+p(y_w \succ y_l \mid x) = \sigma\big(r_\phi(x, y_w) - r_\phi(x, y_l)\big)
+$$
+
+where $\sigma$ is the logistic sigmoid. The reward model is trained by maximizing the log-likelihood of the observed human preferences under this model — equivalently, minimizing:
+
+$$
+\mathcal{L}_{\text{RM}}(\phi) = -\mathbb{E}_{(x, y_w, y_l)}\Big[\log \sigma\big(r_\phi(x, y_w) - r_\phi(x, y_l)\big)\Big]
+$$
+
+Architecturally, $r_\phi$ is typically the SFT model itself with its unembedding (softmax output) layer replaced by a single scalar-output head, then fine-tuned on this preference loss. It is a completely separate model from the policy that will later be optimized — the reward model is trained once (or periodically refreshed) and then held fixed during the RL stage.
+
+## Stage 3: RL Fine-Tuning Against the Reward Model, With a KL Penalty
+
+With a trained reward model in hand, the SFT model is now further optimized via reinforcement learning — treating response generation as a sequence of actions, and the reward model's score on the completed response as the reward. The policy $\pi_\theta$ (initialized from $\pi^{\text{SFT}}$) is optimized to maximize:
+
+$$
+\mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi_\theta(\cdot \mid x)}\Big[r_\phi(x, y) - \beta \, D_{\text{KL}}\big(\pi_\theta(\cdot \mid x) \,\|\, \pi^{\text{SFT}}(\cdot \mid x)\big)\Big]
+$$
+
+The reward term alone would push the policy purely toward whatever maximizes the reward model's score — but the reward model is an imperfect proxy for actual human preference, and a policy free to move arbitrarily far from the SFT model can find "reward hacks": outputs that score highly under $r_\phi$'s imperfect approximation without actually being good responses (degenerate repetition, exploiting scoring quirks, sycophantic phrasing the reward model over-values, and so on). The **KL penalty term**, weighted by $\beta$, directly penalizes the policy for diverging from the SFT model's distribution — it's a leash, not a hard constraint, letting the policy move toward higher reward while limiting how far and how fast it can drift from a distribution known to produce coherent, on-distribution text.
+
+**PPO (Proximal Policy Optimization)** is the specific RL algorithm used to perform this optimization. It's chosen primarily because it constrains how much the policy can change per update step (via a clipped surrogate objective), which keeps training stable — a critical property here since a policy that's allowed to swing wildly between updates could ruin the delicate balance between reward-seeking and staying close to the SFT model. See [PPO & Trust Region Methods](/docs/machine-learning/reinforcement-learning/ppo-trust-region) for the full derivation of PPO's clipped objective and why trust-region constraints matter for policy gradient stability.
+
+<Mermaid chart={`
+graph TD
+  A["Pretrained base model"] --> B["SFT: fine-tune on curated instruction-response pairs"]
+  B --> C["π_SFT (also the fixed reference model going forward)"]
+  C --> D["Generate response pairs for sampled prompts"]
+  D --> E["Human labelers rank pairs: y_w preferred over y_l"]
+  E --> F["Train reward model r_φ via Bradley-Terry pairwise loss"]
+  C --> G["Initialize RL policy π_θ from π_SFT"]
+  F --> H["PPO: maximize r_φ(x,y) − β·KL(π_θ ‖ π_SFT)"]
+  G --> H
+  H --> I["Aligned policy π_θ"]
+`} />
+
+## Why the KL Term Is Load-Bearing, Not Optional
+
+Removing the KL penalty (setting $\beta = 0$) turns the objective into pure reward maximization, and because $r_\phi$ is a learned approximation trained on a finite preference dataset, it inevitably has blind spots and exploitable regions the policy can find through unconstrained optimization — this failure mode is called **reward hacking** or **reward over-optimization**. Practically, teams monitor the KL divergence during training as a proxy signal: if it grows too large, the policy is likely drifting into a regime the reward model was never trained to judge reliably, even if the measured reward keeps climbing.
+
+## Code Sketch: RLHF Loop (TRL-style Pseudocode)
+
+```python
+# Stage 2: Reward model training
+import torch.nn.functional as F
+
+def reward_model_loss(reward_model, prompt, chosen, rejected):
+    r_chosen = reward_model(prompt, chosen)     # scalar score
+    r_rejected = reward_model(prompt, rejected) # scalar score
+    # Bradley-Terry pairwise loss
+    return -F.logsigmoid(r_chosen - r_rejected).mean()
+
+# Stage 3: PPO fine-tuning against the frozen reward model
+from trl import PPOTrainer, PPOConfig
+
+ppo_config = PPOConfig(model_name="sft-model", learning_rate=1.4e-5, kl_penalty="kl", init_kl_coef=0.2)
+ppo_trainer = PPOTrainer(config=ppo_config, model=policy_model, ref_model=sft_reference_model, tokenizer=tokenizer)
+
+for batch in prompt_dataloader:
+    query_tensors = batch["input_ids"]
+    response_tensors = ppo_trainer.generate(query_tensors)          # sample from current policy
+    rewards = [reward_model(q, r) for q, r in zip(query_tensors, response_tensors)]
+    # PPOTrainer.step internally: computes advantages, applies the clipped
+    # PPO objective, AND subtracts β * KL(π_θ || π_SFT) from the reward per-token
+    stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
+```
+
+## RLHF vs. DPO at a Glance
+
+<ComparisonTable
+  headers={["Aspect", "RLHF (reward model + PPO)", "DPO"]}
+  rows={[
+    ["Separate reward model?", "Yes — trained explicitly, held fixed during RL", "No — reward is reparameterized directly into the policy's own likelihood ratio"],
+    ["Requires an RL loop (sampling, PPO updates)?", "Yes — online sampling from the policy during training", "No — a single supervised-style loss on the offline preference dataset"],
+    ["Training stability / complexity", "Higher — RL introduces variance, hyperparameter sensitivity (KL coefficient, clip range), reward hacking risk", "Lower — closed-form loss, no RL infrastructure needed"],
+  ]}
+/>
+
+See [Direct Preference Optimization (DPO)](/docs/llms/training-alignment/dpo) for how DPO eliminates the reward model and the RL loop entirely, by folding the same Bradley-Terry preference loss directly onto the policy.
+
+<KeyTakeaways items={[
+  "RLHF is a three-stage pipeline: SFT model, then a reward model trained on human pairwise preferences via a Bradley-Terry loss, then RL (PPO) fine-tuning of the policy against that reward model.",
+  "The reward model and the RL policy are two distinct models — the reward model is trained once (or periodically) and then held fixed while the policy is optimized against it.",
+  "The KL penalty against the frozen SFT model is not a minor regularizer — it's what prevents the policy from reward-hacking an imperfect, learned reward model.",
+  "PPO's clipped objective is chosen specifically for the training stability it provides, since large uncontrolled policy updates could catastrophically break the reward/KL balance.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Turns an easier human task (comparing two responses) into a scalable training signal, avoiding the need for humans to write large volumes of 'ideal' responses.",
+    "The reward model generalizes preference judgments beyond the exact prompts it was trained on, providing a reusable reward signal for RL.",
+    "The KL-constrained formulation gives a principled way to trade off reward-seeking against staying close to a known-good distribution.",
+  ]}
+  cons={[
+    "A common mistake: setting the KL coefficient β too low in pursuit of higher measured reward — this reliably leads to reward hacking (degenerate or sycophantic outputs that score well under the reward model but are judged poor by actual humans).",
+    "The full pipeline requires maintaining and running three models simultaneously during Stage 3 (policy, frozen SFT reference, reward model) plus RL infrastructure — meaningfully more complex and compute-intensive than supervised approaches.",
+    "The reward model's judgments are only as good as its training data — preference data with inconsistent or biased human annotations propagates directly into systematic reward model errors, which the RL stage will then dutifully exploit.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does RLHF include a KL penalty against the SFT model in the RL objective, rather than optimizing the reward model's score directly?",
+    options: [
+      "The KL term is purely cosmetic and has no effect on training outcomes",
+      "The reward model is an imperfect learned proxy for true human preference; a policy optimized on raw reward alone can find outputs that exploit the reward model's blind spots (reward hacking) rather than genuinely improving, and the KL penalty limits how far the policy can drift to find such exploits",
+      "KL divergence is required by the PPO algorithm's mathematical definition and cannot be removed",
+      "It's included only to reduce GPU memory usage during training",
+    ],
+    answerIndex: 1,
+    explanation: "Because the reward model is trained on a finite preference dataset, it inevitably has regions where its score doesn't track true human preference well. Unconstrained reward maximization can drive the policy into exactly those regions. The KL penalty keeps the policy anchored near the SFT model's distribution, which is known to produce coherent, on-distribution outputs, limiting the practical severity of reward hacking.",
+  },
+  {
+    question: "In the reward model training stage, what does the Bradley-Terry loss actually optimize for?",
+    options: [
+      "It directly regresses the reward model's output to match a numeric human-provided score",
+      "It trains the reward model so that the sigmoid of the score difference between a preferred and rejected response approximates the empirical probability that humans preferred the winning response — i.e., it maximizes the likelihood of the observed pairwise preference data",
+      "It minimizes the total number of parameters in the reward model",
+      "It trains the reward model to output the same score for every response, as a form of regularization",
+    ],
+    answerIndex: 1,
+    explanation: "The Bradley-Terry model assumes pairwise preference probability is a sigmoid of the difference in underlying scalar scores. Training the reward model to maximize the log-likelihood of observed human choices under this model is exactly what pushes r_φ(x, y_w) above r_φ(x, y_l) in proportion to how consistently humans preferred y_w.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Training language models to follow instructions with human feedback (InstructGPT)", authors: "Ouyang, L., Wu, J., Jiang, X., Almeida, D., Wainwright, C. L., Mishkin, P., et al.", venue: "arXiv:2203.02155", year: 2022, url: "https://arxiv.org/abs/2203.02155" },
+  { title: "Deep Reinforcement Learning from Human Preferences", authors: "Christiano, P. F., Leike, J., Brown, T., Martic, M., Legg, S., & Amodei, D.", venue: "NeurIPS", year: 2017, url: "https://arxiv.org/abs/1706.03741" },
+  { title: "Proximal Policy Optimization Algorithms", authors: "Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O.", venue: "arXiv:1707.06347", year: 2017, url: "https://arxiv.org/abs/1707.06347" },
+]} />

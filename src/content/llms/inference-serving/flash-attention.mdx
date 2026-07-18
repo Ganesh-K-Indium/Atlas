@@ -1,0 +1,160 @@
+---
+title: "FlashAttention"
+description: "How an I/O-aware algorithm — not a new approximation — made exact attention several times faster by never materializing the full n×n score matrix in GPU memory."
+difficulty: "expert"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "inference", "attention", "gpu", "flash-attention", "kernels"]
+prerequisites: ["Scaled dot-product attention", "GPU memory hierarchy (SRAM vs. HBM)", "Softmax"]
+---
+
+<Prerequisites items={[
+  "Scaled dot-product attention and the softmax(QKᵀ/√d)V formula",
+  "Basic GPU memory hierarchy: on-chip SRAM vs. off-chip HBM",
+  "Big-O reasoning about time vs. memory-traffic complexity",
+]} />
+
+## Intuition
+
+The standard attention formula looks compute-bound: $\text{softmax}(QK^\top/\sqrt{d})V$ involves matrix multiplies. But on a modern GPU, the bottleneck is rarely arithmetic — it's *moving data*. GPUs have a small amount of extremely fast on-chip memory (SRAM, tens of MB) and a large amount of much slower off-chip memory (HBM, tens of GB). A naive attention implementation computes the full $n \times n$ score matrix $QK^\top$, writes it out to HBM, reads it back to apply softmax, writes the result back to HBM, reads it again to multiply by $V$ — repeatedly shuttling an $O(n^2)$ array between slow and fast memory. For long sequences this HBM traffic, not FLOPs, is what makes attention slow.
+
+FlashAttention's insight: restructure the *same* mathematical computation so the $n \times n$ matrix is **never fully written to HBM**. Instead, tile $Q$, $K$, $V$ into blocks small enough to fit in SRAM, and compute attention block-by-block, incrementally updating a running (unnormalized) output and running softmax statistics as each new block of $K,V$ is streamed in. The final result is numerically **identical** to standard attention — this is not an approximation. The speedup comes entirely from cutting the number of slow memory reads/writes, i.e., it's an I/O-aware algorithm, not a lower-FLOP algorithm.
+
+<Callout type="tip" title="The one-sentence idea">
+  FlashAttention computes exact attention without ever materializing the full n×n score matrix in HBM — it tiles the computation to fit in fast on-chip SRAM and uses an online (streaming) softmax to combine partial results correctly, trading extra recomputation for far less memory traffic.
+</Callout>
+
+## Why Standard Attention Is Memory-Bound
+
+For sequence length $n$ and head dimension $d$, standard attention's HBM traffic (reads + writes of intermediate tensors) is $O(n^2)$ — every element of the $n \times n$ score matrix is written once (after $QK^\top$), read once (for softmax), written once (after softmax), and read again (for the $\times V$ multiply). Compute is also $O(n^2 d)$, but on modern GPUs the ratio of compute throughput to memory bandwidth is high enough that for typical $d$, moving the $n \times n$ matrix dominates wall-clock time — attention is **memory-bandwidth bound**, not compute-bound, for most practical sequence lengths.
+
+## The Online Softmax — The Key Numerical Trick
+
+Softmax over the full row of scores requires knowing the row's maximum (for numerical stability) and the sum of exponentials — both of which normally require seeing the *entire* row before finalizing any output. FlashAttention processes $K, V$ in blocks and updates these statistics incrementally. For a row's scores split into blocks with local max $m^{(1)}, m^{(2)}, \ldots$ and local sums $\ell^{(1)}, \ell^{(2)}, \ldots$, each new block's contribution is folded in by rescaling the running output and running sum by a correction factor $e^{m_{\text{old}} - m_{\text{new}}}$:
+
+$$
+m_{\text{new}} = \max(m_{\text{old}}, m_{\text{block}}), \qquad \ell_{\text{new}} = \ell_{\text{old}} \, e^{m_{\text{old}} - m_{\text{new}}} + \ell_{\text{block}} \, e^{m_{\text{block}} - m_{\text{new}}}
+$$
+
+$$
+O_{\text{new}} = O_{\text{old}} \, e^{m_{\text{old}} - m_{\text{new}}} + \left(P_{\text{block}} V_{\text{block}}\right) e^{m_{\text{block}} - m_{\text{new}}}
+$$
+
+This gives a running output that, after the last block, equals *exactly* what a single full-row softmax followed by weighted sum would have produced — no approximation, just algebraic rearrangement so that partial results computed at different times can be correctly combined.
+
+## The Mechanism, Step by Step
+
+1. **Tile** $Q$, $K$, $V$ into blocks small enough that a block of $Q$, plus the current block of $K,V$, plus running statistics all fit in on-chip SRAM together.
+2. **Outer loop over $K, V$ blocks** (or $Q$ blocks, depending on kernel variant): load one block of $K,V$ from HBM into SRAM once.
+3. **Inner loop over $Q$ blocks**: for each $Q$ block already in SRAM, compute the partial score block $Q_{\text{block}} K_{\text{block}}^\top$, apply the online softmax update above, and accumulate into that $Q$ block's running output — all without ever writing the $n \times n$ score matrix to HBM.
+4. **Recompute in the backward pass instead of storing.** Rather than storing the full attention matrix for use in backpropagation (which would defeat the memory savings), FlashAttention recomputes the needed blocks on the fly during the backward pass from the stored softmax statistics — trading a modest amount of extra compute for a large reduction in memory traffic and footprint.
+5. **Result:** identical output to standard attention, with HBM traffic reduced from $O(n^2)$ to roughly $O(n^2 d^2 / M)$ where $M$ is SRAM size — in practice a large constant-factor reduction, translating to substantial wall-clock speedups and enabling much longer sequences to fit in memory (since the full score matrix is never materialized).
+
+<Mermaid chart={`
+graph TD
+  Q["Q, K, V in HBM"] --> Tile["Split into SRAM-sized tiles"]
+  Tile --> Loop["For each K,V block: load into SRAM once"]
+  Loop --> Inner["For each Q block: compute partial scores in SRAM"]
+  Inner --> Online["Online softmax: update running max, sum, output"]
+  Online --> Loop
+  Online --> Final["After all blocks: exact softmax(QKᵀ/√d)V — never wrote full n×n matrix to HBM"]
+`} />
+
+## Versions: FlashAttention, FlashAttention-2, FlashAttention-3
+
+- **FlashAttention (2022)** introduced the tiling + online softmax approach, framing attention speedups as an I/O-awareness problem rather than a FLOP-reduction problem.
+- **FlashAttention-2 (2023)** restructured the parallelism and work partitioning — reducing non-matmul FLOPs, better distributing work across thread blocks and warps (parallelizing over sequence length in addition to batch/heads), and improving GPU occupancy — reported at up to roughly 2× faster than the original FlashAttention.
+- **FlashAttention-3 (2024)** targets Hopper-generation GPUs (H100) specifically, exploiting asynchrony between tensor cores and memory copies (warp specialization, overlapping matmul with softmax) and adding low-precision (FP8) support. It reports up to roughly 1.5–2.0× speedup over FlashAttention-2 on H100, reaching up to ~740 TFLOPs/s in FP16 (about 75% of the H100's theoretical peak) and close to 1.2 PFLOPs/s in FP8, with FP8 numerical error reduced substantially versus a naive FP8 baseline through incoherent processing techniques.
+
+<Callout type="note" title="Verified via web search, July 2026">
+  FlashAttention-2 is arXiv:2307.08691; FlashAttention-3 is arXiv:2407.08608. Exact speedup figures are hardware- and shape-dependent — treat the numbers above as representative of the papers' reported benchmarks, not universal constants.
+</Callout>
+
+## Code Sketch
+
+```python
+# In practice you call a fused kernel rather than implement tiling yourself.
+# PyTorch's scaled_dot_product_attention dispatches to a FlashAttention
+# backend automatically when shapes/dtypes/hardware support it.
+
+import torch
+import torch.nn.functional as F
+
+def attention_layer(q, k, v, is_causal=True):
+    # q, k, v: [batch, num_heads, seq_len, head_dim]
+    # No n x n score matrix ever appears in Python-visible memory —
+    # the backend kernel tiles internally.
+    return F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
+
+# Libraries like `flash-attn` expose the kernel directly for finer control,
+# e.g. variable-length (packed) sequences for efficient batched serving:
+#
+# from flash_attn import flash_attn_varlen_func
+# out = flash_attn_varlen_func(
+#     q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+#     causal=True,
+# )
+```
+
+## Complexity and Memory Analysis
+
+| Quantity | Standard attention | FlashAttention |
+| --- | --- | --- |
+| FLOPs | $O(n^2 d)$ | $O(n^2 d)$ — same, no algorithmic FLOP reduction |
+| HBM reads/writes | $O(n^2)$ | $O(n^2 d^2 / M)$, i.e., far fewer for realistic SRAM size $M$ |
+| Peak activation memory | $O(n^2)$ (materialized score matrix) | $O(n)$ — only running statistics and output kept per block |
+| Backward pass | Reuses stored $n \times n$ matrix | Recomputes blocks from saved statistics — extra compute, far less memory |
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Produces mathematically exact attention output — not an approximation — so it's a pure speed/memory win with zero accuracy trade-off.",
+    "Reduces peak memory from O(n²) to O(n), which is often the deciding factor in how long a context a given GPU can serve, independent of raw speed.",
+    "Composable with causal masking, variable-length batching, and multi-query/grouped-query attention — it's an implementation of the same math, not a competing architecture.",
+  ]}
+  cons={[
+    "It optimizes memory *traffic*, not FLOPs — for very short sequences (where the n×n matrix already fits comfortably in SRAM) the benefit shrinks and standard implementations can be competitive.",
+    "Kernel implementations are hardware-generation-specific (FlashAttention-3's biggest gains are Hopper-specific); portability to new architectures lags behind release of the hardware.",
+    "It does not reduce the underlying O(n²) attention complexity — for extremely long contexts, sub-quadratic architectures or sparse/linear attention variants are still needed on top of it.",
+  ]}
+/>
+
+- Confusing FlashAttention with a *sparse* or *approximate* attention method — it computes the exact same softmax(QKᵀ/√d)V as vanilla attention; the only change is how it's computed, not what is computed.
+- Assuming FlashAttention reduces FLOPs — it reduces memory reads/writes; FLOP count is essentially unchanged (and the backward pass does *more* FLOPs due to recomputation, in exchange for less memory movement).
+- Forgetting that its benefits are most visible for longer sequences and larger batches — at very short sequence lengths, the fixed overheads and kernel-launch costs can make the gains marginal.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What is the primary bottleneck FlashAttention is designed to eliminate?",
+    options: [
+      "The number of floating-point operations required by softmax(QKᵀ/√d)V",
+      "The volume of reads and writes between GPU HBM and on-chip SRAM caused by materializing the full n×n attention score matrix",
+      "The sequential dependency between decoding steps in autoregressive generation",
+      "The numerical precision loss from using FP16 instead of FP32",
+    ],
+    answerIndex: 1,
+    explanation: "FlashAttention is explicitly framed as an I/O-aware algorithm: standard attention is memory-bandwidth bound because it writes the full n×n score matrix to slow HBM and reads it back multiple times. FlashAttention keeps the computation tiled in fast SRAM and never materializes that full matrix, dramatically cutting HBM traffic while leaving the FLOP count essentially unchanged.",
+  },
+  {
+    question: "How does FlashAttention correctly compute softmax over a full row of attention scores when it only ever sees one block of Key/Value vectors at a time?",
+    options: [
+      "It approximates softmax using a truncated Taylor series computed per block",
+      "It ignores blocks with low scores and only keeps the top-k highest-scoring block",
+      "It maintains running maximum and running sum statistics per row and rescales the accumulated output each time a new block is processed, mathematically equivalent to computing softmax over the whole row at once",
+      "It requires the entire K, V sequence to already be resident in SRAM before starting, defeating the purpose of tiling",
+    ],
+    answerIndex: 2,
+    explanation: "The 'online softmax' trick updates a running max and running normalization sum incrementally as each new K,V block streams through SRAM, rescaling previously accumulated output by a correction factor (e^(m_old - m_new)) so the final result is algebraically identical to a standard, full-row softmax — with no approximation involved.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness", authors: "Dao, T. et al.", venue: "NeurIPS", year: 2022, url: "https://arxiv.org/abs/2205.14135" },
+  { title: "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning", authors: "Dao, T.", venue: "arXiv", year: 2023, url: "https://arxiv.org/abs/2307.08691" },
+  { title: "FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision", authors: "Shah, J. et al.", venue: "NeurIPS", year: 2024, url: "https://arxiv.org/abs/2407.08608" },
+]} />

@@ -1,0 +1,193 @@
+---
+title: "Probability Foundations"
+description: "The axioms, conditioning, and independence rules that every statistical model in ML silently relies on."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["probability", "statistics", "math", "bayes-theorem"]
+prerequisites: ["Set theory basics", "High-school algebra"]
+---
+
+## Intuition
+
+Every ML model that outputs a confidence score, every A/B test, every loss function derived from "maximum likelihood" — all of it rests on a small set of rules about how to quantify and combine uncertainty. Probability theory is that rule set. It doesn't tell you *why* something is uncertain (measurement noise? inherent randomness? your own ignorance?) — it just gives you consistent arithmetic for reasoning about degrees of belief or frequencies, whatever your interpretation.
+
+<Callout type="tip" title="One-sentence definition">
+  Probability is a function that assigns a number in $[0, 1]$ to events, satisfying three simple axioms — everything else (conditioning, Bayes' theorem, independence) is derived from those three rules alone.
+</Callout>
+
+The single most important derived rule is **conditioning**: updating your probabilities once you learn something. Almost every practical use of probability in ML — classification, filtering, ranking — is a conditioning computation in disguise: "given this input, what's the probability of that label?"
+
+## Formal Definition: The Kolmogorov Axioms
+
+A **probability space** is a triple $(\Omega, \mathcal{F}, P)$:
+
+- $\Omega$ — the **sample space**: the set of all possible outcomes.
+- $\mathcal{F}$ — a collection of subsets of $\Omega$ called **events** (technically a $\sigma$-algebra, so it's closed under complement and countable union).
+- $P: \mathcal{F} \to [0, 1]$ — the **probability measure**, satisfying:
+
+$$
+\begin{aligned}
+&\textbf{1. Non-negativity: } P(A) \geq 0 \text{ for all } A \in \mathcal{F} \\
+&\textbf{2. Normalization: } P(\Omega) = 1 \\
+&\textbf{3. Countable additivity: } P\left(\bigcup_{i=1}^{\infty} A_i\right) = \sum_{i=1}^{\infty} P(A_i) \text{ for pairwise disjoint } A_1, A_2, \ldots
+\end{aligned}
+$$
+
+Everything else — that $P(\emptyset) = 0$, that $P(A^c) = 1 - P(A)$, that $P(A \cup B) = P(A) + P(B) - P(A \cap B)$ — is a theorem provable from just these three axioms, not an extra assumption.
+
+**Proof sketch that $P(A^c) = 1 - P(A)$:** $A$ and $A^c$ are disjoint and $A \cup A^c = \Omega$. By axiom 3, $P(A) + P(A^c) = P(\Omega) = 1$ (axiom 2), so $P(A^c) = 1 - P(A)$.
+
+## Conditional Probability and Independence
+
+The **conditional probability** of $A$ given $B$ (with $P(B) > 0$) is defined as:
+
+$$
+P(A \mid B) = \frac{P(A \cap B)}{P(B)}
+$$
+
+This is a *definition*, not a derived fact — but it's the only definition consistent with the intuitive idea of "restricting the sample space to $B$ and renormalizing." If you condition on $B$, the new universe is $B$ itself, so probabilities must be rescaled by $P(B)$ to sum to 1 again.
+
+Two events are **independent** if learning one tells you nothing about the other:
+
+$$
+P(A \mid B) = P(A) \quad \iff \quad P(A \cap B) = P(A) P(B)
+$$
+
+The right-hand form is preferred as the formal definition because it doesn't require $P(B) > 0$ and it's symmetric in $A$ and $B$ by inspection.
+
+<Callout type="warning" title="Independence ≠ mutually exclusive">
+  These are frequently confused. Mutually exclusive events ($A \cap B = \emptyset$) are *maximally dependent* — if $A$ happens, $B$ provably didn't. Independent events satisfy $P(A \cap B) = P(A)P(B) > 0$ whenever both have positive probability, so they can co-occur.
+</Callout>
+
+## Derivation: Bayes' Theorem from the Definition of Conditioning
+
+Bayes' theorem is not a separate axiom — it falls straight out of the symmetry of the joint probability $P(A \cap B)$.
+
+**Step 1.** From the definition of conditional probability, in both directions:
+
+$$
+P(A \mid B) \, P(B) = P(A \cap B) = P(B \mid A) \, P(A)
+$$
+
+**Step 2.** Divide both sides by $P(B)$ (assuming $P(B) > 0$):
+
+$$
+P(A \mid B) = \frac{P(B \mid A) \, P(A)}{P(B)}
+$$
+
+**Step 3.** Expand $P(B)$ using the **law of total probability** — if $A_1, \ldots, A_n$ partition $\Omega$:
+
+$$
+P(B) = \sum_{i=1}^n P(B \mid A_i) P(A_i)
+$$
+
+Substituting gives the full form used in ML (e.g. Naive Bayes classifiers, spam filters, medical diagnosis):
+
+$$
+P(A_k \mid B) = \frac{P(B \mid A_k) \, P(A_k)}{\sum_{i=1}^n P(B \mid A_i) P(A_i)}
+$$
+
+**Worked numeric example.** A rare disease affects 1% of a population ($P(D) = 0.01$). A test has 95% sensitivity ($P(+ \mid D) = 0.95$) and 90% specificity ($P(- \mid D^c) = 0.90$, so $P(+ \mid D^c) = 0.10$). Given a positive test, what's $P(D \mid +)$?
+
+$$
+P(D \mid +) = \frac{P(+ \mid D) P(D)}{P(+ \mid D)P(D) + P(+ \mid D^c)P(D^c)} = \frac{0.95 \times 0.01}{0.95 \times 0.01 + 0.10 \times 0.99} = \frac{0.0095}{0.1085} \approx 0.0876
+$$
+
+Only about **8.8%**, despite a seemingly accurate test — because the disease is rare, false positives from the large healthy population outnumber true positives. This is the base-rate fallacy, and it's the same arithmetic that governs precision in imbalanced classification problems.
+
+<Mermaid chart={`
+graph TD
+  A["Prior: P(D) = 0.01"] --> B["Likelihood: P(+ | D) = 0.95"]
+  B --> C["Joint: P(+ and D) = 0.0095"]
+  D["P(+ | D^c) = 0.10, P(D^c) = 0.99"] --> E["Joint: P(+ and D^c) = 0.0891"]
+  C --> F["Normalize by total P(+) = 0.1085"]
+  E --> F
+  F --> G["Posterior: P(D | +) ≈ 0.088"]
+`} />
+
+## The Chain Rule and Its Use in Generative Models
+
+For any events (or random variables) $X_1, \ldots, X_n$, repeatedly applying the definition of conditional probability gives the **chain rule of probability**:
+
+$$
+P(X_1, X_2, \ldots, X_n) = P(X_1) \prod_{i=2}^n P(X_i \mid X_1, \ldots, X_{i-1})
+$$
+
+This is *exactly* how autoregressive language models factorize the probability of a token sequence: $P(x_1, \ldots, x_T) = \prod_t P(x_t \mid x_{<t})$. Every next-token prediction is one factor in this product — see [The Transformer Architecture](/docs/architectures/transformers/transformer-architecture) (roadmap) for how this factorization is implemented.
+
+## Code Example
+
+```python
+import numpy as np
+
+# Simulating Bayes' theorem: verify the disease/test example via Monte Carlo
+rng = np.random.default_rng(0)
+n = 10_000_000
+
+has_disease = rng.random(n) < 0.01                     # P(D) = 0.01
+test_positive = np.where(
+    has_disease,
+    rng.random(n) < 0.95,                               # sensitivity
+    rng.random(n) < 0.10,                                # false positive rate
+)
+
+p_disease_given_positive = has_disease[test_positive].mean()
+print(f"P(D | +) ≈ {p_disease_given_positive:.4f}")     # ≈ 0.0876, matches closed form
+```
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Recognizing that conditioning is a *renormalization* over a restricted sample space — this makes Bayes' theorem and the law of total probability intuitive rather than rote formulas.",
+    "Checking independence via P(A ∩ B) = P(A)P(B) rather than assuming it from context — dependence is the default in real data.",
+  ]}
+  cons={[
+    "Confusing P(A | B) with P(B | A) — the base-rate example above shows how different these can be numerically.",
+    "Treating 'independent' and 'mutually exclusive' as synonyms — they are close to opposites when both events have positive probability.",
+    "Forgetting the law of total probability requires the A_i to actually partition the sample space (mutually exclusive and exhaustive) — a partial or overlapping partition invalidates the computation.",
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "All of probability theory follows from three axioms: non-negativity, normalization, and countable additivity.",
+  "Conditional probability is a definition (restrict + renormalize), not an axiom — Bayes' theorem is a direct algebraic consequence of it.",
+  "Base rates matter enormously: a 95%-accurate test on a 1%-prevalence condition still yields under 10% posterior probability of disease given a positive result.",
+  "The chain rule of probability is the mathematical basis for autoregressive generative models, including language models.",
+]} />
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "A test is 99% accurate for a disease that affects 1 in 10,000 people. If someone tests positive, why might P(disease | positive test) still be far below 99%?",
+    options: [
+      "It wouldn't be — 99% accuracy directly implies 99% posterior probability",
+      "Because the low prior (1/10,000) means the pool of false positives from the healthy majority can vastly outnumber the true positives from the rare diseased population, per Bayes' theorem",
+      "Because probability theory doesn't apply to rare events",
+      "Because test accuracy and posterior probability are unrelated quantities",
+    ],
+    answerIndex: 1,
+    explanation: "Bayes' theorem shows the posterior depends on both the likelihood (test accuracy) AND the prior (base rate). With a 1/10,000 prior, even a small false-positive rate applied to the enormous healthy population can generate more false positives than true positives from the tiny diseased population.",
+  },
+  {
+    question: "Why is P(A ∩ B) = P(A)P(B) the preferred formal definition of independence, rather than P(A | B) = P(A)?",
+    options: [
+      "They aren't actually equivalent",
+      "The product form is symmetric in A and B and doesn't require P(B) > 0, making it well-defined in more cases while still implying the conditional form whenever conditioning is valid",
+      "The product form is easier to compute numerically",
+      "Conditional probability cannot be used to define independence",
+    ],
+    answerIndex: 1,
+    explanation: "P(A | B) = P(A) is undefined when P(B) = 0, and it's asymmetric-looking even though independence is a symmetric relationship. P(A ∩ B) = P(A)P(B) avoids both issues and is algebraically equivalent whenever P(B) > 0.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Statistical Inference", authors: "George Casella, Roger L. Berger", venue: "Cengage Learning", year: 2002 },
+  { title: "Pattern Recognition and Machine Learning", authors: "Christopher M. Bishop", venue: "Springer", year: 2006 },
+  { title: "Probability Theory: The Logic of Science", authors: "E. T. Jaynes", venue: "Cambridge University Press", year: 2003 },
+]} />

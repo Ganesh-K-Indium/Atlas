@@ -1,0 +1,200 @@
+---
+title: "Entropy & Cross-Entropy"
+description: "Why -log p is the only sane way to measure surprise, and how minimizing cross-entropy loss is exactly maximum likelihood estimation in disguise."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["information-theory", "math", "entropy", "cross-entropy", "loss-functions"]
+prerequisites: ["Basic probability (random variables, expectation)", "Logarithms", "Softmax"]
+---
+
+## Intuition
+
+Suppose someone tells you the outcome of a coin flip you already know is heads-only. You learned nothing — zero "surprise." Now suppose they tell you the outcome of a fair coin flip. You learned exactly one bit. Now suppose they tell you which of a million equally likely lottery numbers won — that's a lot of surprise, a lot of information.
+
+Entropy formalizes this: it's the **expected amount of surprise** (equivalently, information) you get from sampling a random variable, averaged over its own distribution. A distribution concentrated on one outcome has low entropy (predictable, low surprise). A uniform distribution over many outcomes has high entropy (unpredictable, high surprise).
+
+Cross-entropy extends this to two distributions: it measures the expected surprise you experience when you *believe* the world follows distribution $q$, but outcomes actually come from distribution $p$. This is precisely the situation a classifier is in every time it makes a prediction — which is why cross-entropy is the standard loss function for classification.
+
+<Callout type="tip" title="The one-sentence idea">
+  Entropy is the average number of bits (or nats) of surprise inherent in a distribution; cross-entropy is the average surprise you incur when your beliefs (q) don't quite match reality (p) — and the gap between the two is exactly KL divergence.
+</Callout>
+
+## Formal Definition
+
+For a discrete random variable $X$ with probability mass function $p(x)$, the **Shannon entropy** is:
+
+$$
+H(p) = -\sum_{x} p(x) \log p(x) = \mathbb{E}_{x \sim p}\left[ -\log p(x) \right]
+$$
+
+(For continuous variables the analogous quantity, replacing the sum with an integral, is called **differential entropy** — it behaves somewhat differently, e.g. it can be negative, but the definition and intuition carry over.)
+
+The **cross-entropy** between a true distribution $p$ and a model/predicted distribution $q$ is:
+
+$$
+H(p, q) = -\sum_x p(x) \log q(x) = \mathbb{E}_{x \sim p}\left[ -\log q(x) \right]
+$$
+
+Note the asymmetry: outcomes are sampled from $p$ (reality), but you pay a surprise cost measured under $q$ (your model). If $q = p$ exactly, cross-entropy reduces to entropy: $H(p,p) = H(p)$.
+
+## Derivation
+
+### Why $-\log p(x)$ is the right measure of "information"/"surprise"
+
+We want a function $I(x) = f(p(x))$ — information content depends only on how probable the event was — satisfying three properties any reasonable notion of "surprise" should have:
+
+1. **Monotonicity**: rarer events are more surprising. $f$ should be a decreasing function of $p(x)$.
+2. **Certainty carries no information**: $f(1) = 0$. An event you knew would happen teaches you nothing.
+3. **Additivity for independent events**: if $x$ and $y$ are independent, learning both should give exactly the sum of the surprise of each: $f(p(x)p(y)) = f(p(x)) + f(p(y))$.
+
+Condition 3 is the strong constraint. It says $f$ turns multiplication into addition — that is precisely the defining property of a logarithm. Formally, the only continuous, monotonic functions satisfying $f(ab) = f(a) + f(b)$ for all $a, b \in (0,1]$ are $f(p) = k \log p$ for some constant $k$. Combined with monotonicity (decreasing) and $f(1)=0$, we need $k < 0$, conventionally normalized to $k = -1$ (giving units of **nats** if $\log$ is natural log, or **bits** if $\log_2$):
+
+$$
+I(x) = -\log p(x)
+$$
+
+### Why entropy is the *expectation* of this quantity
+
+$I(x)$ tells you the surprise of one specific outcome. To characterize the distribution as a whole — "how surprising is sampling from $p$, on average, before you've seen the sample" — you average $I(x)$ weighted by how often each $x$ actually occurs, i.e. weighted by $p(x)$ itself:
+
+$$
+H(p) = \mathbb{E}_{x\sim p}[I(x)] = \sum_x p(x) \cdot \big(-\log p(x)\big)
+$$
+
+This is exactly Shannon's entropy formula. It has the expected extremes: $H(p) = 0$ when $p$ is a point mass (no surprise possible), and $H(p)$ is maximized by the uniform distribution over $n$ outcomes, with $H = \log n$ (maximum unpredictability, provably by Jensen's inequality / Lagrange multipliers on the constrained optimization $\max H(p)$ s.t. $\sum p(x) = 1$).
+
+### The exact relationship $H(p,q) = H(p) + \mathrm{KL}(p \| q)$
+
+Start from the cross-entropy definition and split the logarithm using $\log q(x) = \log p(x) + \log \frac{q(x)}{p(x)}$:
+
+$$
+\begin{aligned}
+H(p,q) &= -\sum_x p(x)\log q(x) \\
+&= -\sum_x p(x)\left[\log p(x) + \log\frac{q(x)}{p(x)}\right] \\
+&= -\sum_x p(x)\log p(x) \;-\; \sum_x p(x)\log\frac{q(x)}{p(x)} \\
+&= H(p) \;+\; \sum_x p(x)\log\frac{p(x)}{q(x)} \\
+&= H(p) + \mathrm{KL}(p \,\|\, q)
+\end{aligned}
+$$
+
+using the definition $\mathrm{KL}(p\|q) = \sum_x p(x)\log \frac{p(x)}{q(x)}$ (derived in full, including the proof that it's non-negative, in [KL Divergence & Mutual Information](/docs/foundations/information-theory/kl-divergence-mutual-information)). Since $\mathrm{KL}(p\|q) \geq 0$ always, this identity immediately gives $H(p,q) \geq H(p)$: **you can never do better, in expectation, than knowing the true distribution.** Cross-entropy is entropy plus a non-negative "penalty for being wrong about the distribution."
+
+### Connection to maximum likelihood for classification
+
+In a classification problem, for a single example the true label distribution $p$ is a one-hot vector — $p(y) = 1$ for the correct class $y^\*$ and $0$ elsewhere. The model outputs a predicted distribution $q_\theta(y \mid x)$ (e.g. a softmax output). Cross-entropy for this single example collapses to a single term, since $p(y)=0$ kills every other term in the sum:
+
+$$
+H(p, q_\theta) = -\sum_y p(y)\log q_\theta(y\mid x) = -\log q_\theta(y^\* \mid x)
+$$
+
+This is exactly the **negative log-likelihood** of the correct class under the model. Averaging over a dataset of $N$ i.i.d. examples:
+
+$$
+\frac{1}{N}\sum_{i=1}^N -\log q_\theta(y_i^\* \mid x_i) \;=\; -\frac{1}{N}\log \prod_{i=1}^N q_\theta(y_i^\*\mid x_i) \;=\; -\frac{1}{N}\log \mathcal{L}(\theta)
+$$
+
+where $\mathcal{L}(\theta)$ is the likelihood of the dataset under the model. So **minimizing average cross-entropy loss is identical to maximizing log-likelihood** (up to the constant scale factor $1/N$ and a sign flip). This is why cross-entropy loss isn't an arbitrary engineering choice — it's the direct consequence of treating classification as maximum likelihood estimation with a categorical/softmax likelihood. See [Maximum Likelihood Estimation](/docs/foundations/probability-statistics/maximum-likelihood-estimation) (roadmap) for the general MLE framework this instantiates, and [The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture) for where this loss is applied at the token level during LLM pretraining (next-token prediction is exactly per-token categorical cross-entropy).
+
+<Mermaid chart={`
+graph TD
+  A["True distribution p (data / one-hot label)"] --> C["Cross-entropy H(p,q) = -sum p log q"]
+  B["Model distribution q (softmax output)"] --> C
+  C --> D["H(p,q) = H(p) + KL(p||q)"]
+  D --> E["H(p) fixed by data, cannot be reduced"]
+  D --> F["KL(p||q) reduced by training — this is the only part gradient descent can touch"]
+  F --> G["Minimizing cross-entropy == Maximizing likelihood (MLE)"]
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+
+def entropy(p, base=2):
+    """Shannon entropy of a discrete distribution p (array of probabilities)."""
+    p = np.asarray(p, dtype=float)
+    p = p[p > 0]  # 0 log 0 := 0 by convention (limit as p->0)
+    return -np.sum(p * np.log(p) / np.log(base))
+
+def cross_entropy(p, q, base=2, eps=1e-12):
+    """Cross-entropy H(p, q) = E_p[-log q]."""
+    p = np.asarray(p, dtype=float)
+    q = np.clip(np.asarray(q, dtype=float), eps, 1.0)  # avoid log(0)
+    return -np.sum(p * np.log(q) / np.log(base))
+
+# A biased coin (true distribution) vs. a slightly miscalibrated model
+p_true = np.array([0.9, 0.1])       # true P(heads)=0.9, P(tails)=0.1
+q_model = np.array([0.8, 0.2])      # model's belief
+
+print("H(p)      =", entropy(p_true), "bits")        # ~0.469 bits
+print("H(p, q)   =", cross_entropy(p_true, q_model))  # > H(p)
+print("H(p,q)-H(p) = KL(p||q) =", cross_entropy(p_true, q_model) - entropy(p_true))
+
+# Classification example: one-hot true label vs softmax prediction
+def softmax(logits):
+    z = logits - logits.max()
+    e = np.exp(z)
+    return e / e.sum()
+
+logits = np.array([2.0, 1.0, 0.1])
+q = softmax(logits)
+true_class = 0
+p_onehot = np.zeros_like(q); p_onehot[true_class] = 1.0
+
+# Cross-entropy for a one-hot label collapses to -log q[true_class] == NLL
+ce = cross_entropy(p_onehot, q, base=np.e)
+nll = -np.log(q[true_class])
+print("cross-entropy loss:", ce, " -log q[y*]:", nll, " equal:", np.isclose(ce, nll))
+```
+
+<KeyTakeaways items={[
+  "Entropy H(p) = E_p[-log p(x)] is the unique (up to scale) measure of average surprise, derivable from three axioms: monotonicity, zero surprise for certainty, and additivity over independent events.",
+  "Cross-entropy H(p,q) = E_p[-log q(x)] measures the average surprise incurred when the true distribution is p but you score outcomes using q.",
+  "H(p,q) = H(p) + KL(p||q), and since KL >= 0, cross-entropy is always at least the true entropy — equality iff q = p exactly.",
+  "For classification with one-hot labels, cross-entropy loss collapses to -log q(y*), the negative log-likelihood — so minimizing cross-entropy loss over a dataset is exactly maximum likelihood estimation.",
+  "Entropy is maximized by the uniform distribution (log n for n outcomes) and minimized (zero) by any point-mass distribution.",
+]} />
+
+## Common Mistakes
+
+- **Treating cross-entropy and entropy as the same thing.** Entropy $H(p)$ is a property of one distribution; cross-entropy $H(p,q)$ requires two and is not symmetric — $H(p,q) \neq H(q,p)$ in general.
+- **Forgetting the $\log 0$ edge case.** If the model assigns exactly zero probability to the true class ($q(y^\*) = 0$), cross-entropy loss is $+\infty$. In practice, implementations clip probabilities or work directly with `log_softmax` for numerical stability rather than computing `softmax` then `log` separately.
+- **Assuming lower cross-entropy always means a "better calibrated" model in some absolute sense.** Cross-entropy loss is minimized in expectation exactly when $q = p$, but on a finite dataset a model can overfit to reduce empirical cross-entropy without actually approximating the true generative distribution well on new data.
+- **Confusing bits and nats.** Using $\log_2$ gives entropy in bits; using natural log ($\ln$) gives nats. Deep learning frameworks (PyTorch, TensorFlow) use natural log by default for `CrossEntropyLoss`, so reported "loss" values are in nats, not bits — a common source of confusion when comparing to information-theoretic bit-count intuitions.
+- **Ignoring that $H(p,q) \geq H(p)$ is a strict floor.** No amount of training can push cross-entropy loss below the data's inherent entropy $H(p)$ (e.g., irreducible label noise) — a model hitting this floor isn't broken, it's optimal.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is -log p(x), rather than some other decreasing function of p(x), the standard measure of information content?",
+    options: [
+      "It's an arbitrary convention with no deeper justification",
+      "It's the unique (up to a multiplicative constant) function satisfying additivity over independent events (f(p(x)p(y)) = f(p(x)) + f(p(y))), along with monotonicity and zero surprise for certain events",
+      "It happens to have a convenient derivative for gradient descent",
+      "It matches the physical definition of thermodynamic entropy exactly",
+    ],
+    answerIndex: 1,
+    explanation: "The additivity requirement forces f to be logarithmic — that is the only continuous function turning products into sums. Combined with 'more surprising = less probable' (monotonic decreasing) and 'certainty gives 0 information,' this pins down f(p) = -log p up to the choice of logarithm base.",
+  },
+  {
+    question: "A classifier's per-example loss is defined as cross-entropy H(p, q) where p is the one-hot true label and q is the softmax output. Why does this loss reduce exactly to the negative log-likelihood used in maximum likelihood estimation?",
+    options: [
+      "It doesn't — cross-entropy loss and negative log-likelihood are unrelated quantities that happen to look similar",
+      "Because p is one-hot, every term in the cross-entropy sum vanishes except the true class term, leaving -log q(y*), which is precisely -log of the model's assigned probability to the observed label — i.e., the NLL under an i.i.d. categorical likelihood",
+      "Because softmax outputs are always normalized to sum to 1",
+      "Because gradient descent implicitly performs maximum likelihood regardless of the loss function used",
+    ],
+    answerIndex: 1,
+    explanation: "With a one-hot p, H(p,q) = -sum_y p(y) log q(y) collapses to -log q(y*) since all other p(y)=0. Averaged over an i.i.d. dataset, minimizing the mean of -log q(y_i*) is identical to maximizing the log-likelihood log(prod_i q(y_i*)) — this is the exact algebraic link between cross-entropy loss and MLE, not a coincidence.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Elements of Information Theory (2nd ed.)", authors: "Cover, T. M. & Thomas, J. A.", venue: "Wiley", year: 2006, url: "https://www.wiley.com/en-us/Elements+of+Information+Theory%2C+2nd+Edition-p-9780471241959" },
+  { title: "A Mathematical Theory of Communication", authors: "Shannon, C. E.", venue: "Bell System Technical Journal", year: 1948, url: "https://ieeexplore.ieee.org/document/6773024" },
+  { title: "Deep Learning", authors: "Goodfellow, I., Bengio, Y. & Courville, A.", venue: "MIT Press (Ch. 3: Probability and Information Theory)", year: 2016, url: "https://www.deeplearningbook.org/" },
+]} />

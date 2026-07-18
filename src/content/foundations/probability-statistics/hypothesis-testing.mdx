@@ -1,0 +1,189 @@
+---
+title: "Hypothesis Testing & Confidence Intervals"
+description: "The precise, frequently-misinterpreted logic behind p-values and confidence intervals — and why 'not significant' never means 'no effect'."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["probability", "statistics", "math", "hypothesis-testing", "ab-testing", "confidence-intervals"]
+prerequisites: ["Random Variables & Distributions", "Maximum Likelihood Estimation"]
+---
+
+## Intuition
+
+You ran an A/B test and variant B converted better than A. Is that a real effect, or could it plausibly happen from random noise alone even if A and B were identical? Hypothesis testing formalizes this question: assume there's *no* real effect (the **null hypothesis**), and ask how surprising the observed data would be under that assumption. If the data would be very surprising under "no effect," that's evidence against the null — not proof the alternative is true, but evidence against the null being a good explanation.
+
+<Callout type="tip" title="One-sentence definition">
+  A hypothesis test computes the probability (the p-value) of seeing data at least as extreme as what was observed, *assuming the null hypothesis is true* — a small p-value means the observed data would be surprising under the null, not that the alternative hypothesis is proven or even likely.
+</Callout>
+
+## Formal Definitions
+
+- **Null hypothesis $H_0$**: the "no effect" / status-quo statement being tested (e.g. $\mu_A = \mu_B$).
+- **Alternative hypothesis $H_1$**: what you'd conclude if you reject $H_0$ (e.g. $\mu_A \neq \mu_B$).
+- **Test statistic $T$**: a function of the data whose distribution under $H_0$ is known (or well-approximated).
+- **p-value**: $P(T \text{ at least as extreme as observed} \mid H_0 \text{ true})$.
+- **Significance level $\alpha$**: a pre-chosen threshold (commonly 0.05); reject $H_0$ if $p < \alpha$.
+- **Type I error**: rejecting $H_0$ when it's actually true (false positive) — occurs with probability exactly $\alpha$ by construction.
+- **Type II error** ($\beta$): failing to reject $H_0$ when it's actually false (false negative). **Power** $= 1-\beta$ is the probability of correctly detecting a true effect.
+
+<Callout type="danger" title="The single most common misinterpretation">
+  $p < 0.05$ does **not** mean "there's a 95% chance the alternative hypothesis is true" or "a 5% chance the null is true." The p-value is $P(\text{data} \mid H_0)$, not $P(H_0 \mid \text{data})$ — confusing these is the same error as confusing $P(B\mid A)$ with $P(A\mid B)$ from Bayes' theorem (see [Probability Foundations](/docs/foundations/probability-statistics/probability-foundations)). Getting $P(H_0\mid\text{data})$ actually requires a prior and Bayes' theorem — see [Bayesian Statistics & Inference](/docs/foundations/probability-statistics/bayesian-statistics).
+</Callout>
+
+## Derivation: The One-Sample z-test and Confidence Interval
+
+**Setup.** $x_1, \ldots, x_n$ i.i.d. with unknown mean $\mu$, known variance $\sigma^2$. Test $H_0: \mu = \mu_0$ vs. $H_1: \mu \neq \mu_0$.
+
+**Step 1 — find the sampling distribution of the estimator.** The sample mean $\bar{x} = \frac{1}{n}\sum x_i$ has:
+
+$$
+\mathbb{E}[\bar x] = \mu, \qquad \text{Var}(\bar x) = \frac{\sigma^2}{n}
+$$
+
+(the variance shrinks by dividing by $n$ because $\text{Var}\left(\frac{1}{n}\sum X_i\right) = \frac{1}{n^2}\sum \text{Var}(X_i) = \frac{n\sigma^2}{n^2} = \frac{\sigma^2}{n}$ using independence). By the CLT (see [Random Variables & Distributions](/docs/foundations/probability-statistics/random-variables-distributions)), $\bar x$ is approximately Gaussian for large $n$ regardless of the original distribution's shape.
+
+**Step 2 — standardize under $H_0$.** If $H_0$ is true ($\mu=\mu_0$), then:
+
+$$
+Z = \frac{\bar x - \mu_0}{\sigma/\sqrt{n}} \sim \mathcal{N}(0,1) \quad \text{(approximately, by CLT)}
+$$
+
+**Step 3 — compute the p-value.** For a two-sided test, the p-value is the probability under $\mathcal{N}(0,1)$ of seeing a $|Z|$ at least as extreme as observed:
+
+$$
+p = 2\left(1 - \Phi(|z_{\text{obs}}|)\right)
+$$
+
+where $\Phi$ is the standard normal CDF and $z_{\text{obs}}$ is the observed value of $Z$.
+
+**Step 4 — derive the confidence interval by inverting the test.** A $(1-\alpha)$ confidence interval is the set of all $\mu_0$ values that would *not* be rejected at level $\alpha$. Solving $|z_{\text{obs}}| \leq z_{\alpha/2}$ (the critical value with tail probability $\alpha/2$) for $\mu_0$:
+
+$$
+\left|\frac{\bar x - \mu_0}{\sigma/\sqrt{n}}\right| \leq z_{\alpha/2} \iff \bar x - z_{\alpha/2}\frac{\sigma}{\sqrt n} \leq \mu_0 \leq \bar x + z_{\alpha/2}\frac{\sigma}{\sqrt n}
+$$
+
+So the 95% confidence interval ($z_{0.025} \approx 1.96$) is $\bar x \pm 1.96\,\sigma/\sqrt n$. This derivation is why hypothesis tests and confidence intervals are two views of the same object: $\mu_0$ is rejected at level $\alpha$ if and only if it falls outside the $(1-\alpha)$ confidence interval.
+
+<Callout type="warning" title="What a confidence interval actually means">
+  A 95% CI does **not** mean "there's a 95% probability the true μ is in this specific interval" (μ is a fixed unknown constant in the frequentist framework, not random). It means: if you repeated this sampling-and-interval-construction procedure many times, 95% of the resulting intervals would contain the true μ. This is subtly but importantly different from the Bayesian credible interval, which does directly express a probability statement about the parameter.
+</Callout>
+
+<Mermaid chart={`
+graph TD
+  A["Assume H0 true: μ = μ0"] --> B["Compute test statistic Z = (x̄ - μ0)/(σ/√n)"]
+  B --> C["Compare to known null distribution N(0,1)"]
+  C --> D["p-value = P(|Z| ≥ |z_obs| given H0)"]
+  D --> E{"p < α?"}
+  E -->|Yes| F["Reject H0 — result 'statistically significant'"]
+  E -->|No| G["Fail to reject H0 — NOT proof H0 is true"]
+`} />
+
+## Common Tests at a Glance
+
+<ComparisonTable
+  headers={["Test", "Used for", "Null distribution"]}
+  rows={[
+    ["One-sample z-test", "Mean vs. known value, known variance", "N(0,1)"],
+    ["One-sample / two-sample t-test", "Mean(s), unknown variance, estimated from data", "Student's t (heavier tails than Gaussian)"],
+    ["Chi-squared test", "Goodness-of-fit, independence in contingency tables", "χ²"],
+    ["Two-proportion z-test", "Comparing conversion rates (A/B testing)", "N(0,1) via CLT on proportions"],
+    ["Permutation / bootstrap tests", "Any statistic, no distributional assumptions needed", "Empirical, via resampling"],
+  ]}
+/>
+
+## Code Example: Two-Proportion Z-Test for A/B Testing
+
+```python
+import numpy as np
+from scipy import stats
+
+# A/B test: 45 conversions / 500 visitors (A) vs 60 / 520 (B)
+x1, n1 = 45, 500
+x2, n2 = 60, 520
+
+p1, p2 = x1 / n1, x2 / n2
+p_pooled = (x1 + x2) / (n1 + n2)          # pooled proportion under H0: p1 = p2
+se = np.sqrt(p_pooled * (1 - p_pooled) * (1 / n1 + 1 / n2))
+
+z = (p2 - p1) / se
+p_value = 2 * (1 - stats.norm.cdf(abs(z)))     # two-sided
+
+print(f"p1={p1:.4f}, p2={p2:.4f}, z={z:.3f}, p-value={p_value:.4f}")
+
+# 95% CI for the difference in proportions (unpooled SE, standard for CIs)
+se_diff = np.sqrt(p1 * (1 - p1) / n1 + p2 * (1 - p2) / n2)
+diff = p2 - p1
+ci_low, ci_high = diff - 1.96 * se_diff, diff + 1.96 * se_diff
+print(f"95% CI for (p2 - p1): [{ci_low:.4f}, {ci_high:.4f}]")
+```
+
+## Multiple Testing and Effect Size
+
+Running many tests inflates the false-positive rate: with $\alpha=0.05$ and $m$ independent tests, the probability of at least one false positive is $1-(1-\alpha)^m$, which grows quickly (e.g. $\approx 40\%$ for $m=10$). Corrections like **Bonferroni** ($\alpha/m$ per test) or the **Benjamini-Hochberg** procedure (controlling false discovery rate) address this — essential whenever many metrics are tested simultaneously, as is common in ML experiment dashboards.
+
+A statistically significant result can also be practically meaningless if the **effect size** is tiny — with large enough $n$, even a trivially small true difference will eventually produce $p < 0.05$. Significance answers "is there *any* detectable effect"; effect size and confidence intervals answer "how *big* is it, and does that matter."
+
+## Complexity
+
+| Task | Cost | Notes |
+| --- | --- | --- |
+| Analytic z-test / t-test | $O(n)$ | Closed-form, standard for large-sample or Gaussian data |
+| Bootstrap confidence interval | $O(Bn)$ for $B$ resamples | No distributional assumptions; resample data with replacement |
+| Permutation test | $O(Pn)$ for $P$ permutations | Exact under the null of exchangeability; common for A/B tests with non-standard statistics |
+
+<KeyTakeaways items={[
+  "A p-value is P(data at least this extreme | H0 true) — it is not P(H0 true | data), and conflating the two is one of the most common statistical errors.",
+  "Hypothesis tests and confidence intervals are dual: a (1-α) confidence interval contains exactly the null values that would not be rejected at level α.",
+  "Failing to reject H0 is not evidence that H0 is true — it may simply reflect insufficient statistical power (too small a sample) to detect a real effect.",
+  "Statistical significance and practical significance (effect size) are different questions — large samples can make trivially small effects 'significant'.",
+  "Running many hypothesis tests without correction (Bonferroni, Benjamini-Hochberg) inflates the overall false-positive rate substantially.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Reporting both the p-value and a confidence interval / effect size — the interval conveys magnitude and precision that a single p-value discards.",
+    "Pre-registering the significance threshold and sample size before running the experiment, avoiding 'p-hacking' (peeking at results and stopping early only when significant).",
+  ]}
+  cons={[
+    "Interpreting p ≥ 0.05 as proof of 'no effect' — it may just mean the test lacked power to detect a real, smaller effect.",
+    "Running a test repeatedly and stopping as soon as p < 0.05 ('optional stopping') — this invalidates the nominal Type I error rate, since it effectively runs many implicit tests.",
+    "Applying standard z/t-test formulas to non-independent or non-i.i.d. data (e.g. repeated measurements from the same user) without adjusting for the dependence structure.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Your A/B test returns p = 0.03. Which of the following is the correct interpretation?",
+    options: [
+      "There is a 97% probability that variant B is actually better than variant A",
+      "There is a 3% probability that variant B is better",
+      "If there were truly no difference between A and B, data at least this extreme would occur only about 3% of the time — this is evidence against 'no difference', not a direct probability that the null hypothesis is false",
+      "The p-value tells you the effect size of the difference between A and B",
+    ],
+    answerIndex: 2,
+    explanation: "The p-value is defined as P(data this extreme | H0 true), not P(H0 true | data) or P(H1 true | data) — those would require a prior and Bayes' theorem to compute. p = 0.03 means such an extreme (or more extreme) result would be uncommon under the assumption of no real difference, which is evidence against that assumption but not a direct statement of probability about the hypotheses themselves.",
+  },
+  {
+    question: "A hypothesis test comparing two groups yields p = 0.4, so the team concludes 'there's no difference between the groups.' What's wrong with this conclusion?",
+    options: [
+      "Nothing — a high p-value proves the null hypothesis is true",
+      "Failing to reject H0 only means the data didn't provide strong enough evidence against it — it could reflect a genuinely small/zero effect, OR insufficient statistical power (e.g., too small a sample) to detect a real but smaller effect; 'fail to reject' is not the same as 'proved true'",
+      "The p-value should have been compared to 0.5, not a fixed threshold",
+      "p = 0.4 actually indicates strong evidence against the null hypothesis",
+    ],
+    answerIndex: 1,
+    explanation: "Hypothesis testing is asymmetric: it's designed to control the false-positive (Type I error) rate when rejecting H0, but 'failing to reject' carries no equivalent guarantee about H0 being true. A non-significant result with low statistical power is fully consistent with a real underlying effect that the study simply wasn't large enough to detect reliably.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Statistical Inference", authors: "George Casella, Roger L. Berger", venue: "Cengage Learning", year: 2002 },
+  { title: "All of Statistics: A Concise Course in Statistical Inference", authors: "Larry Wasserman", venue: "Springer", year: 2004 },
+  { title: "Trustworthy Online Controlled Experiments: A Practical Guide to A/B Testing", authors: "Ron Kohavi, Diane Tang, Ya Xu", venue: "Cambridge University Press", year: 2020 },
+]} />

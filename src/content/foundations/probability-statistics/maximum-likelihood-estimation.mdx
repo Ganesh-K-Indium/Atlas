@@ -1,0 +1,198 @@
+---
+title: "Maximum Likelihood Estimation"
+description: "The single optimization principle underneath logistic regression, softmax classifiers, and most neural network loss functions: pick the parameters that make the observed data most probable."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["probability", "statistics", "math", "mle", "estimation"]
+prerequisites: ["Random Variables & Distributions", "Basic calculus (derivatives)"]
+---
+
+## Intuition
+
+Given some data and a family of candidate distributions (e.g. "some Gaussian" or "some Bernoulli"), which specific member of that family generated the data? **Maximum Likelihood Estimation (MLE)** answers this by picking the parameter values under which the data you actually observed would have been most probable. It doesn't ask "what's the probability my parameter is correct?" (that's the Bayesian question) — it asks "which parameter value makes my fixed, observed data least surprising?"
+
+<Callout type="tip" title="One-sentence definition">
+  MLE chooses $\hat\theta = \arg\max_\theta P(\text{data} \mid \theta)$ — the parameter value under which the observed data has the highest probability (or density).
+</Callout>
+
+Almost every "loss function" in supervised deep learning is negative log-likelihood in disguise: cross-entropy loss for classification is exactly the negative log-likelihood of a categorical distribution; mean squared error for regression is exactly the negative log-likelihood of a Gaussian with fixed variance. Understanding MLE is understanding *why* these losses are the natural choice, not arbitrary conventions.
+
+## Formal Definition
+
+Given i.i.d. data $x_1, \ldots, x_n$ drawn from a distribution with density/mass function $f(x \mid \theta)$, the **likelihood function** is:
+
+$$
+L(\theta) = \prod_{i=1}^n f(x_i \mid \theta)
+$$
+
+(Note: $L(\theta)$ is a function of $\theta$ with the data fixed — the opposite of the density, which is a function of $x$ with $\theta$ fixed.) The **maximum likelihood estimator** is:
+
+$$
+\hat\theta_{\text{MLE}} = \arg\max_\theta L(\theta)
+$$
+
+In practice we maximize the **log-likelihood** instead, since $\log$ is monotonic (so the maximizer is unchanged) and it turns the product into a sum, which is both numerically stable (avoids underflow from multiplying many small probabilities) and easier to differentiate:
+
+$$
+\ell(\theta) = \log L(\theta) = \sum_{i=1}^n \log f(x_i \mid \theta)
+$$
+
+## Derivation: MLE of a Gaussian's Mean and Variance
+
+This is the derivation worth doing by hand once, because it's the direct justification for why "fit a Gaussian" reduces to "compute the sample mean and sample variance."
+
+Given i.i.d. $x_1, \ldots, x_n \sim \mathcal{N}(\mu, \sigma^2)$, the log-likelihood is:
+
+$$
+\ell(\mu, \sigma^2) = \sum_{i=1}^n \log\left[\frac{1}{\sqrt{2\pi\sigma^2}} \exp\left(-\frac{(x_i-\mu)^2}{2\sigma^2}\right)\right] = -\frac{n}{2}\log(2\pi\sigma^2) - \frac{1}{2\sigma^2}\sum_{i=1}^n (x_i - \mu)^2
+$$
+
+**Step 1 — solve for $\hat\mu$.** Take $\partial \ell / \partial \mu$ and set to zero:
+
+$$
+\frac{\partial \ell}{\partial \mu} = \frac{1}{\sigma^2}\sum_{i=1}^n (x_i - \mu) = 0 \implies \sum_{i=1}^n x_i = n\mu \implies \hat\mu = \frac{1}{n}\sum_{i=1}^n x_i = \bar{x}
+$$
+
+The MLE for the mean is exactly the sample mean.
+
+**Step 2 — solve for $\hat\sigma^2$.** With $\mu$ fixed at $\hat\mu$, take $\partial \ell / \partial \sigma^2$ (treating $\sigma^2$ as a single variable $v$) and set to zero:
+
+$$
+\ell = -\frac{n}{2}\log(2\pi v) - \frac{1}{2v}\sum_i (x_i-\hat\mu)^2 \implies \frac{\partial \ell}{\partial v} = -\frac{n}{2v} + \frac{1}{2v^2}\sum_i (x_i - \hat\mu)^2 = 0
+$$
+
+$$
+\implies \frac{n}{2v} = \frac{1}{2v^2}\sum_i (x_i-\hat\mu)^2 \implies \hat\sigma^2 = \frac{1}{n}\sum_{i=1}^n (x_i - \hat\mu)^2
+$$
+
+**Step 3 — verify it's a maximum.** The second derivative w.r.t. $\mu$ is $-n/\sigma^2 < 0$, confirming a maximum (not a saddle or minimum). A similar check on $v$ confirms the same.
+
+<Callout type="warning" title="A well-known bias">
+  $\hat\sigma^2_{\text{MLE}} = \frac{1}{n}\sum(x_i-\bar x)^2$ is a **biased** estimator of the true variance: $\mathbb{E}[\hat\sigma^2_{\text{MLE}}] = \frac{n-1}{n}\sigma^2 \neq \sigma^2$. This is why the *unbiased* sample variance divides by $n-1$ (Bessel's correction) instead of $n$ — MLE optimizes likelihood, not unbiasedness, and the two goals aren't always aligned.
+</Callout>
+
+## Why Cross-Entropy Loss Is Negative Log-Likelihood
+
+For a classification model outputting $\hat{p}(y \mid x; \theta)$ (e.g. softmax probabilities), the likelihood of a dataset $\{(x_i, y_i)\}$ under a Categorical/Bernoulli model is:
+
+$$
+L(\theta) = \prod_{i=1}^n \hat p(y_i \mid x_i; \theta)
+$$
+
+Maximizing $L(\theta)$ is equivalent to maximizing $\ell(\theta) = \sum_i \log \hat p(y_i \mid x_i;\theta)$, which is equivalent to *minimizing*:
+
+$$
+-\ell(\theta) = -\sum_{i=1}^n \log \hat p(y_i \mid x_i; \theta)
+$$
+
+This is exactly the cross-entropy loss function used to train nearly every classifier and language model — training a neural net with cross-entropy loss via gradient descent *is* computing the MLE (approximately, since the optimization landscape is non-convex). The same logic applied to a Gaussian likelihood with fixed variance yields squared-error loss, since $-\log f(x\mid\mu,\sigma^2) = \frac{(x-\mu)^2}{2\sigma^2} + \text{const}$ — an affine function of squared error in $\mu$.
+
+<Mermaid chart={`
+graph TD
+  A["Assume data ~ f(x | θ)"] --> B["Likelihood L(θ) = Π f(xᵢ | θ)"]
+  B --> C["Log-likelihood ℓ(θ) = Σ log f(xᵢ | θ)"]
+  C --> D["Maximize ℓ(θ): set ∂ℓ/∂θ = 0"]
+  D --> E["Categorical model → cross-entropy loss"]
+  D --> F["Gaussian model → squared-error loss"]
+`} />
+
+## Asymptotic Properties
+
+Under standard regularity conditions, as $n \to \infty$, the MLE is:
+
+- **Consistent**: $\hat\theta_{\text{MLE}} \xrightarrow{p} \theta_{\text{true}}$.
+- **Asymptotically normal**: $\sqrt{n}(\hat\theta_{\text{MLE}} - \theta_{\text{true}}) \xrightarrow{d} \mathcal{N}(0, I(\theta)^{-1})$, where $I(\theta)$ is the **Fisher information** — a measure of how sharply the likelihood is curved around the true parameter.
+- **Asymptotically efficient**: it achieves the **Cramér-Rao lower bound**, the smallest possible variance among unbiased estimators, in the large-sample limit.
+
+These are why MLE remains the default estimation principle in ML even outside a Bayesian framework — with enough data, you can't systematically do better with an unbiased estimator.
+
+## Code Example
+
+```python
+import numpy as np
+from scipy.optimize import minimize_scalar
+
+rng = np.random.default_rng(0)
+true_mu, true_sigma = 3.0, 1.5
+data = rng.normal(true_mu, true_sigma, size=1000)
+
+# Closed-form MLE (derived above)
+mu_hat = data.mean()
+sigma2_hat = np.mean((data - mu_hat) ** 2)
+print(f"Closed-form MLE: mu={mu_hat:.3f}, sigma^2={sigma2_hat:.3f}")
+
+# Verify via direct numerical optimization of the negative log-likelihood
+def neg_log_likelihood(mu, data, sigma2):
+    n = len(data)
+    return 0.5 * n * np.log(2 * np.pi * sigma2) + np.sum((data - mu) ** 2) / (2 * sigma2)
+
+res = minimize_scalar(neg_log_likelihood, args=(data, sigma2_hat), bounds=(-10, 10), method="bounded")
+print(f"Numerically optimized mu: {res.x:.3f}")   # matches mu_hat
+```
+
+## Complexity
+
+| Case | Solution | Notes |
+| --- | --- | --- |
+| Exponential family (Gaussian, Bernoulli, Poisson, ...) | Closed-form, $O(n)$ | Sufficient statistics (mean, count) suffice |
+| Logistic regression | No closed form; convex — Newton's method / gradient descent, $O(n \cdot d)$ per iteration | Log-likelihood is concave in weights |
+| Neural networks | No closed form; non-convex — SGD variants | "Training" a network with cross-entropy/MSE loss is approximate MLE |
+| Latent-variable models (mixtures, HMMs) | No closed form even for exponential-family components | Requires EM — see [Expectation-Maximization Algorithm](/docs/foundations/probability-statistics/expectation-maximization) |
+
+<KeyTakeaways items={[
+  "MLE picks the parameter value that maximizes the probability (or density) of the observed, fixed data.",
+  "Taking the log turns a product of many probabilities into a sum — this is why the log-likelihood, not the raw likelihood, is what's actually optimized in practice.",
+  "Cross-entropy loss and mean squared error are both negative log-likelihoods of specific distributional assumptions (Categorical and Gaussian respectively) — training with these losses is approximate MLE.",
+  "The MLE variance estimator for a Gaussian is biased by a factor of (n-1)/n; the unbiased sample variance corrects for this with Bessel's correction.",
+  "MLE is asymptotically consistent, normal, and efficient (achieves the Cramér-Rao bound) under standard regularity conditions.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Recognizing which loss function corresponds to which distributional assumption — this clarifies what a model is implicitly assuming about the data-generating process.",
+    "Working in log-space for numerical stability and analytical tractability (sums of logs, not products of small numbers).",
+  ]}
+  cons={[
+    "Assuming MLE always has a closed-form solution — it doesn't for most non-exponential-family or latent-variable models; iterative optimization (gradient descent, EM, Newton's method) is the norm.",
+    "Forgetting that MLE is only guaranteed to have nice asymptotic properties in the large-sample limit — with small samples, MLE can be badly biased (as the σ² example shows) or high-variance.",
+    "Confusing likelihood with probability of the parameter — L(θ) is not a probability distribution over θ (it doesn't integrate to 1 over θ); that requires a prior and Bayes' theorem (see Bayesian Statistics).",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is minimizing cross-entropy loss during neural network training mathematically equivalent to maximum likelihood estimation?",
+    options: [
+      "It isn't — cross-entropy and MLE are unrelated concepts that happen to look similar",
+      "Cross-entropy loss is exactly the negative log-likelihood of the model's predicted class probabilities under the true labels; minimizing it is therefore maximizing the log-likelihood, which is MLE",
+      "Cross-entropy is only used for computational convenience and has no probabilistic meaning",
+      "MLE only applies to Gaussian-distributed data, so it can't relate to classification",
+    ],
+    answerIndex: 1,
+    explanation: "For a Categorical/softmax output distribution, the log-likelihood of the observed labels is Σ log p̂(y_i | x_i), and cross-entropy loss is defined as the negative of exactly this sum. Minimizing negative log-likelihood is identical to maximizing log-likelihood, i.e., performing MLE.",
+  },
+  {
+    question: "The MLE for a Gaussian's variance, σ̂² = (1/n)Σ(xᵢ - x̄)², is a biased estimator. What does this tell you about MLE as a general estimation principle?",
+    options: [
+      "MLE is broken and should never be used for variance estimation",
+      "MLE optimizes for maximizing the likelihood of observed data, not for unbiasedness — the two are different criteria, and an MLE estimator can be biased even though it has other desirable asymptotic properties like consistency and efficiency",
+      "This bias means the sample mean is also unreliable",
+      "The bias only appears when the data is not actually Gaussian",
+    ],
+    answerIndex: 1,
+    explanation: "MLE is defined purely by the maximization criterion; unbiasedness is a separate statistical property that isn't guaranteed. σ̂²_MLE underestimates the true variance by a factor of (n-1)/n because it uses the same data to estimate both the mean and dispersion around that estimated mean, but MLE remains consistent and asymptotically efficient despite the finite-sample bias.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Statistical Inference", authors: "George Casella, Roger L. Berger", venue: "Cengage Learning", year: 2002 },
+  { title: "Pattern Recognition and Machine Learning", authors: "Christopher M. Bishop", venue: "Springer", year: 2006 },
+  { title: "The Elements of Statistical Learning", authors: "Trevor Hastie, Robert Tibshirani, Jerome Friedman", venue: "Springer", year: 2009 },
+]} />

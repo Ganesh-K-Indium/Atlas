@@ -1,0 +1,231 @@
+---
+title: "Policy Gradients & Actor-Critic"
+description: "How to optimize a policy directly with gradient ascent when it can't be differentiated through sampling, via the log-derivative trick — and how a learned critic tames the resulting variance."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["reinforcement-learning", "machine-learning", "policy-gradient", "actor-critic", "reinforce"]
+prerequisites: ["Markov Decision Processes", "Q-Learning & Value-Based Methods", "Gradient ascent/descent", "Basic probability (expectation of a function of a random variable)"]
+---
+
+<Prerequisites items={[
+  "Markov Decision Processes (states, actions, rewards, return)",
+  "Q-Learning and value-based methods (contrast for this page)",
+  "Gradient ascent / descent",
+  "Expectation of a function of a random variable, log-derivative of a probability density",
+]} />
+
+<Callout type="note">
+  This page assumes familiarity with [Markov Decision Processes](/docs/machine-learning/reinforcement-learning/markov-decision-processes) and contrasts with [Q-Learning](/docs/machine-learning/reinforcement-learning/q-learning), which learns a value function and derives a policy from it *implicitly* (via argmax). Policy gradient methods instead parameterize and optimize the policy *directly*.
+</Callout>
+
+## Intuition
+
+Q-learning and value-based methods learn $Q(s,a)$ and act by taking $\arg\max_a Q(s,a)$. This works well when the action space is small and discrete — but it breaks down when actions are continuous (there's no way to enumerate and max over infinitely many actions), and the argmax makes the policy a discontinuous, brittle function of the value estimates.
+
+Policy gradient methods take a different approach: parameterize the policy itself, $\pi_\theta(a \mid s)$, as a differentiable function of parameters $\theta$ (e.g. a neural network outputting action probabilities), and directly perform gradient ascent on the expected return with respect to $\theta$. The obstacle is that the expected return is an expectation over trajectories sampled from a distribution that itself depends on $\theta$ — and you cannot naively push a gradient through a sampling operation. The **log-derivative trick** (also called the REINFORCE trick) is the algebraic maneuver that gets around this, turning "gradient of an expectation over a θ-dependent distribution" into "expectation of a gradient," which can be estimated by simply sampling.
+
+<Callout type="tip" title="The one idea that matters">
+  You can't differentiate through sampling, but you can differentiate through the *log-probability* of what you sampled — and the policy gradient theorem shows that the expected return's gradient is exactly the expected value of (return) × (gradient of log-probability of the actions taken). This means: increase the log-probability of actions that led to high return, decrease it for actions that led to low return, weighted by exactly how good or bad the outcome was.
+</Callout>
+
+## Formal Definition
+
+Let $\pi_\theta$ be a policy parameterized by $\theta$ (e.g. neural network weights). Define the **objective** as the expected return of a trajectory $\tau = (s_0, a_0, r_1, s_1, a_1, r_2, \dots)$ sampled by running $\pi_\theta$ in the environment:
+
+$$
+J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta} \big[ G(\tau) \big], \qquad G(\tau) = \sum_{t=0}^{T} \gamma^t r_{t+1}.
+$$
+
+We want $\nabla_\theta J(\theta)$, so we can perform gradient ascent: $\theta \leftarrow \theta + \alpha \nabla_\theta J(\theta)$.
+
+## Derivation: The Policy Gradient Theorem via the Log-Derivative Trick
+
+Write the objective as an integral (or sum, for discrete trajectory spaces) over all possible trajectories, weighted by their probability under $\pi_\theta$:
+
+$$
+J(\theta) = \int p_\theta(\tau) \, G(\tau) \, d\tau,
+$$
+
+where $p_\theta(\tau)$ is the probability of trajectory $\tau$ under policy $\pi_\theta$ (and the environment's fixed, $\theta$-independent transition dynamics). We want to differentiate this with respect to $\theta$:
+
+$$
+\nabla_\theta J(\theta) = \int \nabla_\theta p_\theta(\tau) \, G(\tau) \, d\tau.
+$$
+
+This isn't yet an expectation (which we could estimate by sampling), because it involves $\nabla_\theta p_\theta(\tau)$, not $p_\theta(\tau)$ itself. The log-derivative trick is the identity
+
+$$
+\nabla_\theta p_\theta(\tau) = p_\theta(\tau) \, \frac{\nabla_\theta p_\theta(\tau)}{p_\theta(\tau)} = p_\theta(\tau) \, \nabla_\theta \log p_\theta(\tau),
+$$
+
+which follows directly from the chain rule applied to $\log$: $\nabla_\theta \log p_\theta(\tau) = \nabla_\theta p_\theta(\tau) / p_\theta(\tau)$. Substituting this back in:
+
+$$
+\nabla_\theta J(\theta) = \int p_\theta(\tau) \, \nabla_\theta \log p_\theta(\tau) \, G(\tau) \, d\tau = \mathbb{E}_{\tau \sim \pi_\theta} \Big[ \nabla_\theta \log p_\theta(\tau) \, G(\tau) \Big].
+$$
+
+This *is* now an expectation over $\tau \sim \pi_\theta$ — exactly the distribution we can sample from by running the current policy in the environment. That's the whole trick: multiply and divide by $p_\theta(\tau)$ to convert a gradient-of-an-expectation into an expectation-of-a-gradient.
+
+The last step is to expand $\log p_\theta(\tau)$. The trajectory probability factors as (initial state distribution) × (product over time of policy probability × transition probability):
+
+$$
+p_\theta(\tau) = p(s_0) \prod_{t=0}^{T} \pi_\theta(a_t \mid s_t) \, P(s_{t+1} \mid s_t, a_t).
+$$
+
+Taking the log turns the product into a sum, and — crucially — the environment's transition dynamics $P(s_{t+1}\mid s_t,a_t)$ and initial distribution $p(s_0)$ do **not** depend on $\theta$, so they vanish under $\nabla_\theta$:
+
+$$
+\nabla_\theta \log p_\theta(\tau) = \nabla_\theta \left[ \log p(s_0) + \sum_t \log \pi_\theta(a_t \mid s_t) + \sum_t \log P(s_{t+1}\mid s_t, a_t) \right] = \sum_{t=0}^{T} \nabla_\theta \log \pi_\theta(a_t \mid s_t).
+$$
+
+This is the second key fact making policy gradients model-free: we never needed to know or differentiate through $P$. Putting it together gives the **policy gradient theorem**:
+
+$$
+\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta} \left[ \left( \sum_{t=0}^{T} \nabla_\theta \log \pi_\theta(a_t \mid s_t) \right) G(\tau) \right].
+$$
+
+The **REINFORCE** algorithm (Williams, 1992) estimates this expectation with Monte Carlo sampling: run the current policy to collect one or more full episodes, then for each time step $t$ compute $\nabla_\theta \log \pi_\theta(a_t \mid s_t) \cdot G_t$ (using the return-to-go $G_t$ from $t$ onward, which is a tighter, lower-variance but still valid substitute for the full-trajectory $G(\tau)$, justified by the fact that rewards before time $t$ don't depend on $a_t$'s gradient), and average over samples:
+
+$$
+\hat{g} = \frac{1}{N} \sum_{i=1}^{N} \sum_{t=0}^{T} \nabla_\theta \log \pi_\theta(a_t^{(i)} \mid s_t^{(i)}) \, G_t^{(i)}.
+$$
+
+## Reducing Variance: The Baseline, and Actor-Critic
+
+REINFORCE's gradient estimate is unbiased but has notoriously high variance: $G_t$ is a Monte Carlo sum of an entire trajectory's future rewards, which can vary wildly across episodes even for the same state and action, purely due to environment and policy stochasticity downstream. High variance means noisy gradients, meaning slow and unstable learning.
+
+The key variance-reduction trick is to subtract a **baseline** $b(s_t)$ from $G_t$ without introducing bias:
+
+$$
+\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta} \left[ \sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t) \, \big( G_t - b(s_t) \big) \right].
+$$
+
+This remains unbiased for *any* baseline that doesn't depend on the action $a_t$, because $\mathbb{E}_{a_t \sim \pi_\theta}[\nabla_\theta \log \pi_\theta(a_t \mid s_t)] \cdot b(s_t) = 0$: the expected gradient of a probability distribution's log-density over its own support is always zero (this itself follows from $\nabla_\theta \int \pi_\theta(a\mid s) \, da = \nabla_\theta 1 = 0$, combined with the log-derivative identity run in reverse). Subtracting a well-chosen baseline shrinks variance without touching the expectation.
+
+The best choice of baseline turns out to be (close to) the state-value function $V^\pi(s_t)$ itself: it's exactly the *expected* return from $s_t$, so $G_t - V^\pi(s_t)$ measures how much better or worse the actual return was than expected — this quantity is the **advantage function**,
+
+$$
+A^\pi(s_t, a_t) = Q^\pi(s_t, a_t) - V^\pi(s_t) \approx G_t - V(s_t).
+$$
+
+**Actor-critic** methods make this practical by learning $V(s)$ with a separate function approximator (the **critic**) alongside the policy (the **actor**), rather than relying on noisy Monte Carlo returns $G_t$ directly. The critic is trained with the same TD update as in value-based methods (bootstrapping, as derived in [Q-Learning](/docs/machine-learning/reinforcement-learning/q-learning)):
+
+$$
+\delta_t = r_{t+1} + \gamma V(s_{t+1}) - V(s_t) \qquad \text{(TD error, an unbiased-in-expectation estimate of } A^\pi(s_t,a_t)\text{)},
+$$
+
+and the actor is updated using this TD error in place of $G_t - V(s_t)$:
+
+$$
+\theta \leftarrow \theta + \alpha \, \nabla_\theta \log \pi_\theta(a_t \mid s_t) \, \delta_t.
+$$
+
+This substitutes a low-variance, bootstrapped, one-step estimate of the advantage for the high-variance, full-episode Monte Carlo return — trading a small amount of bias (since $V$ is only an approximation early in training) for a large reduction in variance, typically a favorable trade in practice.
+
+<Mermaid chart={`
+graph TD
+  Env["Environment"] -- "s_t, r_t" --> Actor["Actor: π_θ(a|s)"]
+  Env -- "s_t, r_t" --> Critic["Critic: V_w(s)"]
+  Actor -- "a_t" --> Env
+  Critic -- "TD error δ_t = r + γV(s') - V(s)" --> Actor
+  Actor -- "θ += α·∇log π_θ(a|s)·δ_t" --> Actor
+  Critic -- "w += β·δ_t·∇V_w(s)" --> Critic
+`} />
+
+## Code Example: REINFORCE Gradient Estimate
+
+```python
+import numpy as np
+
+def discounted_returns(rewards, gamma=0.99):
+    """Compute G_t for every t in a single episode's reward sequence."""
+    G = np.zeros(len(rewards))
+    running = 0.0
+    for t in reversed(range(len(rewards))):
+        running = rewards[t] + gamma * running
+        G[t] = running
+    return G
+
+def reinforce_gradient_estimate(log_probs, rewards, gamma=0.99, baseline=None):
+    """
+    log_probs: array of log pi_theta(a_t | s_t) for each timestep (requires grad in a real impl)
+    rewards:   array of r_{t+1} for each timestep
+    baseline:  optional array of b(s_t) (e.g. a learned V(s_t)) for variance reduction
+    Returns the per-timestep weights to multiply against grad(log_prob) and sum/backprop.
+    """
+    G = discounted_returns(rewards, gamma)
+    if baseline is not None:
+        G = G - baseline               # advantage estimate, still unbiased
+        G = (G - G.mean()) / (G.std() + 1e-8)  # optional: normalize for further variance reduction
+    # In a real implementation: loss = -(log_probs * G).sum(); loss.backward()
+    weighted_grad_signal = log_probs * G
+    return weighted_grad_signal
+
+# --- Actor-critic TD error (one step) ---
+def actor_critic_td_error(r, V_s, V_s_next, gamma=0.99, done=False):
+    target = r + (0.0 if done else gamma * V_s_next)
+    delta = target - V_s               # unbiased-in-expectation estimate of A(s,a)
+    return delta  # used both to update the critic (delta^2 loss) and to weight the actor's log-prob gradient
+```
+
+<ComparisonTable
+  headers={["Method", "Gradient signal used", "Variance", "Bias"]}
+  rows={[
+    ["REINFORCE (Monte Carlo)", "Full-episode return G_t", "High", "None (unbiased)"],
+    ["REINFORCE with baseline", "G_t − b(s_t), e.g. b = learned V(s)", "Lower", "None (unbiased, for any action-independent baseline)"],
+    ["Actor-Critic (TD)", "One-step TD error δ_t = r + γV(s') − V(s)", "Low", "Small (V is approximate, especially early in training)"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Policy gradient methods optimize a parameterized policy directly via gradient ascent, avoiding the argmax-over-actions that makes value-based methods awkward for continuous or large action spaces.",
+  "The log-derivative trick converts ∇_θ (expectation over a θ-dependent distribution) into (expectation over that same distribution) of a gradient — the algebraic move that makes the policy gradient estimable by sampling.",
+  "Because the environment's transition dynamics don't depend on θ, they drop out of the gradient entirely, leaving only ∇_θ log π_θ(a|s) — this is what makes policy gradients model-free.",
+  "Subtracting any action-independent baseline from the return leaves the gradient estimate unbiased while reducing its variance; the value function V(s) is the standard, near-optimal choice of baseline.",
+  "Actor-critic methods replace the high-variance Monte Carlo return with a low-variance, bootstrapped TD error from a learned critic — the same fundamental TD idea used in Q-learning, now used to estimate an advantage rather than a Q-value.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Pitfalls to avoid">
+  - **Forgetting the baseline must not depend on the action.** A baseline b(s) is unbiased; a baseline that depends on a_t (e.g. accidentally using Q(s,a) instead of V(s)) reintroduces bias into the gradient estimate.
+  - **Confusing REINFORCE's high variance with the algorithm being wrong.** The vanilla REINFORCE gradient is unbiased — its problem is purely variance, which slows and destabilizes learning but doesn't bias the solution it converges to.
+  - **Thinking the critic replaces the actor.** The critic only estimates value to reduce the actor's gradient variance; it does not choose actions itself (that's still the actor's/policy's job), unlike pure value-based methods where the policy is implicitly argmax over Q.
+  - **Taking policy gradient steps that are too large.** Because the objective is estimated from on-policy samples collected under the *current* policy, a large update can move the policy somewhere the old samples no longer represent well, degrading performance — this exact problem motivates trust-region methods, covered in [PPO & Trust Region Methods](/docs/machine-learning/reinforcement-learning/ppo-trust-region).
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What algebraic identity does the 'log-derivative trick' rely on, and why is it necessary for deriving the policy gradient?",
+    options: [
+      "The identity ∇_θ p_θ(τ) = p_θ(τ)·∇_θ log p_θ(τ), which converts ∇_θ J(θ) from an integral requiring ∇_θ p_θ(τ) into an expectation over τ~π_θ of ∇_θ log p_θ(τ)·G(τ), making it estimable by sampling trajectories",
+      "The identity log(ab) = log(a) + log(b), used only to simplify notation",
+      "L'Hopital's rule, used to handle the discount factor as γ→1",
+      "The product rule of differentiation applied to the reward function",
+    ],
+    answerIndex: 0,
+    explanation: "∇_θ J(θ) = ∫∇_θp_θ(τ)G(τ)dτ isn't directly an expectation. Using ∇_θp_θ(τ) = p_θ(τ)∇_θlog p_θ(τ) rewrites it as ∫p_θ(τ)·∇_θlog p_θ(τ)·G(τ)dτ = E_τ~π_θ[∇_θlog p_θ(τ)·G(τ)], which can be estimated by Monte Carlo sampling of trajectories under the current policy.",
+  },
+  {
+    question: "Why does subtracting a state-dependent baseline b(s_t) from the return G_t not introduce bias into the policy gradient estimate?",
+    options: [
+      "Because b(s_t) is always chosen to be zero in practice",
+      "Because E_{a_t~π_θ}[∇_θ log π_θ(a_t|s_t)] = 0 for any distribution over its own support, so the extra term contributed by −b(s_t)·∇_θlog π_θ(a_t|s_t) has expectation zero as long as b doesn't depend on a_t",
+      "Because the baseline cancels out algebraically with the discount factor γ",
+      "Bias is unavoidable; the baseline only affects the sign of the gradient, not its expectation",
+    ],
+    answerIndex: 1,
+    explanation: "Since ∫π_θ(a|s)da = 1 for all θ, differentiating both sides gives ∫∇_θπ_θ(a|s)da = 0, i.e. E_{a~π_θ}[∇_θ log π_θ(a|s)] = 0. Multiplying by any action-independent b(s) and taking expectation still gives zero, so subtracting b(s) from G_t leaves the gradient's expectation unchanged while reducing its variance.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Reinforcement Learning: An Introduction (2nd ed.)", authors: "Sutton, R. S., & Barto, A. G.", venue: "MIT Press", year: 2018 },
+  { title: "Simple statistical gradient-following algorithms for connectionist reinforcement learning", authors: "Williams, R. J.", venue: "Machine Learning", year: 1992 },
+  { title: "Policy Gradient Methods for Reinforcement Learning with Function Approximation", authors: "Sutton, R. S., McAllester, D., Singh, S., & Mansour, Y.", venue: "NeurIPS", year: 2000 },
+]} />

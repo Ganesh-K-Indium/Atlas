@@ -1,0 +1,183 @@
+---
+title: "KV Cache & Attention at Inference"
+description: "Why autoregressive decoding is inherently sequential, why caching Key/Value projections is the single biggest lever for LLM serving throughput, and why that cache becomes the memory bottleneck at long context."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "inference", "kv-cache", "attention", "gqa", "mqa"]
+prerequisites: ["Scaled dot-product attention", "Multi-head attention", "Autoregressive language modeling"]
+---
+
+<Prerequisites items={[
+  "Scaled dot-product attention (Q, K, V projections)",
+  "Multi-head attention and how heads split the model dimension",
+  "Autoregressive (causal) language modeling — predicting one token at a time",
+]} />
+
+## Intuition
+
+Training a Transformer is embarrassingly parallel: given a full sequence, every position's attention can be computed simultaneously, because every Query, Key, and Value is available at once. Inference is a completely different regime. A decoder-only LLM generates text one token at a time — it samples token $t$, appends it to the sequence, and only then can it compute what token $t+1$ should be, because token $t+1$'s prediction depends on having token $t$ in the input. There is no way to parallelize across the generation dimension: step $t+1$ cannot begin before step $t$'s output exists.
+
+That sequential constraint would be merely annoying if each step were cheap. It isn't, by default — naive implementations recompute Key and Value projections for *every* token in the sequence so far, at *every* decoding step, even though the vast majority of those tokens were already fully processed in a previous step and their K/V vectors never change. The KV cache is the fix: store each layer's Key and Value vectors the first time they're computed, and at every subsequent step only compute Q, K, V for the *one new token*, then attend against the cached K/V from all previous tokens.
+
+<Callout type="tip" title="The one-sentence idea">
+  A token's Key and Value vectors depend only on that token's own representation, not on any later token — so once computed, they never change. Caching them turns each decoding step from "reprocess the whole sequence" into "process exactly one new token," at the cost of storing every past token's K and V in GPU memory.
+</Callout>
+
+## Why Recomputation Is Wasteful — A Formal Look
+
+At generation step $t$, decoder self-attention needs $Q_t$ (query for the new token only, since causal masking means earlier tokens' outputs don't depend on later ones), and $K_{1:t}, V_{1:t}$ (keys/values for *all* tokens generated so far, including the new one):
+
+$$
+\text{Attention}(Q_t, K_{1:t}, V_{1:t}) = \text{softmax}\!\left(\frac{Q_t K_{1:t}^\top}{\sqrt{d_k}}\right) V_{1:t}
+$$
+
+Without caching, producing $K_{1:t}$ and $V_{1:t}$ means re-running the linear projections $K_{1:t} = X_{1:t} W_K$ and $V_{1:t} = X_{1:t} W_V$ over the entire prefix $X_{1:t}$ at every single step — an $O(t)$ amount of redundant matrix-multiply work per step, and $O(n^2)$ total work across an $n$-token generation, purely to recompute values that were already sitting in memory one step earlier. With caching, each step computes only $K_t = x_t W_K$ and $V_t = x_t W_V$ for the single new token, appends them to the cache, and reuses $K_{1:t-1}, V_{1:t-1}$ as-is. Per-step compute for the attention projections drops from $O(t)$ to $O(1)$, and total generation compute for this part drops from $O(n^2)$ to $O(n)$.
+
+This does **not** eliminate the sequential bottleneck — decoding is still one token at a time — but it removes the redundant recomputation, which is what makes autoregressive serving practical at all.
+
+## The Mechanism, Step by Step
+
+1. **Prefill.** The prompt (all input tokens) is processed in a single parallel forward pass, exactly like training. For every layer, this computes $K$ and $V$ for every prompt token and writes them into that layer's cache. This step is compute-bound and benefits fully from GPU parallelism.
+2. **Decode step 1.** The model computes $Q, K, V$ for the *newly sampled* token only. It appends the new $K, V$ to the cache, then computes attention using the new $Q$ against the *entire* cached $K, V$ (prompt + everything generated so far). The output logits determine the next sampled token.
+3. **Decode step $t$.** Repeat step 2: one new token's worth of $Q, K, V$ computed, cache extended by one position, attention computed against the full cache. This repeats until an end-of-sequence token or length limit.
+4. **Memory, not compute, dominates.** Each decode step now does very little matrix-multiply work (one token's projections), so decoding is typically **memory-bandwidth bound**: the GPU spends most of its time streaming the KV cache (and weights) from HBM rather than doing arithmetic. This is why KV cache *size* — not just its existence — is the central serving concern.
+
+<Mermaid chart={`
+graph TD
+  P["Prefill: process full prompt in parallel"] --> C["Write K, V for every prompt token into cache (per layer)"]
+  C --> D1["Decode step: compute Q,K,V for 1 new token"]
+  D1 --> Append["Append new K,V to cache"]
+  Append --> Attn["Attend: new Q against full cached K,V"]
+  Attn --> Sample["Sample next token"]
+  Sample --> D1
+`} />
+
+## The Memory Cost Formula
+
+For a Transformer with `num_layers` layers, `num_heads` attention heads of dimension `head_dim` each, serving a batch of `batch_size` sequences up to `seq_len` tokens, storing both K and V at `precision_bytes` bytes per number (2 for FP16/BF16, 1 for INT8):
+
+$$
+\text{KV cache memory} = \text{batch\_size} \times \text{seq\_len} \times \text{num\_layers} \times \text{num\_heads} \times \text{head\_dim} \times 2 \times \text{precision\_bytes}
+$$
+
+The factor of 2 accounts for storing *both* K and V. Note `num_heads × head_dim` is just `d_model` (or `num_kv_heads × head_dim` under GQA/MQA — see below), so this is linear in every one of batch size, sequence length, layer count, and model width.
+
+<Callout type="warning" title="Why this dominates long-context serving">
+  Model weights are a **fixed** cost, loaded once. The KV cache is a **per-request, per-token** cost that grows linearly with both batch size and sequence length — and serving wants to maximize both (more concurrent requests, longer contexts). For a 70B-class model with GQA at 8 KV heads, 128 head_dim, 80 layers, FP16: one 32k-token sequence alone costs roughly `1 × 32768 × 80 × 8 × 128 × 2 × 2` bytes ≈ 8.6 GB. Multiply by dozens of concurrent requests and the KV cache alone can exceed the memory used by the model weights themselves — this is precisely the problem [PagedAttention](/docs/llms/inference-serving/serving-vllm-tensorrt) targets.
+</Callout>
+
+## Shrinking the Cache: MQA and GQA
+
+Standard multi-head attention (MHA) gives every query head its own Key and Value projection — `num_heads` separate K/V pairs, each `head_dim` wide, all of which must be cached. Two architectural changes reduce this directly:
+
+- **Multi-Query Attention (MQA):** all query heads share a *single* Key head and a *single* Value head. The cache shrinks by a factor of `num_heads` (only one K/V pair per layer instead of `num_heads`-many), at some cost to model quality/expressivity.
+- **Grouped-Query Attention (GQA):** a middle ground — query heads are partitioned into groups, and each group shares one K/V head. With `num_kv_heads` groups (where `1 < num_kv_heads < num_heads`), the cache shrinks by `num_heads / num_kv_heads` relative to full MHA, recovering most of MHA's quality with most of MQA's memory savings. GQA is the default in most modern open-weight LLMs (Llama 2/3, Mistral, Qwen).
+
+Substituting `num_kv_heads` for `num_heads` in the memory formula above shows exactly why this matters: the KV cache formula's `num_heads` term becomes `num_kv_heads`, shrinking cache size linearly with the ratio chosen.
+
+<ComparisonTable
+  headers={["Scheme", "KV heads cached", "Cache size vs. MHA", "Typical quality impact"]}
+  rows={[
+    ["Multi-Head Attention (MHA)", "num_heads (one per query head)", "1× (baseline)", "Best quality, largest cache"],
+    ["Grouped-Query Attention (GQA)", "num_kv_heads (shared across groups)", "num_kv_heads / num_heads (e.g. 1/8×)", "Near-MHA quality, large memory savings"],
+    ["Multi-Query Attention (MQA)", "1 (shared across all query heads)", "1 / num_heads", "Small quality drop, maximal memory savings"],
+  ]}
+/>
+
+## Code Sketch
+
+```python
+# Simplified illustration of KV-cache-based decoding (conceptually
+# how HF `transformers` generate() and vLLM's engine both work).
+
+class KVCache:
+    def __init__(self, num_layers, batch_size, max_seq_len, num_kv_heads, head_dim, dtype):
+        shape = (num_layers, batch_size, max_seq_len, num_kv_heads, head_dim)
+        self.k_cache = torch.zeros(shape, dtype=dtype, device="cuda")
+        self.v_cache = torch.zeros(shape, dtype=dtype, device="cuda")
+        self.seq_len = 0  # number of positions filled so far
+
+    def update(self, layer_idx, new_k, new_v):
+        # new_k, new_v: [batch_size, 1, num_kv_heads, head_dim] for one new token
+        pos = self.seq_len
+        self.k_cache[layer_idx, :, pos] = new_k.squeeze(1)
+        self.v_cache[layer_idx, :, pos] = new_v.squeeze(1)
+        return self.k_cache[layer_idx, :, :pos + 1], self.v_cache[layer_idx, :, :pos + 1]
+
+
+def decode_step(model, token_ids, cache: KVCache):
+    x = model.embed(token_ids)  # [batch, 1, d_model] — only the new token
+    for layer_idx, layer in enumerate(model.layers):
+        q = layer.proj_q(x)
+        new_k, new_v = layer.proj_k(x), layer.proj_v(x)
+        k_all, v_all = cache.update(layer_idx, new_k, new_v)  # full history + new token
+        x = layer.attend(q, k_all, v_all)                      # GQA: k_all/v_all repeated across query-head groups
+        x = layer.ffn(x)
+    cache.seq_len += 1
+    return model.lm_head(x)
+```
+
+## Complexity and Memory Analysis
+
+| Quantity | Without KV cache | With KV cache |
+| --- | --- | --- |
+| Compute per decode step | $O(t \cdot d^2)$ — reprocesses whole prefix | $O(d^2)$ — one token's projections |
+| Total compute for $n$-token generation | $O(n^2 \cdot d^2)$ | $O(n \cdot d^2)$ |
+| Memory per request (KV cache) | — (not stored) | $O(\text{seq\_len} \times \text{num\_layers} \times \text{num\_kv\_heads} \times \text{head\_dim})$ |
+| Bottleneck at decode time | Compute (redundant matmuls) | Memory bandwidth (streaming the cache) |
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "KV caching converts an O(n²) redundant-compute problem into O(n) — the single most important inference optimization for autoregressive models.",
+    "GQA/MQA reduce cache size by a large constant factor with minimal quality loss, directly increasing the batch size (and thus throughput) a given GPU can serve.",
+    "Because it only reuses already-computed values, KV caching is mathematically exact — it changes nothing about the model's output distribution.",
+  ]}
+  cons={[
+    "The cache grows linearly with sequence length and batch size, and becomes the dominant memory consumer for long-context or high-concurrency serving — often exceeding the weights' own memory footprint.",
+    "Naively pre-allocating a maximum-length cache per request wastes memory on requests that finish early or are shorter than the maximum — the motivation for PagedAttention's block-based allocation.",
+    "Cache size scales with num_layers × num_kv_heads × head_dim — architectural choices (depth, width, GQA ratio) directly trade off serving cost against model quality, a decision that has to be made at training time, not serving time.",
+  ]}
+/>
+
+- Assuming caching reduces the *sequential* nature of decoding — it doesn't; it only removes redundant recomputation. One token still must be generated before the next can start.
+- Forgetting that the cache must be replicated per attention *layer*, not just once per model — the `num_layers` factor is easy to drop mentally and leads to serious underestimates of memory requirements.
+- Conflating precision of the KV cache with precision of the weights — caches are frequently quantized to INT8/FP8 independently of weight precision (see [Quantization](/docs/llms/inference-serving/quantization)) specifically because they dominate serving memory.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is a KV cache valid — i.e., why can Key and Value vectors computed at step t be reused unchanged at step t+10?",
+    options: [
+      "Because the model rounds them to save memory anyway, so reuse introduces no additional error",
+      "Because a token's Key and Value vectors are computed only from that token's own hidden state, which — under causal masking — never changes once that token has been processed",
+      "Because attention weights are fixed after training and don't depend on input",
+      "Because GPUs cannot recompute values that fast, so caching is a hardware workaround rather than a mathematical one",
+    ],
+    answerIndex: 1,
+    explanation: "Causal (autoregressive) masking means a token's own representation at a given layer depends only on itself and earlier tokens — later tokens never feed back into it. So its K and V projections, once computed, are fixed for the rest of generation and can be safely cached and reused.",
+  },
+  {
+    question: "A model has 40 layers, 8 KV heads (GQA), head_dim 128, FP16 (2 bytes), batch size 1. Roughly how does its KV cache memory scale as sequence length grows from 4k to 32k tokens?",
+    options: [
+      "It stays constant — the cache size doesn't depend on sequence length",
+      "It grows quadratically, since attention itself is O(n²)",
+      "It grows linearly with sequence length, since the cache stores one K and one V vector per token per layer per KV head",
+      "It shrinks, because longer sequences amortize the fixed cost of loading model weights",
+    ],
+    answerIndex: 2,
+    explanation: "The KV cache memory formula is linear in seq_len (as well as batch_size, num_layers, and num_kv_heads): each additional token adds one more K and V vector, per layer, per KV head, to store. Going from 4k to 32k tokens is an 8× increase in cache memory, holding everything else fixed.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Attention Is All You Need", authors: "Vaswani, A. et al.", venue: "NeurIPS", year: 2017, url: "https://arxiv.org/abs/1706.03762" },
+  { title: "Fast Transformer Decoding: One Write-Head is All You Need (Multi-Query Attention)", authors: "Shazeer, N.", venue: "arXiv", year: 2019, url: "https://arxiv.org/abs/1911.02150" },
+  { title: "GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints", authors: "Ainslie, J. et al.", venue: "arXiv", year: 2023, url: "https://arxiv.org/abs/2305.13245" },
+  { title: "Efficient Memory Management for Large Language Model Serving with PagedAttention", authors: "Kwon, W. et al.", venue: "SOSP", year: 2023, url: "https://arxiv.org/abs/2309.06180" },
+]} />

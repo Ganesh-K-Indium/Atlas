@@ -1,0 +1,173 @@
+---
+title: "BERT & Encoder-Only Models"
+description: "How masking tokens and predicting them with full bidirectional context made BERT a strong understanding model — and why that same bidirectionality makes it unsuitable for open-ended generation."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "nlp", "transformers", "bert", "pretraining"]
+prerequisites: ["The Transformer Architecture", "Self-Attention & Multi-Head Attention", "Cross-entropy loss"]
+---
+
+<Prerequisites items={["The Transformer Architecture", "Self-Attention & Multi-Head Attention", "Cross-entropy loss"]} />
+
+## Intuition
+
+Before BERT (Devlin et al., 2018), the dominant way to get contextual word representations from a language model was to train left-to-right (predict the next word from everything before it) and use the resulting hidden states as features. That's useful, but it means each token's representation only ever sees *past* context — a fundamentally one-sided view of the sentence.
+
+BERT's insight: for *understanding* tasks (classification, extraction, similarity) — as opposed to generation — there's no reason to restrict context to one direction. A word's meaning is shaped by everything around it, before and after. BERT is built to exploit that directly: an **encoder-only** Transformer stack (no causal mask) pretrained with an objective specifically designed to require bidirectional context.
+
+<Callout type="tip" title="The one-sentence idea">
+  BERT pretrains a bidirectional encoder by deliberately hiding some input tokens and forcing the model to reconstruct them using context from *both* directions simultaneously — a training signal that a causally-masked decoder-only model cannot produce, because it would let the model see the answer.
+</Callout>
+
+## Masked Language Modeling (MLM)
+
+The core pretraining objective: given an input sequence, randomly select ~15% of tokens, and for each selected position, replace the token according to the following recipe (used in the original BERT paper) — 80% of the time replace it with a special `[MASK]` token, 10% of the time replace it with a random other token, and 10% of the time leave it unchanged. Then train the model to predict the *original* token at every selected position, using cross-entropy loss over the vocabulary:
+
+$$
+\mathcal{L}_{\text{MLM}} = -\sum_{i \in \mathcal{M}} \log P\big(x_i \mid x_{\setminus \mathcal{M}}\big)
+$$
+
+where $\mathcal{M}$ is the set of masked positions and $x_{\setminus \mathcal{M}}$ denotes the full sequence with those positions masked/altered — critically, the model sees tokens on *both sides* of position $i$ when predicting it, because there is no causal mask restricting attention to the past.
+
+### Why the 80/10/10 recipe, not just always masking?
+
+If every masked position were always replaced with the literal `[MASK]` token, the model would only ever need to predict well when it *sees* `[MASK]` — but at fine-tuning and inference time, `[MASK]` never appears in real input, creating a train/inference mismatch (a form of the same exposure-bias family of problems seen in [Seq2Seq](/docs/deep-learning/sequence-models/seq2seq)). Occasionally substituting a random token or leaving the original token unchanged forces the model to maintain a good contextual representation for *every* token, not just ones flagged with a special symbol, which narrows that gap.
+
+### Why bidirectionality is structurally impossible for a causal model
+
+Compare this to the causal (autoregressive) objective used by decoder-only models like GPT (see [GPT & Decoder-Only Models](/docs/deep-learning/attention-transformers/gpt-decoder-only)): predicting $x_t$ from $x_1, \ldots, x_{t-1}$ only. If you tried to let a causally-masked model attend to *future* tokens while predicting the current one, the training objective would become trivial and useless — the model could simply copy the answer from a position it's allowed to see, learning nothing about how to infer it from context. The causal mask exists specifically to prevent this "answer leakage." MLM sidesteps the problem entirely by masking the *token itself*, not the *direction of attention* — the model can freely attend in both directions to everything except the masked positions' original identities, so there's no leakage, and full bidirectional context becomes a legitimate, learnable signal.
+
+## Next Sentence Prediction (NSP)
+
+BERT's original pretraining also included a second objective operating at the sentence-pair level: given two segments $A$ and $B$ packed into one input (separated by a `[SEP]` token, with a special `[CLS]` token prepended), predict whether $B$ actually follows $A$ in the original text (50% of training pairs) or is a random unrelated segment (the other 50%):
+
+$$
+\mathcal{L}_{\text{NSP}} = -\log P(\text{IsNext} \mid \text{[CLS]}, A, \text{[SEP]}, B)
+$$
+
+using the final hidden state at the `[CLS]` position, fed through a small classification head. The intent was to give the model a signal about inter-sentence coherence, useful for tasks like question answering and natural language inference that depend on relationships *between* sentences, not just within one. (Later work, notably RoBERTa, found NSP contributed little and dropped it in favor of just more MLM training on longer contiguous spans — worth knowing as a real empirical finding when discussing BERT's design in hindsight.)
+
+## Architecture
+
+<Mermaid chart={`
+graph TD
+  Tokens["[CLS] token1 token2 [MASK] token4 [SEP] token5 ... [SEP]"] --> Emb["Token + Segment + Position Embeddings"]
+  Emb --> Enc["Stack of bidirectional Transformer encoder blocks (no causal mask)"]
+  Enc --> H["Contextual hidden states for every position"]
+  H --> MLMHead["MLM head: predict original token at masked positions"]
+  H --> CLSHead["NSP head: classify IsNext / NotNext from [CLS] state"]
+`} />
+
+Structurally this is just the encoder half of the original Transformer (see [The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture)) — self-attention with no causal mask, stacked with residuals and layer norm — plus a **segment embedding** added to distinguish which of the two packed sentences a token belongs to.
+
+## Why Bidirectionality Helps Understanding but Blocks Generation
+
+The same property that makes BERT strong at understanding tasks makes it structurally unsuited to open-ended generation:
+
+- **For understanding tasks** (sentiment classification, named entity recognition, extractive QA, sentence similarity), the entire input is available upfront — there's no reason to hide the second half of a sentence from the model when deciding whether the first half is positive or negative. Full bidirectional context gives every token the richest possible representation, and BERT-family models set the state of the art on this class of benchmark on release.
+- **For generation**, the output doesn't exist yet — the model must produce token $t$ without access to tokens $t+1, t+2, \ldots$, because those are exactly what it's trying to generate. There is no well-defined way to "attend bidirectionally" over text that hasn't been written yet. This is precisely why generation calls for a causal, autoregressive setup — decoder-only, as in GPT — rather than the bidirectional encoder BERT is built around. A BERT-style model has no mechanism at all for sequentially producing novel, coherent, unboundedly long output — it was never trained to predict a next token conditioned only on the past.
+
+## Encoder-Only vs. Decoder-Only vs. Encoder-Decoder
+
+<ComparisonTable
+  headers={["Architecture", "Attention pattern", "Pretraining objective (typical)", "Examples", "Best for"]}
+  rows={[
+    ["Encoder-only", "Bidirectional — every token attends to every other token", "Masked Language Modeling (+ optional NSP)", "BERT, RoBERTa", "Understanding tasks: classification, embeddings, NER, extractive QA"],
+    ["Decoder-only", "Causal — each token attends only to itself and earlier tokens", "Next-token (causal) language modeling", "GPT family, Llama, DeepSeek, Qwen", "Open-ended generation; the dominant architecture for modern LLMs"],
+    ["Encoder-decoder", "Encoder bidirectional; decoder causal + cross-attends to encoder output", "Span corruption / text-to-text (e.g., T5)", "T5, original Transformer, BART", "Sequence-to-sequence tasks: translation, summarization"],
+  ]}
+/>
+
+See [T5 & Encoder-Decoder LLMs](/docs/deep-learning/attention-transformers/t5) for how encoder-decoder models combine BERT-style bidirectional input understanding with GPT-style autoregressive output generation in a single architecture.
+
+## Code Sketch
+
+```python
+import torch
+import torch.nn as nn
+
+def mask_tokens(input_ids, mask_token_id, vocab_size, mask_prob=0.15):
+    """Implements the 80/10/10 BERT masking recipe."""
+    labels = input_ids.clone()
+    prob_matrix = torch.full(input_ids.shape, mask_prob)
+    masked_indices = torch.bernoulli(prob_matrix).bool()
+    labels[~masked_indices] = -100  # ignore_index: only compute loss on masked positions
+
+    # 80% -> [MASK]
+    replace_mask = torch.bernoulli(torch.full(input_ids.shape, 0.8)).bool() & masked_indices
+    input_ids[replace_mask] = mask_token_id
+
+    # 10% -> random token
+    random_mask = torch.bernoulli(torch.full(input_ids.shape, 0.5)).bool() & masked_indices & ~replace_mask
+    random_tokens = torch.randint(vocab_size, input_ids.shape, dtype=torch.long)
+    input_ids[random_mask] = random_tokens[random_mask]
+
+    # remaining 10% left unchanged
+    return input_ids, labels
+
+
+class BertForMLM(nn.Module):
+    def __init__(self, encoder, hidden_dim, vocab_size):
+        super().__init__()
+        self.encoder = encoder  # bidirectional Transformer encoder stack, no causal mask
+        self.mlm_head = nn.Linear(hidden_dim, vocab_size)
+
+    def forward(self, input_ids, attention_mask, labels=None):
+        hidden_states = self.encoder(input_ids, attention_mask=attention_mask)  # no causal mask
+        logits = self.mlm_head(hidden_states)
+        loss = None
+        if labels is not None:
+            loss = nn.functional.cross_entropy(
+                logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100
+            )
+        return logits, loss
+```
+
+<KeyTakeaways items={[
+  "BERT is an encoder-only Transformer with no causal mask — every token attends bidirectionally to every other token, including ones after it.",
+  "Masked Language Modeling makes bidirectional pretraining possible: masking the token's identity (not the direction of attention) prevents the answer-leakage problem that would make a naive bidirectional 'predict the next token' objective trivial.",
+  "The 80/10/10 masking recipe exists to close the train/inference mismatch — [MASK] never appears in real downstream input, so the model must learn good representations for unmasked tokens too.",
+  "The exact property that makes BERT strong at understanding (full bidirectional context) makes it structurally unusable for open-ended generation, where future tokens don't exist yet — this motivates the decoder-only, causal design of models like GPT.",
+]} />
+
+## Common Mistakes
+
+- **Trying to use BERT for free-form text generation.** It has no causal masking and was never trained to predict a token conditioned only on the past — it isn't architecturally set up for autoregressive decoding at all (some workarounds exist, like iterative masked-token infilling, but they aren't standard generation).
+- **Thinking MLM masks the model's attention direction.** It doesn't — attention stays fully bidirectional; what's masked is the *identity of specific input tokens*, which is what avoids the trivial-copy problem.
+- **Assuming NSP is essential to BERT's success.** Later ablations (RoBERTa) showed NSP contributed little to downstream performance relative to more MLM pretraining on longer spans — a useful nuance when explaining BERT's design choices.
+- **Conflating "encoder-only" with "cannot handle sequence-to-sequence tasks."** BERT-style models can be adapted for tasks like extractive QA (predicting start/end token spans) without true generation, but genuine sequence-to-sequence generation needs a decoder, as in T5.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why can't a bidirectional model simply be trained with the same 'predict the next token from all context' objective as a causal decoder-only model?",
+    options: [
+      "Bidirectional models are too slow to train with any next-token objective",
+      "If a model could attend to all positions including the one right after the token being predicted, the objective becomes trivial — the model can just copy the answer from a position it's allowed to see, so masking the token's identity (as in MLM) rather than restricting attention direction is needed instead",
+      "Bidirectional attention is mathematically undefined for sequences longer than the mask window",
+      "There is no way to compute a loss without a causal mask",
+    ],
+    answerIndex: 1,
+    explanation: "Removing the causal mask while keeping a 'predict the next/current token from everything else' objective causes answer leakage — the model can trivially attend to the position it needs to predict. MLM avoids this by masking the token's identity rather than restricting the attention pattern, so bidirectional attention remains a legitimate, non-trivial learning signal.",
+  },
+  {
+    question: "Why is BERT unsuitable for open-ended text generation despite being highly effective for classification and extraction tasks?",
+    options: [
+      "BERT's vocabulary is too small to support generation",
+      "BERT was pretrained with full bidirectional attention and no causal mask, so it has no mechanism for producing a token conditioned only on previously generated tokens — the future tokens a generative model would need to leave unseen simply don't exist during real generation",
+      "BERT uses a different tokenizer that is incompatible with generation",
+      "BERT's encoder blocks lack residual connections needed for stable generation",
+    ],
+    answerIndex: 1,
+    explanation: "BERT's strength — every token can attend to every other token, including ones after it — has no analogue at real generation time, since future tokens haven't been produced yet. Decoder-only models with causal masking are built specifically to predict conditioned only on the past, which is what open-ended generation requires.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding", authors: "Devlin, J. et al.", venue: "NAACL", year: 2019, url: "https://arxiv.org/abs/1810.04805" },
+  { title: "Attention Is All You Need", authors: "Vaswani, A. et al.", venue: "NeurIPS", year: 2017, url: "https://arxiv.org/abs/1706.03762" },
+]} />

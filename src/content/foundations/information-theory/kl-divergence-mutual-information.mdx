@@ -1,0 +1,193 @@
+---
+title: "KL Divergence & Mutual Information"
+description: "Why KL divergence can never go negative, why it isn't a true distance, and how mutual information falls out as a special case measuring how much two variables know about each other."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["information-theory", "math", "kl-divergence", "mutual-information", "probability"]
+prerequisites: ["Entropy & Cross-Entropy", "Jensen's inequality", "Basic probability (joint/marginal distributions)"]
+---
+
+## Intuition
+
+If entropy measures the surprise inherent in one distribution, **KL divergence** measures the *extra* surprise you incur from using the wrong distribution to make predictions — it's a way of quantifying "how different is my belief $q$ from reality $p$," expressed in the same information units (bits/nats) as entropy.
+
+It behaves almost like a distance — it's zero exactly when the two distributions are identical, and positive otherwise — but it is **not symmetric** ($\mathrm{KL}(p\|q) \neq \mathrm{KL}(q\|p)$ in general) and doesn't satisfy the triangle inequality, so mathematically it's called a *divergence*, not a metric.
+
+**Mutual information** asks a related but distinct question: for two random variables $X$ and $Y$, how much does observing one tell you about the other? It turns out this is exactly the KL divergence between their true joint distribution and the (hypothetical) distribution where they'd be independent — i.e., mutual information measures divergence from independence.
+
+<Callout type="tip" title="The one-sentence idea">
+  KL divergence is the expected extra number of bits you waste by encoding/predicting with q when the truth is p, and mutual information is just KL divergence applied to measure how far a joint distribution is from treating its two variables as independent.
+</Callout>
+
+## Formal Definition
+
+For discrete distributions $p$ and $q$ over the same support, the **Kullback-Leibler divergence** is:
+
+$$
+\mathrm{KL}(p \,\|\, q) = \sum_x p(x) \log \frac{p(x)}{q(x)} = \mathbb{E}_{x\sim p}\left[\log \frac{p(x)}{q(x)}\right]
+$$
+
+with the conventions $0 \log \frac{0}{q} = 0$ and $\mathrm{KL}(p\|q) = +\infty$ if there is any $x$ with $p(x) > 0$ but $q(x) = 0$ (a genuinely infinite penalty for ruling out something that actually happens).
+
+For two random variables $X, Y$ with joint distribution $p(x,y)$ and marginals $p(x), p(y)$, the **mutual information** is:
+
+$$
+I(X;Y) = \sum_{x,y} p(x,y)\log\frac{p(x,y)}{p(x)p(y)} = \mathrm{KL}\big(p(x,y) \,\big\|\, p(x)p(y)\big)
+$$
+
+## Derivation
+
+### Non-negativity of KL divergence, via Jensen's inequality
+
+Jensen's inequality states that for a convex function $f$ and random variable $Z$, $\mathbb{E}[f(Z)] \geq f(\mathbb{E}[Z])$. The function $-\log$ is convex, so we apply Jensen with $Z = q(x)/p(x)$ (a ratio, evaluated under expectation over $x \sim p$):
+
+$$
+\begin{aligned}
+\mathrm{KL}(p\|q) &= \sum_x p(x)\log\frac{p(x)}{q(x)} = \sum_x p(x)\left(-\log\frac{q(x)}{p(x)}\right) = \mathbb{E}_{x\sim p}\left[-\log\frac{q(x)}{p(x)}\right] \\
+&\geq -\log\left(\mathbb{E}_{x\sim p}\left[\frac{q(x)}{p(x)}\right]\right) \qquad \text{(Jensen, since } -\log \text{ is convex)}\\
+&= -\log\left(\sum_x p(x)\cdot\frac{q(x)}{p(x)}\right) = -\log\left(\sum_x q(x)\right) = -\log(1) = 0
+\end{aligned}
+$$
+
+The sum $\sum_x q(x) = 1$ collapses because $q$ is a valid probability distribution. This proves $\mathrm{KL}(p\|q) \geq 0$ for any two distributions $p, q$ over the same support.
+
+**When is equality achieved?** Jensen's inequality is tight exactly when the random variable inside the expectation is almost-surely constant — here, when $q(x)/p(x)$ is the same constant for every $x$ with $p(x) > 0$. Since both distributions sum to 1, that constant must be exactly 1, i.e. $q(x) = p(x)$ everywhere. So $\mathrm{KL}(p\|q) = 0 \iff p = q$ — strict positivity otherwise, which is exactly what makes KL divergence useful as a (asymmetric) dissimilarity measure.
+
+### Why KL divergence is asymmetric
+
+$\mathrm{KL}(p\|q)$ weights the log-ratio by $p(x)$; $\mathrm{KL}(q\|p)$ weights the same log-ratio (with sign flipped) by $q(x)$ instead. These are different weighted averages of different quantities in general, so there's no reason for them to coincide. Concretely, a useful intuition:
+
+- $\mathrm{KL}(p\|q)$ (the "forward KL," used e.g. in maximum likelihood fitting) heavily penalizes $q(x)$ being near zero wherever $p(x)$ is non-negligible — it forces $q$ to cover all the support of $p$ ("mode-covering," can look overly spread out if $p$ is multimodal).
+- $\mathrm{KL}(q\|p)$ (the "reverse KL," common in variational inference) is only large where $q$ puts mass but $p$ doesn't — it lets $q$ ignore regions of $p$'s support ("mode-seeking," tends to lock onto a single mode of $p$).
+
+<ComparisonTable
+  headers={["Property", "KL(p || q)", "KL(q || p)"]}
+  rows={[
+    ["Behavior when q(x)=0, p(x)>0", "Infinite penalty — forbidden", "No penalty — allowed"],
+    ["Behavior when p(x)=0, q(x)>0", "No penalty", "Infinite penalty — forbidden"],
+    ["Typical fitting behavior", "Mode-covering (spreads over all of p's support)", "Mode-seeking (collapses onto one mode of p)"],
+    ["Common use case", "Maximum likelihood estimation (p = data, q = model)", "Variational inference (p = true posterior, q = tractable approximation)"],
+  ]}
+/>
+
+Because of this asymmetry, KL divergence is not a metric: it also fails the triangle inequality in general, which is why it's called a *divergence*.
+
+### Mutual information as KL divergence from independence
+
+If $X$ and $Y$ were truly independent, their joint distribution would factor exactly as $p(x)p(y)$. Mutual information measures how far the *actual* joint $p(x,y)$ is from this hypothetical independent joint, using KL divergence as the distance:
+
+$$
+I(X;Y) = \mathrm{KL}\big(p(x,y)\,\|\,p(x)p(y)\big) = \sum_{x,y}p(x,y)\log\frac{p(x,y)}{p(x)p(y)} \geq 0
+$$
+
+Non-negativity follows immediately from the KL non-negativity result above (with $p \to p(x,y)$ and $q \to p(x)p(y)$), and $I(X;Y) = 0 \iff p(x,y) = p(x)p(y)$ everywhere, i.e. **iff $X$ and $Y$ are independent** — exactly matching the intuition that independent variables carry zero information about each other.
+
+This identity also connects mutual information back to entropy. Expanding the log-ratio:
+
+$$
+\begin{aligned}
+I(X;Y) &= \sum_{x,y} p(x,y)\log\frac{p(x,y)}{p(x)p(y)} = \sum_{x,y}p(x,y)\log\frac{p(x\mid y)}{p(x)}\\
+&= \sum_{x,y}p(x,y)\log p(x\mid y) \;-\;\sum_{x,y}p(x,y)\log p(x) \\
+&= -H(X\mid Y) - \big(-H(X)\big) = H(X) - H(X\mid Y)
+\end{aligned}
+$$
+
+So mutual information is exactly **the reduction in uncertainty about $X$ once you observe $Y$**: how many bits of "surprise about X" you eliminate, on average, by learning $Y$. By symmetry of the joint-vs-marginals definition, $I(X;Y) = I(Y;X)$ — mutual information, unlike KL divergence in general, *is* symmetric, since swapping the roles of $X$ and $Y$ leaves $p(x,y)$ and $p(x)p(y)$ unchanged as sets.
+
+<Mermaid chart={`
+graph TD
+  A["Joint distribution p(x,y)"] --> D["KL(p(x,y) || p(x)p(y))"]
+  B["Marginal p(x)"] --> C["Product of marginals p(x)p(y)"]
+  E["Marginal p(y)"] --> C
+  C --> D
+  D --> F["= Mutual Information I(X;Y)"]
+  F --> G["= H(X) - H(X|Y): bits of uncertainty about X removed by observing Y"]
+  F --> H["I(X;Y) = 0  iff  X and Y independent"]
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+
+def kl_divergence(p, q, base=2, eps=1e-12):
+    """KL(p || q) for discrete distributions given as arrays over the same support."""
+    p = np.asarray(p, dtype=float)
+    q = np.clip(np.asarray(q, dtype=float), eps, 1.0)
+    mask = p > 0                      # 0 * log(0/q) := 0
+    return np.sum(p[mask] * np.log(p[mask] / q[mask]) / np.log(base))
+
+def mutual_information(joint, base=2):
+    """I(X;Y) from a joint probability table joint[i, j] = P(X=i, Y=j)."""
+    joint = np.asarray(joint, dtype=float)
+    px = joint.sum(axis=1, keepdims=True)   # marginal P(X)
+    py = joint.sum(axis=0, keepdims=True)   # marginal P(Y)
+    outer = px @ py                          # product of marginals, P(X)P(Y)
+    return kl_divergence(joint.ravel(), outer.ravel(), base=base)
+
+# Demonstrate asymmetry of KL
+p = np.array([0.10, 0.40, 0.50])
+q = np.array([0.60, 0.25, 0.15])
+print("KL(p||q) =", kl_divergence(p, q))
+print("KL(q||p) =", kl_divergence(q, p))   # different from KL(p||q)
+print("KL(p||p) =", kl_divergence(p, p))   # exactly 0
+
+# Mutual information: correlated joint vs. independent joint
+joint_correlated = np.array([[0.4, 0.1],
+                              [0.1, 0.4]])   # X and Y strongly agree
+joint_independent = np.outer([0.5, 0.5], [0.5, 0.5])  # truly independent
+
+print("I(X;Y) correlated  =", mutual_information(joint_correlated), "bits")
+print("I(X;Y) independent =", mutual_information(joint_independent), "bits")  # ~0
+```
+
+<KeyTakeaways items={[
+  "KL(p||q) = E_p[log(p/q)] >= 0 always, proven via Jensen's inequality applied to the convex function -log; equality holds iff p = q everywhere.",
+  "KL divergence is not symmetric and not a true metric (fails the triangle inequality) — KL(p||q) != KL(q||p) in general, which drives real differences between maximum-likelihood fitting (forward KL) and variational inference (reverse KL).",
+  "Mutual information I(X;Y) = KL(p(x,y) || p(x)p(y)) measures how far a joint distribution is from independence, and equals zero if and only if X and Y are independent.",
+  "I(X;Y) = H(X) - H(X|Y) = H(Y) - H(Y|X): mutual information is the reduction in uncertainty about one variable from observing the other, and it is symmetric even though KL divergence in general is not.",
+]} />
+
+## Common Mistakes
+
+- **Calling KL divergence a "distance."** It's non-negative and zero only at equality (like a distance), but it's asymmetric and violates the triangle inequality, so it is formally a *divergence*, a weaker notion.
+- **Mixing up forward and reverse KL in variational inference.** Choosing $\mathrm{KL}(q\|p)$ vs. $\mathrm{KL}(p\|q)$ as the objective produces qualitatively different approximate posteriors (mode-seeking vs. mode-covering) — this isn't a minor implementation detail, it changes what the fitted approximation looks like.
+- **Forgetting the support condition.** If $q(x) = 0$ somewhere $p(x) > 0$, $\mathrm{KL}(p\|q) = \infty$. This shows up in practice as numerical blowups or `NaN` losses when a model assigns literal zero probability to something that occurs in the data — always add a small epsilon or work in log-space.
+- **Assuming zero mutual information means "no relationship."** $I(X;Y) = 0$ only tests statistical independence, but it correctly captures *any* form of dependence (linear or not) — unlike Pearson correlation, which can be zero even for strongly, non-linearly dependent variables. It's a common misconception in the other direction: don't assume MI is "better than correlation" for small-sample estimation — MI is notoriously hard to estimate accurately from limited samples, especially in continuous or high-cardinality settings.
+- **Computing KL/MI without handling zero-probability bins.** Naively computing `log(p/q)` when either is exactly 0 produces `-inf`/`NaN`; always mask or clip as shown in the code example.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Using Jensen's inequality, why must KL(p||q) always be non-negative?",
+    options: [
+      "Because probabilities are always non-negative numbers",
+      "Because -log is convex, so E_p[-log(q(x)/p(x))] >= -log(E_p[q(x)/p(x)]) = -log(1) = 0, since E_p[q(x)/p(x)] sums to exactly 1 over the support of p",
+      "Because KL divergence is defined as a sum of squared differences",
+      "It isn't always non-negative — it can be negative when q assigns more probability mass than p to some outcomes",
+    ],
+    answerIndex: 1,
+    explanation: "KL(p||q) = E_p[-log(q(x)/p(x))]. Since -log is convex, Jensen's inequality gives E[-log(Z)] >= -log(E[Z]) for Z = q(x)/p(x). The expectation E_p[q(x)/p(x)] = sum_x p(x) * q(x)/p(x) = sum_x q(x) = 1 because q is a valid distribution, so the bound becomes -log(1) = 0.",
+  },
+  {
+    question: "Why is mutual information I(X;Y) symmetric (I(X;Y) = I(Y;X)) even though KL divergence in general is not symmetric?",
+    options: [
+      "Mutual information isn't actually symmetric — this is a common misconception",
+      "Because I(X;Y) is defined as KL(p(x,y) || p(x)p(y)), and swapping the roles of X and Y leaves both the joint distribution p(x,y) and the product of marginals p(x)p(y) as the same two objects (just re-indexed), so the KL divergence between them is unchanged",
+      "Because mutual information uses a symmetrized version of KL divergence called Jensen-Shannon divergence",
+      "Because entropy H(X) always equals H(Y) for any two random variables",
+    ],
+    answerIndex: 1,
+    explanation: "I(X;Y) is a single KL divergence between one specific pair of distributions: the joint p(x,y) and the product of marginals p(x)p(y). Relabeling which variable is 'X' and which is 'Y' doesn't change either of those two distributions as mathematical objects, so the KL value is identical — unlike the general case of KL(p||q) vs KL(q||p), which compares genuinely different distribution pairs.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Elements of Information Theory (2nd ed.)", authors: "Cover, T. M. & Thomas, J. A.", venue: "Wiley", year: 2006, url: "https://www.wiley.com/en-us/Elements+of+Information+Theory%2C+2nd+Edition-p-9780471241959" },
+  { title: "On Information and Sufficiency", authors: "Kullback, S. & Leibler, R. A.", venue: "Annals of Mathematical Statistics", year: 1951, url: "https://projecteuclid.org/euclid.aoms/1177729694" },
+  { title: "Pattern Recognition and Machine Learning (Ch. 1.6: Information Theory)", authors: "Bishop, C. M.", venue: "Springer", year: 2006, url: "https://www.microsoft.com/en-us/research/publication/pattern-recognition-machine-learning/" },
+]} />

@@ -1,0 +1,139 @@
+---
+title: "Segment Anything (SAM)"
+description: "How separating 'understand the image' from 'what am I being asked to segment right now' turned segmentation from a fixed-class task into a promptable, zero-shot-generalizing one."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "computer-vision", "segmentation", "sam", "foundation-models"]
+prerequisites: ["U-Net for Segmentation", "Vision Transformers (ViT)", "CLIP & Multimodal Vision-Language Models"]
+---
+
+<Prerequisites items={["U-Net for Segmentation", "Vision Transformers (ViT)", "CLIP & Multimodal Vision-Language Models"]} />
+
+## Intuition
+
+A conventional segmentation model like [U-Net](/docs/deep-learning/vision-architectures/unet) is trained for a fixed set of classes: it always outputs, say, "tumor vs. background," or "road / car / pedestrian / sky," and asking it to segment some object type it never saw during training simply doesn't work — the model's entire output structure is tied to the label set it was trained on. SAM's reframing: instead of training a model that always segments the *same fixed things*, train a model that segments *whatever it's currently told to look at*, where "told" can be a point, a box, or a rough mask — a **prompt** given at inference time, exactly analogous to how a language model is prompted with a task description rather than retrained for it.
+
+<Callout type="tip" title="The one-sentence idea">
+  Split segmentation into a heavy, prompt-independent image encoder (run once per image) and a lightweight, fast prompt encoder + mask decoder that combines the image's precomputed embedding with whatever prompt (point, box, rough mask) is given at that moment — decoupling "understand this image in general" from "produce the mask for this specific thing right now" is what lets the model generalize to object types and domains it never saw labeled examples for.
+</Callout>
+
+## Promptable Segmentation Architecture
+
+SAM has three components with deliberately different computational costs:
+
+1. **Image encoder** — a large, pretrained ViT (see [Vision Transformers (ViT)](/docs/deep-learning/vision-architectures/vision-transformers)) that processes the full input image *once* into a rich, general-purpose dense embedding. This is the expensive step (hundreds of milliseconds), but it is prompt-independent — it doesn't know or care yet what will be segmented, so it only ever needs to run once per image, no matter how many different prompts/objects are later queried against that same image.
+2. **Prompt encoder** — encodes whatever prompt is given into an embedding: a point click is encoded via its position (positional encoding, as in a Transformer) plus a learned embedding indicating foreground/background; a box is encoded via its corner positions; a rough mask is encoded via a small convolutional embedding. This is cheap, since prompts are tiny compared to the image itself.
+3. **Mask decoder** — a lightweight Transformer-based decoder that takes the (precomputed, reused) image embedding and the (freshly computed, cheap) prompt embedding, cross-attends between them, and outputs a segmentation mask (plus a confidence/IoU-prediction score, and — because a single point can be ambiguous, e.g. a click on a shirt button could mean "the button," "the shirt," or "the person" — SAM by default outputs multiple candidate masks at different granularities and lets the confidence score pick, or a user disambiguate).
+
+Because only the prompt encoder and mask decoder need to re-run for a new prompt on an *already-encoded* image, SAM can respond to a new point or box interactively, in real time (tens of milliseconds), even though the image encoder itself is a large, slow-to-run ViT — the expensive part is amortized once per image, and every subsequent prompt is cheap.
+
+<Mermaid chart={`
+graph TD
+  Img["Input image"] --> ImgEnc["Image encoder (large ViT) — runs once per image"]
+  ImgEnc --> ImgEmb["Image embedding (reused for every prompt)"]
+  Prompt["Prompt: point / box / rough mask"] --> PromptEnc["Prompt encoder — cheap, runs per prompt"]
+  PromptEnc --> PromptEmb["Prompt embedding"]
+  ImgEmb --> Decoder["Mask decoder (lightweight Transformer, cross-attention)"]
+  PromptEmb --> Decoder
+  Decoder --> Masks["Candidate mask(s) + confidence score(s)"]
+`} />
+
+## Why Promptable Design Generalizes to Unseen Objects and Domains
+
+A conventional segmentation model's output layer is shaped by, and only by, the fixed class taxonomy present in its training labels — it has no mechanism at all for producing a coherent mask for an object category it never saw, because "which class is this pixel" was the entire task it learned. SAM instead never learns "what class is this" at all — it learns a much more general skill: **given a spatial hint about what region a user cares about, produce the boundary of the coherent object/region containing that hint.** That skill is class-agnostic by construction; it is trained on masks, not class labels, using a large and diverse (reportedly over 1 billion masks across 11 million images) dataset built specifically to cover a very broad range of object types, scales, and domains — precisely so the "given a hint, find the object boundary" skill transfers to object categories and imaging domains not explicitly represented in training.
+
+This mirrors, structurally, why [CLIP](/docs/deep-learning/vision-architectures/clip) generalizes zero-shot to unseen classes: both replace "predict one of K fixed labels" with a more general, prompt/query-driven task (compare embeddings to arbitrary text, versus produce a mask for an arbitrary spatial hint) whose training signal is not tied to a closed set of categories. The result in both cases is a foundation model that can be *directed* at inference time rather than *retrained* for each new task.
+
+<ComparisonTable
+  headers={["Property", "Fixed-class segmentation model (e.g. U-Net trained for N classes)", "SAM (promptable)"]}
+  rows={[
+    ["Output structure", "Fixed number of class channels decided at training time", "Arbitrary mask conditioned on whatever prompt is given at inference time"],
+    ["Handling an unseen object category", "Not possible without retraining/fine-tuning on new labels", "Works directly — the model was never taught a fixed category list to begin with"],
+    ["Cost of segmenting a new object in the same image", "N/A — model outputs all classes at once from a single forward pass", "Cheap — only the prompt encoder + mask decoder re-run; the image encoding is reused"],
+    ["Training signal", "Per-pixel class labels for a specific closed set of categories", "Class-agnostic masks with corresponding prompts, across a very broad and diverse mask dataset"],
+  ]}
+/>
+
+## Code Sketch
+
+```python
+import torch
+
+class SAMLike(torch.nn.Module):
+    def __init__(self, image_encoder, prompt_encoder, mask_decoder):
+        super().__init__()
+        self.image_encoder = image_encoder   # large ViT, expensive, run once per image
+        self.prompt_encoder = prompt_encoder  # cheap: encodes points/boxes/masks
+        self.mask_decoder = mask_decoder      # lightweight, cross-attends image + prompt
+
+    def encode_image(self, image):
+        return self.image_encoder(image)      # (1, embed_dim, H', W') — cache and reuse
+
+    def predict_mask(self, image_embedding, points=None, boxes=None, mask_prompt=None):
+        prompt_embedding = self.prompt_encoder(points=points, boxes=boxes, mask=mask_prompt)
+        masks, iou_scores = self.mask_decoder(image_embedding, prompt_embedding)
+        return masks, iou_scores    # multiple candidate masks + confidence, since prompts can be ambiguous
+
+# Usage: encode once, prompt many times cheaply
+sam = SAMLike(image_encoder, prompt_encoder, mask_decoder)
+image_embedding = sam.encode_image(image)                       # expensive, once
+masks_a, scores_a = sam.predict_mask(image_embedding, points=[(120, 80)])   # cheap
+masks_b, scores_b = sam.predict_mask(image_embedding, boxes=[(50, 50, 200, 300)])  # cheap, same image
+```
+
+<KeyTakeaways items={[
+  "SAM separates a heavy, prompt-independent image encoder (run once per image) from a lightweight prompt encoder and mask decoder (run per prompt), which is both the source of its interactive speed and, structurally, what forces the model to learn a general 'segment what's hinted at' skill rather than a fixed class list.",
+  "Prompts (points, boxes, rough masks) replace the fixed output-class-channel structure of a conventional segmentation model, making the segmentation target something specified at inference time rather than baked in at training time.",
+  "Because the training objective was never tied to a closed category list, and training used an unusually large and diverse mask dataset, SAM's 'find the object boundary given a hint' skill transfers zero-shot to unseen object types and imaging domains far better than a fixed-class model can.",
+  "A single ambiguous prompt (e.g. one point) can refer to multiple valid objects at different granularities, which is why SAM outputs multiple candidate masks with confidence scores rather than committing to one.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Generalizes to novel object categories and imaging domains without retraining, because segmentation was never tied to a fixed label taxonomy in the first place.",
+    "Amortized cost structure (expensive image encoding done once, cheap prompt-conditioned decoding done many times) makes interactive, real-time use with multiple prompts on the same image practical.",
+    "A single foundation model replaces many task-specific segmentation models, since the prompt itself specifies the task at inference time.",
+  ]}
+  cons={[
+    "A single point prompt is often genuinely ambiguous about scale/granularity (part vs. whole object) — treating SAM's top-1 output as unambiguous, instead of examining its multiple candidate masks and confidence scores, is a common usage mistake.",
+    "SAM produces masks for whatever is prompted; it has no built-in notion of semantic class labels, so tasks that need 'what is this object called,' not just 'where is its boundary,' require pairing it with a separate classifier (or a CLIP-style model) — SAM alone doesn't provide labels.",
+    "Assuming the promptable design eliminates all domain gap — extremely specialized domains (e.g. certain medical or satellite imagery) still show reduced zero-shot mask quality relative to natural images, even though the promptable design generalizes considerably better than fixed-class models.",
+    "Re-running the full image encoder for every new prompt on the same image, instead of caching the image embedding once — this negates SAM's interactive-speed design entirely.",
+  ]}
+/>
+
+<Quiz questions={[
+  {
+    question: "Why does SAM separate its architecture into a heavy image encoder that runs once per image and a lightweight prompt encoder plus mask decoder that runs per prompt?",
+    options: [
+      "To reduce the total number of parameters in the model",
+      "So the expensive, prompt-independent step of understanding the image is amortized across many prompts, letting each new point/box/mask prompt on the same image be processed cheaply and interactively without re-encoding the whole image",
+      "Because the image encoder cannot be trained jointly with the prompt encoder",
+      "To ensure the model only ever produces one mask per image",
+    ],
+    answerIndex: 1,
+    explanation: "The image encoding step doesn't depend on what will be prompted, so it only needs to run once per image regardless of how many different objects or regions are later queried against it. Only the cheap prompt encoder and lightweight mask decoder need to re-run for each new prompt, which is what makes SAM interactively fast despite using a large ViT as its image encoder.",
+  },
+  {
+    question: "What allows SAM's promptable segmentation to generalize zero-shot to object categories it never saw labeled examples of, unlike a conventional fixed-class segmentation model?",
+    options: [
+      "SAM memorizes a much larger fixed list of classes than conventional models",
+      "SAM's training objective was never tied to predicting a closed set of class labels — it learns the class-agnostic skill of producing a mask for whatever region a given spatial prompt points to, trained on a very large and diverse mask dataset",
+      "SAM uses a smaller, simpler architecture that is inherently easier to generalize",
+      "Conventional segmentation models are incapable of using ViT backbones",
+    ],
+    answerIndex: 1,
+    explanation: "A conventional model's output structure is fixed to the class taxonomy in its training labels, so it has no mechanism for an unseen category. SAM instead learns 'given a hint, produce the boundary of the object it refers to' — a task that is class-agnostic by construction — using training data covering an unusually broad range of object types and domains, which is what lets that skill transfer to new categories at inference time.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Segment Anything", authors: "Kirillov, A. et al.", venue: "ICCV", year: 2023, url: "https://arxiv.org/abs/2304.02643" },
+  { title: "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale", authors: "Dosovitskiy, A. et al.", venue: "ICLR", year: 2020, url: "https://arxiv.org/abs/2010.11929" },
+  { title: "Learning Transferable Visual Models From Natural Language Supervision (CLIP)", authors: "Radford, A. et al.", venue: "ICML", year: 2021, url: "https://arxiv.org/abs/2103.00020" },
+]} />

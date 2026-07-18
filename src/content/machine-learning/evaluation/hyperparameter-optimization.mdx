@@ -1,0 +1,199 @@
+---
+title: "Hyperparameter Optimization & Bayesian Search"
+description: "Why random search beats grid search in high dimensions, and how Bayesian optimization replaces blind search with a probabilistic model of where to look next."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["machine-learning", "evaluation", "hyperparameter-tuning", "bayesian-optimization"]
+prerequisites: ["Cross-validation", "Gaussian processes (basic intuition)", "Overfitting vs underfitting"]
+---
+
+<Prerequisites items={["Cross-validation strategies", "Basic intuition for Gaussian processes / probabilistic surrogate models", "Bias-variance tradeoff"]} />
+
+## Intuition
+
+A model's performance depends not just on its parameters (learned from data) but on its **hyperparameters** — settings chosen before training (learning rate, tree depth, regularization strength). Hyperparameter optimization is a search problem over a space where every single evaluation is expensive (it requires training and validating a model). The central question is how to spend a limited evaluation budget as effectively as possible.
+
+<Callout type="tip" title="The core idea">
+  Grid search wastes evaluations on a rigid lattice where many hyperparameters barely matter; random search fixes that by sampling independently, so effort concentrates on the dimensions that actually matter. Bayesian optimization goes further, using the results of every past evaluation to build a probabilistic model of "where good hyperparameters likely live" and choosing the next point to evaluate based on that model, rather than ignoring history the way grid and random search do.
+</Callout>
+
+## Formal Definition
+
+Let $\lambda \in \Lambda$ be a hyperparameter configuration in some search space $\Lambda$, and let $f(\lambda)$ be the (expensive, noisy) validation performance obtained by training the model with hyperparameters $\lambda$ and evaluating it (typically via cross-validation). Hyperparameter optimization solves:
+
+$$
+\lambda^* = \arg\max_{\lambda \in \Lambda} f(\lambda)
+$$
+
+where each evaluation of $f$ costs a full training run, $f$ has no known closed form (it's a "black box"), and $\Lambda$ is often high-dimensional and mixed-type (continuous learning rates, integer tree depths, categorical kernel choices).
+
+- **Grid search**: fix a finite set of values per hyperparameter and evaluate $f$ at every point in the Cartesian product of those sets.
+- **Random search**: independently sample each hyperparameter from a specified distribution (uniform, log-uniform, etc.) and evaluate $f$ at each sampled configuration, for a fixed budget of $T$ evaluations.
+- **Bayesian optimization**: maintain a probabilistic **surrogate model** $\hat f$ (commonly a Gaussian Process, GP) approximating $f$ from all evaluations so far, and use an **acquisition function** built from that surrogate to choose the next $\lambda$ to actually evaluate.
+
+## Derivation: Why Random Search Beats Grid Search in High Dimensions
+
+Consider tuning $d$ hyperparameters, but suppose (as is common in practice) that only $d_{\text{eff}} < d$ of them substantially affect $f$ — the rest have negligible effect within the ranges considered. This is Bergstra & Bengio's (2012) central observation.
+
+**Grid search's inefficiency.** With a grid of $k$ values per dimension, a full grid costs $k^d$ evaluations, but the *distinct values explored along each individual dimension* is only $k$ — no matter how many total evaluations you run, each hyperparameter is only ever tested at those same $k$ fixed values. If a particular hyperparameter turns out to be unimportant, the grid has still "wasted" a factor of $k$ evaluations repeating every combination of the other $d-1$ hyperparameters at each of that unimportant hyperparameter's $k$ values — no new information about the *important* dimensions was gained from that repetition.
+
+**Random search's advantage.** With $T$ random samples, each hyperparameter's *marginal* set of tested values is (with high probability, for continuous distributions) $T$ **distinct** values, not $k$. Projecting $T$ random points onto any single axis gives approximately $T$ different values along that axis (as opposed to grid search's fixed $k$), so if only $d_{\text{eff}}$ dimensions matter, random search effectively explores those $d_{\text{eff}}$ important dimensions with resolution close to $T$, while grid search's resolution on any dimension is capped at $k \ll T$ for the same total budget (since $T = k^d$ forces $k = T^{1/d}$, shrinking fast as $d$ grows).
+
+**Quantifying with a simple probability argument.** Suppose the region of near-optimal hyperparameters occupies a fraction $p$ of the effective search volume (say $p = 0.05$, i.e., the "good" region covers 5% of the space along the dimensions that matter). The probability that at least one of $T$ independent random samples lands in that region is:
+
+$$
+P(\text{at least one hit}) = 1 - (1-p)^T
+$$
+
+For $p = 0.05$ and $T = 60$: $1 - (0.95)^{60} \approx 1 - 0.046 \approx 0.954$ — a 95%+ chance of finding a near-optimal configuration with just 60 random trials, *regardless of the total dimensionality* $d$, as long as the effective dimensionality $d_{\text{eff}}$ stays low. Grid search offers no comparable guarantee: its coverage of the important dimensions degrades as $d$ (including unimportant dimensions) grows, since the same evaluation budget $T=k^d$ must be spread across all $d$ dimensions whether or not they matter.
+
+## Derivation: Bayesian Optimization's Mechanism
+
+Bayesian optimization treats each expensive evaluation as too costly to spend blindly, and instead reasons explicitly about *where to look next* using two components.
+
+**1. The surrogate model.** A Gaussian Process places a prior over functions: for any finite set of points $\lambda_1, \dots, \lambda_n$, $(f(\lambda_1), \dots, f(\lambda_n))$ is assumed jointly Gaussian, specified by a mean function (often zero) and a covariance/kernel function $k(\lambda, \lambda')$ that encodes "how similar are the outputs at two nearby hyperparameter settings." After observing evaluations $\{(\lambda_i, y_i)\}_{i=1}^n$, the GP posterior at a new candidate point $\lambda$ is itself Gaussian, with a closed-form mean $\mu(\lambda)$ and variance $\sigma^2(\lambda)$:
+
+$$
+\mu(\lambda) = \mathbf{k}_*^\top (K + \sigma_n^2 I)^{-1} \mathbf{y}, \qquad
+\sigma^2(\lambda) = k(\lambda,\lambda) - \mathbf{k}_*^\top (K + \sigma_n^2 I)^{-1} \mathbf{k}_*
+$$
+
+where $K$ is the $n \times n$ kernel matrix of observed points, $\mathbf{k}_*$ is the vector of kernel values between $\lambda$ and each observed point, and $\sigma_n^2$ accounts for observation noise. Crucially, $\sigma^2(\lambda)$ is large in regions far from any previously evaluated point (high uncertainty) and small near densely evaluated points (high confidence) — the GP gives you both a *prediction* and a *calibrated uncertainty* at every unevaluated point, essentially "for free" from the kernel structure.
+
+**2. The acquisition function.** Given $\mu(\lambda)$ and $\sigma(\lambda)$, the **Expected Improvement (EI)** acquisition function scores every candidate point by how much improvement over the current best observed value $f^+ $ it is expected to yield:
+
+$$
+\text{EI}(\lambda) = \mathbb{E}\big[\max(f(\lambda) - f^+, 0)\big]
+$$
+
+Because the posterior at $\lambda$ is Gaussian with mean $\mu(\lambda)$ and standard deviation $\sigma(\lambda)$, this expectation has a closed form:
+
+$$
+\text{EI}(\lambda) = \big(\mu(\lambda) - f^+\big)\Phi(z) + \sigma(\lambda)\,\phi(z), \qquad z = \frac{\mu(\lambda) - f^+}{\sigma(\lambda)}
+$$
+
+where $\Phi$ and $\phi$ are the standard normal CDF and PDF. This expression explicitly balances **exploitation** (the $(\mu(\lambda)-f^+)\Phi(z)$ term is large where the predicted mean is already high) against **exploration** (the $\sigma(\lambda)\phi(z)$ term is large where uncertainty is high, even if the predicted mean is mediocre) — a point that is uncertain but plausibly great can score highly even without the best predicted mean, which is exactly what lets Bayesian optimization occasionally probe unexplored regions rather than greedily exploiting the current best-known area.
+
+**The loop.** (1) Fit the GP to all evaluations so far. (2) Maximize the acquisition function (itself cheap, since it only requires the GP's closed-form posterior, not a new expensive training run) to pick the next $\lambda$ to actually evaluate. (3) Run the expensive evaluation $f(\lambda)$ (train + validate the real model). (4) Add $(\lambda, f(\lambda))$ to the observed set and repeat.
+
+## Diagram
+
+<Mermaid chart={`graph TD
+  A[Fit GP surrogate to all past evaluations] --> B[Compute posterior mean and uncertainty everywhere]
+  B --> C[Maximize acquisition function e.g. Expected Improvement]
+  C --> D[Select next hyperparameter config to try]
+  D --> E[Run expensive real training + validation]
+  E --> F[Add result to observed data]
+  F --> A
+`} />
+
+## Code Example
+
+```python
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.ensemble import RandomForestClassifier
+from scipy.stats import randint, loguniform
+from sklearn.datasets import make_classification
+
+X, y = make_classification(n_samples=2000, n_features=20, random_state=0)
+model = RandomForestClassifier(random_state=0)
+
+# Grid search — exhaustive but coarse per-dimension resolution
+grid_params = {
+    "n_estimators": [100, 300, 500],
+    "max_depth": [3, 6, 10],
+    "min_samples_leaf": [1, 5, 10],
+}
+grid = GridSearchCV(model, grid_params, cv=5, scoring="roc_auc", n_jobs=-1)
+grid.fit(X, y)
+
+# Random search — same budget, finer per-dimension coverage
+random_params = {
+    "n_estimators": randint(50, 800),
+    "max_depth": randint(2, 20),
+    "min_samples_leaf": randint(1, 20),
+}
+random_search = RandomizedSearchCV(
+    model, random_params, n_iter=27, cv=5, scoring="roc_auc", n_jobs=-1, random_state=0,
+)
+random_search.fit(X, y)
+
+# Bayesian optimization (via scikit-optimize's BayesSearchCV, a common library choice)
+# from skopt import BayesSearchCV
+# from skopt.space import Integer
+# bayes_search = BayesSearchCV(
+#     model,
+#     {"n_estimators": Integer(50, 800), "max_depth": Integer(2, 20), "min_samples_leaf": Integer(1, 20)},
+#     n_iter=27, cv=5, scoring="roc_auc", random_state=0,
+# )
+# bayes_search.fit(X, y)
+
+print("Grid best:  ", grid.best_score_, grid.best_params_)
+print("Random best:", random_search.best_score_, random_search.best_params_)
+```
+
+## Comparing Search Strategies
+
+<ComparisonTable
+  headers={["Strategy", "Uses past results?", "Per-dimension resolution", "Scales to high dimensions", "Parallelizable"]}
+  rows={[
+    ["Grid search", "No", "Fixed, coarse (k values per axis)", "Poor — cost is k^d", "Trivially, all points independent"],
+    ["Random search", "No", "~T distinct values per axis", "Good — unaffected by unimportant dimensions", "Trivially, all points independent"],
+    ["Bayesian optimization", "Yes — surrogate model built from all past evaluations", "Adaptive, concentrates near promising regions", "Good for moderate dimensions (tens); GP scaling degrades beyond that", "Limited — next point depends on previous results (though batch/async variants exist)"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Grid search's per-dimension resolution is fixed at k values no matter the budget, wasting evaluations on unimportant hyperparameters.",
+  "Random search's per-dimension resolution scales with the number of trials T, so it concentrates effective search effort on whichever dimensions actually matter — Bergstra & Bengio showed this makes it strictly more sample-efficient in the common case where only a few hyperparameters matter.",
+  "Bayesian optimization replaces blind sampling with a probabilistic surrogate model (commonly a GP) plus an acquisition function (commonly Expected Improvement) that explicitly trades off exploring uncertain regions against exploiting known-good regions.",
+  "Expected Improvement's closed form has two additive terms: one rewarding a high predicted mean (exploitation), one rewarding high predicted uncertainty (exploration).",
+  "Bayesian optimization typically needs far fewer expensive evaluations than grid/random search to reach a good configuration, but each iteration is inherently sequential (harder to parallelize) and GP surrogate cost grows with the number of observations.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Frequent errors">
+  - **Tuning hyperparameters using the test set instead of a validation set (or cross-validation).** This is a direct form of test-set leakage: the reported "test" score is no longer an honest estimate of generalization, because the test set itself influenced which model was chosen. Always tune on a validation split or CV, and reserve the test set for a single final, untouched evaluation.
+  - **Using grid search with a fine grid over many hyperparameters "to be thorough."** The combinatorial explosion ($k^d$) makes this infeasible past a handful of dimensions and wastes budget uniformly rather than where it matters — random or Bayesian search almost always dominates for the same compute budget.
+  - **Reporting the best cross-validation score across many search iterations as the final generalization estimate.** With enough trials, the best CV score is optimistically biased upward simply from selecting the maximum over many noisy estimates (a form of multiple-comparisons / "look-elsewhere" bias) — use a separate held-out test set for the final number, or nested cross-validation.
+  - **Applying Bayesian optimization with a GP surrogate to a very high-dimensional or highly discrete/categorical search space without adaptation.** Standard GP kernels assume smooth continuous structure; naively applying them to spaces with many categorical or conditional hyperparameters (e.g., "this parameter only exists if that other one is set to X") requires specialized kernels or tree-based surrogates (e.g., TPE, SMAC) rather than a vanilla GP.
+  - **Ignoring hyperparameter search variance.** A single hyperparameter search run, especially with few iterations, can land on a configuration that was simply lucky on that CV split; re-running the search (or nesting it inside an outer CV loop) reveals how stable the "best" configuration really is.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does Bergstra & Bengio's analysis conclude that random search often outperforms grid search for the same evaluation budget, especially in higher dimensions?",
+    options: [
+      "Random search is always faster to compute per evaluation",
+      "In practice only a few hyperparameters substantially affect performance; grid search's per-dimension resolution is fixed at k regardless of budget, while random search's per-dimension resolution scales with the number of trials, so it explores the dimensions that matter much more finely for the same total cost",
+      "Grid search cannot be parallelized, unlike random search",
+      "Random search always finds the global optimum, while grid search cannot",
+    ],
+    answerIndex: 1,
+    explanation: "Bergstra & Bengio's key observation is that effective dimensionality is usually low: most hyperparameters barely matter. Grid search wastes budget repeating combinations across unimportant dimensions at only k fixed values each, while random search's independent sampling gives roughly T distinct values along every axis, concentrating resolution on whichever dimensions turn out to matter — with no extra cost and no assumption about which dimensions those are in advance.",
+  },
+  {
+    question: "In Bayesian optimization with a Gaussian Process surrogate and Expected Improvement acquisition, why does the acquisition function sometimes select a point with a mediocre predicted mean over a point with a better predicted mean?",
+    options: [
+      "This should never happen if the algorithm is implemented correctly",
+      "Expected Improvement has an exploration term proportional to the posterior standard deviation at that point; a point with high uncertainty (even with a middling predicted mean) can have higher expected improvement than a confidently-known but only slightly-better point, reflecting genuine value in reducing uncertainty",
+      "The GP surrogate is deterministic, so predicted mean is the only factor that matters",
+      "It only happens due to numerical errors in the GP's covariance matrix",
+    ],
+    answerIndex: 1,
+    explanation: "EI(lambda) = (mu(lambda) - f+) * Phi(z) + sigma(lambda) * phi(z). The second term grows with the posterior standard deviation sigma(lambda), so a point far from prior observations (high uncertainty) can have substantial expected improvement purely from the possibility that it's much better than currently believed — this is precisely the exploration/exploitation trade-off Bayesian optimization is designed to balance, rather than a bug.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Random Search for Hyper-Parameter Optimization", authors: "Bergstra, J., & Bengio, Y.", venue: "Journal of Machine Learning Research (JMLR)", year: 2012 },
+  { title: "Practical Bayesian Optimization of Machine Learning Algorithms", authors: "Snoek, J., Larochelle, H., & Adams, R. P.", venue: "NeurIPS", year: 2012, url: "https://arxiv.org/abs/1206.2944" },
+  { title: "Taking the Human Out of the Loop: A Review of Bayesian Optimization", authors: "Shahriari, B., Swersky, K., Wang, Z., Adams, R. P., & de Freitas, N.", venue: "Proceedings of the IEEE", year: 2016 },
+  { title: "Gaussian Processes for Machine Learning", authors: "Rasmussen, C. E., & Williams, C. K. I.", venue: "MIT Press", year: 2006 },
+]} />

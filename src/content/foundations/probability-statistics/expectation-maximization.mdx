@@ -1,0 +1,206 @@
+---
+title: "Expectation-Maximization Algorithm"
+description: "How to run maximum likelihood estimation when part of your data is hidden — the algorithm behind Gaussian Mixture Models, HMM training, and missing-data imputation."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["probability", "statistics", "math", "em-algorithm", "mixture-models", "latent-variables"]
+prerequisites: ["Maximum Likelihood Estimation", "Random Variables & Distributions"]
+---
+
+## Intuition
+
+Ordinary MLE assumes you observe everything relevant to the likelihood. But many useful models involve **latent (hidden) variables** — which cluster a point belongs to in a Gaussian Mixture Model, which hidden state generated an observation in an HMM, which topic produced a word. If you knew the latent assignments, MLE would be easy (often closed-form per component). If you knew the component parameters, inferring the latent assignments would be easy. The problem is you know neither. **Expectation-Maximization (EM)** breaks this circularity by alternating: guess the latent assignments given current parameters (E-step), then re-fit parameters given those guessed assignments (M-step), repeat until convergence.
+
+<Callout type="tip" title="One-sentence definition">
+  EM maximizes likelihood with latent variables by alternating between computing the expected value of the latent variables given current parameters (E-step) and maximizing expected complete-data log-likelihood given that expectation (M-step) — and each iteration is guaranteed to never decrease the observed-data log-likelihood.
+</Callout>
+
+## Formal Setup
+
+Let $X$ be observed data, $Z$ be latent (unobserved) variables, and $\theta$ the parameters to estimate. We want to maximize the **observed-data (marginal) log-likelihood**:
+
+$$
+\ell(\theta) = \log p(X \mid \theta) = \log \sum_Z p(X, Z \mid \theta)
+$$
+
+The sum inside the log is the problem — it couples all values of $Z$ together, so there's usually no closed form for $\arg\max_\theta \ell(\theta)$ directly, even when $\log p(X, Z \mid \theta)$ (the **complete-data log-likelihood**) would be easy to maximize on its own.
+
+## Derivation: The E-step and M-step from First Principles
+
+**Step 1 — introduce an arbitrary distribution $q(Z)$ over the latent variables** and lower-bound $\ell(\theta)$ using Jensen's inequality. Since $\log$ is concave:
+
+$$
+\ell(\theta) = \log \sum_Z q(Z) \frac{p(X,Z\mid\theta)}{q(Z)} \geq \sum_Z q(Z) \log \frac{p(X,Z\mid\theta)}{q(Z)} =: \mathcal{L}(q, \theta)
+$$
+
+$\mathcal{L}(q,\theta)$ is called the **Evidence Lower Bound (ELBO)**. It's a lower bound on $\ell(\theta)$ for *any* choice of $q(Z)$.
+
+**Step 2 — quantify the gap.** Some algebra shows the exact gap between $\ell(\theta)$ and $\mathcal{L}(q,\theta)$ is a KL divergence:
+
+$$
+\ell(\theta) - \mathcal{L}(q,\theta) = \text{KL}\big(q(Z) \,\|\, p(Z \mid X,\theta)\big) \geq 0
+$$
+
+with equality if and only if $q(Z) = p(Z\mid X,\theta)$ exactly (since KL divergence is zero only when the two distributions are identical). This is the key fact EM exploits: the bound is *tight* precisely when $q$ equals the true posterior over the latents.
+
+**E-step.** Fix $\theta = \theta^{(t)}$ (the current parameter estimate) and choose $q$ to close the gap exactly:
+
+$$
+q^{(t)}(Z) = p(Z \mid X, \theta^{(t)})
+$$
+
+This makes $\mathcal{L}(q^{(t)}, \theta^{(t)}) = \ell(\theta^{(t)})$ — the bound touches the true log-likelihood at the current parameters.
+
+**M-step.** Now fix $q = q^{(t)}$ and maximize $\mathcal{L}(q^{(t)}, \theta)$ over $\theta$. Since the $-\sum_Z q(Z)\log q(Z)$ term (entropy of $q$) doesn't depend on $\theta$, this reduces to maximizing:
+
+$$
+\theta^{(t+1)} = \arg\max_\theta \underbrace{\sum_Z p(Z\mid X,\theta^{(t)}) \log p(X,Z\mid\theta)}_{Q(\theta \mid \theta^{(t)})} = \arg\max_\theta \mathbb{E}_{Z \sim p(Z\mid X,\theta^{(t)})}\big[\log p(X,Z\mid\theta)\big]
+$$
+
+This $Q(\theta\mid\theta^{(t)})$ — the expected complete-data log-likelihood under the posterior of $Z$ from the E-step — is exactly what's maximized in the M-step, and for exponential-family component distributions this maximization is usually closed-form (unlike the original marginal likelihood).
+
+**Step 3 — prove monotonic improvement.** Chaining the two steps:
+
+$$
+\ell(\theta^{(t+1)}) \geq \mathcal{L}(q^{(t)}, \theta^{(t+1)}) \geq \mathcal{L}(q^{(t)}, \theta^{(t)}) = \ell(\theta^{(t)})
+$$
+
+The first inequality holds because $\mathcal{L}$ always lower-bounds $\ell$ (Step 1); the middle inequality holds because the M-step chose $\theta^{(t+1)}$ to maximize $\mathcal{L}(q^{(t)}, \cdot)$, so it can only do at least as well as $\theta^{(t)}$; the equality is from the E-step making the bound tight at $\theta^{(t)}$. So **every EM iteration is guaranteed to never decrease the observed-data log-likelihood** — this is the central correctness guarantee of the algorithm (though it can converge to a local, not global, maximum).
+
+<Mermaid chart={`
+graph TD
+  A["Initialize θ⁽⁰⁾"] --> B["E-step: q(Z) = p(Z | X, θ⁽ᵗ⁾) — posterior over latents"]
+  B --> C["Form Q(θ | θ⁽ᵗ⁾) = E_q[log p(X,Z|θ)]"]
+  C --> D["M-step: θ⁽ᵗ⁺¹⁾ = argmax_θ Q(θ | θ⁽ᵗ⁾)"]
+  D --> E{"Converged? (ℓ(θ) stopped increasing)"}
+  E -->|No| B
+  E -->|Yes| F["Return θ (local MLE with latent variables)"]
+`} />
+
+## Worked Example: EM for a Gaussian Mixture Model
+
+Given data $x_1,\ldots,x_n$ assumed generated by $K$ Gaussian components with mixing weights $\pi_k$, means $\mu_k$, variances $\sigma_k^2$, and latent assignment $z_i \in \{1,\ldots,K\}$ for each point:
+
+**E-step** (compute posterior responsibilities via Bayes' theorem):
+
+$$
+\gamma_{ik} := p(z_i = k \mid x_i, \theta^{(t)}) = \frac{\pi_k \,\mathcal{N}(x_i \mid \mu_k, \sigma_k^2)}{\sum_{j=1}^K \pi_j \,\mathcal{N}(x_i \mid \mu_j, \sigma_j^2)}
+$$
+
+**M-step** (maximize $Q(\theta\mid\theta^{(t)}) = \sum_i \sum_k \gamma_{ik}\big[\log \pi_k + \log \mathcal{N}(x_i\mid\mu_k,\sigma_k^2)\big]$; setting derivatives to zero — the same style of algebra as the Gaussian MLE derivation in [Maximum Likelihood Estimation](/docs/foundations/probability-statistics/maximum-likelihood-estimation), but now weighted by responsibilities):
+
+$$
+\mu_k = \frac{\sum_i \gamma_{ik} x_i}{\sum_i \gamma_{ik}}, \qquad \sigma_k^2 = \frac{\sum_i \gamma_{ik}(x_i - \mu_k)^2}{\sum_i \gamma_{ik}}, \qquad \pi_k = \frac{1}{n}\sum_i \gamma_{ik}
+$$
+
+These are just the ordinary weighted-mean/weighted-variance MLE formulas, with each point $x_i$ contributing to component $k$'s statistics in proportion to how responsible component $k$ is for it — exactly what you'd hand-derive by fixing the responsibilities and re-running the single-Gaussian MLE derivation per component.
+
+## Code Example
+
+```python
+import numpy as np
+from scipy.stats import norm
+
+rng = np.random.default_rng(0)
+
+# Generate data from a 2-component Gaussian mixture
+true_assign = rng.random(1000) < 0.4
+data = np.where(true_assign, rng.normal(-2, 1, 1000), rng.normal(3, 1.5, 1000))
+
+def em_gmm(x, k=2, n_iter=100, tol=1e-6):
+    n = len(x)
+    # init
+    mu = rng.choice(x, k, replace=False)
+    sigma2 = np.full(k, x.var())
+    pi = np.full(k, 1 / k)
+    log_lik_prev = -np.inf
+
+    for _ in range(n_iter):
+        # E-step: responsibilities
+        weighted_pdf = np.array([pi[j] * norm.pdf(x, mu[j], np.sqrt(sigma2[j])) for j in range(k)])
+        gamma = weighted_pdf / weighted_pdf.sum(axis=0, keepdims=True)
+
+        # M-step: weighted MLE per component
+        Nk = gamma.sum(axis=1)
+        mu = (gamma @ x) / Nk
+        sigma2 = np.array([(gamma[j] @ (x - mu[j]) ** 2) / Nk[j] for j in range(k)])
+        pi = Nk / n
+
+        # Monitor observed-data log-likelihood (must be non-decreasing)
+        log_lik = np.sum(np.log(weighted_pdf.sum(axis=0)))
+        if log_lik - log_lik_prev < tol:
+            break
+        log_lik_prev = log_lik
+
+    return mu, sigma2, pi
+
+mu, sigma2, pi = em_gmm(data)
+print(f"Estimated means: {np.sort(mu)}")     # ≈ [-2, 3]
+print(f"Estimated weights: {pi}")            # ≈ [0.4, 0.6]
+```
+
+## Complexity
+
+| Step | Cost | Notes |
+| --- | --- | --- |
+| E-step (GMM, n points, k components) | $O(nk)$ | Evaluate each component's density at each point |
+| M-step (GMM) | $O(nk)$ | Weighted sums for means/variances/weights |
+| Total per iteration | $O(nk)$ | Repeated until log-likelihood plateaus |
+| Convergence | Not guaranteed to reach global optimum | Sensitive to initialization; run multiple restarts and keep the best log-likelihood |
+
+<KeyTakeaways items={[
+  "EM handles MLE with latent variables by alternating an E-step (posterior over latents given current parameters) and an M-step (re-maximize expected complete-data log-likelihood).",
+  "The Evidence Lower Bound (ELBO) construction via Jensen's inequality is what makes each EM iteration provably non-decreasing in the true observed-data log-likelihood.",
+  "The E-step is tight exactly when q(Z) equals the true posterior p(Z|X,θ) — this is a direct consequence of KL divergence being zero only for identical distributions.",
+  "EM only guarantees convergence to a local maximum (or saddle point) of the likelihood, not the global one — initialization matters, and multiple restarts are standard practice.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Monitoring the observed-data log-likelihood at each iteration as a debugging check — a decrease signals a bug in the E-step or M-step derivation, since EM is mathematically guaranteed to never decrease it.",
+    "Running EM from multiple random initializations and keeping the run with highest final log-likelihood, since convergence is only to a local optimum.",
+  ]}
+  cons={[
+    "Assuming EM always converges to the global maximum likelihood solution — it provably only guarantees monotonic improvement, not global optimality.",
+    "Forgetting that a poor initialization (e.g. all cluster means initialized identically) can cause components to collapse onto each other and get stuck (a degenerate local optimum) in Gaussian Mixture Models.",
+    "Confusing the E-step's 'expectation' with literally taking an expectation of the parameters — it's an expectation over the latent variables' posterior distribution, holding parameters fixed, not an average of parameter values.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is each iteration of the EM algorithm guaranteed to never decrease the observed-data log-likelihood ℓ(θ)?",
+    options: [
+      "Because EM directly maximizes ℓ(θ) at every step using gradient ascent",
+      "Because the E-step makes a lower bound (the ELBO) touch ℓ(θ) exactly at the current parameters, and the M-step can only increase or maintain that lower bound — chaining these two facts shows ℓ(θ⁽ᵗ⁺¹⁾) ≥ ℓ(θ⁽ᵗ⁾)",
+      "Because the latent variables are assumed to be known exactly, making it equivalent to ordinary MLE",
+      "This guarantee only holds for Gaussian mixture models, not EM in general",
+    ],
+    answerIndex: 1,
+    explanation: "The E-step sets q(Z) = p(Z|X,θ⁽ᵗ⁾), making the ELBO L(q,θ⁽ᵗ⁾) exactly equal ℓ(θ⁽ᵗ⁾) (zero KL gap). The M-step then finds θ⁽ᵗ⁺¹⁾ maximizing L(q⁽ᵗ⁾,θ), so L(q⁽ᵗ⁾,θ⁽ᵗ⁺¹⁾) ≥ L(q⁽ᵗ⁾,θ⁽ᵗ⁾). Since ℓ(θ) ≥ L(q,θ) always (Jensen's inequality), combining gives ℓ(θ⁽ᵗ⁺¹⁾) ≥ ℓ(θ⁽ᵗ⁾) — the algorithm is monotonic by construction, independent of the specific model.",
+  },
+  {
+    question: "In a Gaussian Mixture Model, what do the 'responsibilities' γ_ik computed in the E-step actually represent?",
+    options: [
+      "The final hard cluster assignment for point i, chosen once and never revisited",
+      "The posterior probability p(z_i=k | x_i, θ⁽ᵗ⁾) that point i was generated by component k, given the current parameter estimates — a soft, probabilistic assignment recomputed every iteration",
+      "The prior probability π_k of component k before observing any data",
+      "The distance from point i to the mean of cluster k",
+    ],
+    answerIndex: 1,
+    explanation: "γ_ik is computed via Bayes' theorem using the current parameter estimates: it's the posterior probability that component k generated point i. Unlike hard clustering (e.g. k-means), these are soft, fractional assignments that get recomputed at every E-step as the parameter estimates change across iterations.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Maximum Likelihood from Incomplete Data via the EM Algorithm", authors: "Dempster, A. P., Laird, N. M., Rubin, D. B.", venue: "Journal of the Royal Statistical Society, Series B", year: 1977 },
+  { title: "Pattern Recognition and Machine Learning", authors: "Christopher M. Bishop", venue: "Springer", year: 2006 },
+  { title: "The Elements of Statistical Learning", authors: "Trevor Hastie, Robert Tibshirani, Jerome Friedman", venue: "Springer", year: 2009 },
+]} />

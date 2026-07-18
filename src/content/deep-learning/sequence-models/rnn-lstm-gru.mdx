@@ -1,0 +1,240 @@
+---
+title: "RNNs, LSTMs & GRUs"
+description: "Why plain recurrent networks forget the distant past, and how gating mechanisms in LSTMs and GRUs give gradients an escape route from vanishing across time."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "nlp", "rnn", "lstm", "gru", "sequence-models"]
+prerequisites: ["Backpropagation", "Chain rule", "Basic matrix calculus"]
+---
+
+## Intuition
+
+A feedforward network sees one fixed-size input and produces one output. Language, audio, and time series don't fit that mold — they're sequences of arbitrary length where order matters and earlier context should inform later predictions. A **recurrent neural network (RNN)** handles this by keeping a running summary, the **hidden state** $h_t$, and updating it one token at a time: read the current input, blend it with what you remembered, update the memory, move on.
+
+<Callout type="tip" title="The one-sentence idea">
+  An RNN reuses the *same* weight matrices at every time step, feeding its own previous output back in as part of the next input — this weight sharing across time is what lets it handle sequences of any length with a fixed number of parameters, but it's also exactly what causes gradients to vanish or explode over long sequences.
+</Callout>
+
+## The Vanilla RNN Recurrence
+
+At each time step $t$, the hidden state updates as:
+
+$$
+h_t = \tanh(W_h h_{t-1} + W_x x_t + b)
+$$
+
+- $x_t$ is the input at step $t$ (e.g., a word embedding).
+- $h_{t-1}$ is the memory carried from the previous step.
+- $W_h$ and $W_x$ are shared across *every* time step — the same two matrices are reused whether you're at step 1 or step 1,000.
+- A prediction $y_t$ (e.g., next-word logits) is typically produced by a separate readout layer applied to $h_t$.
+
+This is a clean design: constant parameter count regardless of sequence length, and in principle $h_t$ can carry information from arbitrarily far back. In practice, it can't — and the reason is a direct consequence of backpropagation through time.
+
+## Why BPTT Causes Vanishing (or Exploding) Gradients
+
+To train an RNN, we unroll it into a deep feedforward computation graph — one "layer" per time step — and run backpropagation through that unrolled graph. This is **backpropagation through time (BPTT)**. The mechanics are the same chain rule used in standard backprop (see [Backpropagation Derivation](/docs/foundations/calculus-optimization/backpropagation-derivation)), but applied across time steps instead of layers.
+
+Consider the gradient of a loss at time step $T$ with respect to a hidden state much earlier, $h_k$ (with $k \ll T$). By the chain rule:
+
+$$
+\frac{\partial h_T}{\partial h_k} = \prod_{t=k+1}^{T} \frac{\partial h_t}{\partial h_{t-1}}
+$$
+
+Each factor in that product is:
+
+$$
+\frac{\partial h_t}{\partial h_{t-1}} = \text{diag}\big(\tanh'(W_h h_{t-1} + W_x x_t + b)\big) \, W_h
+$$
+
+Two things compound across $T - k$ multiplications:
+
+1. **The same matrix $W_h$ appears every time** (weight sharing across time steps means it's literally the identical matrix, not just a similarly-scaled one). If the largest singular value of $W_h$ is consistently below 1, the product of many copies shrinks toward 0 — **vanishing gradients**. If it's consistently above 1, the product blows up — **exploding gradients**.
+2. **$\tanh'(\cdot) \in (0, 1]$, and is often much less than 1** away from the origin (tanh saturates for large-magnitude inputs). Multiplying dozens or hundreds of these derivative terms together drives the product toward 0 almost regardless of $W_h$.
+
+This is the same underlying phenomenon as vanishing gradients in very deep feedforward networks — repeated multiplication of derivative terms less than 1 shrinks the gradient exponentially with depth (see the vanishing-gradient discussion in [Backpropagation Derivation](/docs/foundations/calculus-optimization/backpropagation-derivation)) — except in an RNN, "depth" is sequence length, so even moderately long sequences (a few hundred tokens) behave like an extremely deep network. The practical consequence: vanilla RNNs struggle to learn dependencies spanning more than roughly 10–20 steps, no matter how the loss is designed.
+
+<Callout type="note">
+  Exploding gradients are the easier half of this problem to patch — **gradient clipping** (rescaling the gradient vector if its norm exceeds a threshold) controls the magnitude directly. Vanishing gradients are structural: no amount of clipping "un-shrinks" a gradient that's already collapsed to near-zero. Fixing that requires changing the architecture itself.
+</Callout>
+
+## LSTM: Fixing Vanishing Gradients with an Additive Cell State
+
+The **Long Short-Term Memory (LSTM)** cell (Hochreiter & Schmidhuber, 1997) keeps the hidden state but adds a second piece of memory, the **cell state** $c_t$, updated *additively* rather than through a repeated matrix multiplication. Three learned **gates** — vectors of values in $(0, 1)$ produced by sigmoid layers — control what flows through:
+
+$$
+f_t = \sigma(W_f [h_{t-1}, x_t] + b_f) \quad \text{(forget gate)}
+$$
+$$
+i_t = \sigma(W_i [h_{t-1}, x_t] + b_i) \quad \text{(input gate)}
+$$
+$$
+o_t = \sigma(W_o [h_{t-1}, x_t] + b_o) \quad \text{(output gate)}
+$$
+$$
+\tilde{c}_t = \tanh(W_c [h_{t-1}, x_t] + b_c) \quad \text{(candidate cell content)}
+$$
+
+The cell state update — the crucial equation — is:
+
+$$
+c_t = f_t \odot c_{t-1} + i_t \odot \tilde{c}_t
+$$
+
+and the hidden state is a gated, squashed view of the cell state:
+
+$$
+h_t = o_t \odot \tanh(c_t)
+$$
+
+### Why this fixes the gradient problem
+
+Take the derivative of $c_t$ with respect to $c_{t-1}$:
+
+$$
+\frac{\partial c_t}{\partial c_{t-1}} = f_t + (\text{terms involving } \partial f_t, \partial i_t, \partial \tilde c_t)
+$$
+
+The dominant term is simply $f_t$, the forget gate — not a fixed matrix $W_h$ multiplied through a saturating nonlinearity. Chaining this across many steps gives a product of forget-gate values, $\prod_t f_t$, each of which is a *learned, input-dependent* number in $(0, 1)$ rather than a fixed matrix's singular values raised to a power. Critically:
+
+- The path from $c_{t-1}$ to $c_t$ is **additive** ($f_t \odot c_{t-1}$ plus a new term), not a repeated matrix multiply — there's no forced exponential decay baked into the architecture.
+- If the network learns $f_t \approx 1$ for a given step (i.e., "this information is still relevant, keep it"), gradient flows through that step almost unchanged, regardless of sequence length.
+- This gives the network the *option* of preserving gradient over long spans, which a vanilla RNN structurally does not have. It doesn't guarantee gradients never vanish (if the network learns small $f_t$ everywhere, it still can) — but it makes long-range memory learnable rather than architecturally precluded.
+
+<Mermaid chart={`
+graph LR
+  Cprev["c_{t-1}"] -->|"× f_t"| Mult1["forget"]
+  Mult1 --> Add["+"]
+  Xt["x_t, h_{t-1}"] --> Gates["gates: f_t, i_t, o_t, c̃_t"]
+  Gates -->|"i_t × c̃_t"| Add
+  Add --> Ct["c_t"]
+  Ct --> Tanh["tanh(c_t)"]
+  Tanh -->|"× o_t"| Ht["h_t"]
+`} />
+
+## GRU: A Simplified LSTM
+
+The **Gated Recurrent Unit** (Cho et al., 2014) reaches for the same additive-gradient-path idea with fewer parameters. It merges the forget and input gates into a single **update gate** $z_t$, adds a **reset gate** $r_t$, and drops the separate cell state entirely — only the hidden state $h_t$ is carried forward:
+
+$$
+z_t = \sigma(W_z [h_{t-1}, x_t]) \quad \text{(update gate)}
+$$
+$$
+r_t = \sigma(W_r [h_{t-1}, x_t]) \quad \text{(reset gate)}
+$$
+$$
+\tilde{h}_t = \tanh(W [r_t \odot h_{t-1}, x_t])
+$$
+$$
+h_t = (1 - z_t) \odot h_{t-1} + z_t \odot \tilde{h}_t
+$$
+
+The final line is structurally the same trick as the LSTM's cell update: $h_t$ is an additive, gated interpolation between "keep the old state" ($1 - z_t$) and "write new content" ($z_t$), rather than a matrix multiplication of $h_{t-1}$. That's what gives the GRU the same gradient-preserving property with roughly two-thirds of the gate parameters of an LSTM (no separate output gate, no separate cell state to maintain).
+
+<ComparisonTable
+  headers={["Model", "Memory carried", "Gates", "Params per unit (relative)", "Typical use today"]}
+  rows={[
+    ["Vanilla RNN", "hidden state only", "none", "1×", "Rarely used — mostly pedagogical baseline"],
+    ["LSTM", "hidden state + separate cell state", "forget, input, output", "~4×", "Time series, smaller sequence models, when cell/hidden separation helps"],
+    ["GRU", "hidden state only", "update, reset", "~3×", "Faster training with similar accuracy to LSTM on many tasks"],
+  ]}
+/>
+
+## Code Sketch
+
+```python
+import torch
+import torch.nn as nn
+
+class VanillaRNNCell(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        super().__init__()
+        self.Wx = nn.Linear(input_size, hidden_size, bias=False)
+        self.Wh = nn.Linear(hidden_size, hidden_size)
+
+    def forward(self, x_t, h_prev):
+        return torch.tanh(self.Wx(x_t) + self.Wh(h_prev))
+
+
+class MinimalLSTMCell(nn.Module):
+    """Illustrates the additive cell-state update explicitly."""
+    def __init__(self, input_size, hidden_size):
+        super().__init__()
+        gate_in = input_size + hidden_size
+        self.forget_gate = nn.Linear(gate_in, hidden_size)
+        self.input_gate = nn.Linear(gate_in, hidden_size)
+        self.output_gate = nn.Linear(gate_in, hidden_size)
+        self.candidate = nn.Linear(gate_in, hidden_size)
+
+    def forward(self, x_t, h_prev, c_prev):
+        combined = torch.cat([h_prev, x_t], dim=-1)
+        f_t = torch.sigmoid(self.forget_gate(combined))
+        i_t = torch.sigmoid(self.input_gate(combined))
+        o_t = torch.sigmoid(self.output_gate(combined))
+        c_tilde = torch.tanh(self.candidate(combined))
+
+        c_t = f_t * c_prev + i_t * c_tilde   # the additive update — the key line
+        h_t = o_t * torch.tanh(c_t)
+        return h_t, c_t
+
+
+# In practice, use the built-in, cuDNN-optimized implementations:
+lstm = nn.LSTM(input_size=256, hidden_size=512, num_layers=2, batch_first=True)
+gru = nn.GRU(input_size=256, hidden_size=512, num_layers=2, batch_first=True)
+```
+
+## Complexity
+
+| Model | Time per step | Sequential constraint |
+| --- | --- | --- |
+| Vanilla RNN / LSTM / GRU | $O(d^2)$ per step (matrix-vector products) | Strictly sequential — step $t$ needs $h_{t-1}$, so no parallelism across time during the recurrence itself |
+
+This sequential dependency — not raw FLOPs — is the main reason recurrent models lost out to Transformers for large-scale training: even though each step is cheap, you cannot compute step 1,000 before step 999 finishes, so wall-clock training time scales with sequence length regardless of how much parallel hardware you have. See [The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture) for how self-attention removes this constraint entirely.
+
+<KeyTakeaways items={[
+  "A vanilla RNN reuses the same weight matrix at every time step; backpropagation through time multiplies that matrix's derivative (and tanh's derivative) once per time step, causing gradients to vanish or explode exponentially with sequence length.",
+  "LSTMs fix this with an additive cell-state update, c_t = f_t ⊙ c_{t-1} + i_t ⊙ c̃_t — gradient can flow through the forget gate largely unchanged when f_t ≈ 1, instead of being forced through a repeated matrix multiply.",
+  "GRUs simplify LSTMs by merging the forget/input gates into one update gate and removing the separate cell state, keeping the same additive-update principle with fewer parameters.",
+  "None of these architectures parallelize across time during training — that sequential bottleneck, not just vanishing gradients, is what motivated the shift to attention-based models.",
+]} />
+
+## Common Mistakes
+
+- **Assuming LSTMs "solve" vanishing gradients entirely.** They make long-range memory *learnable*, not automatic — a network can still learn small forget-gate values and lose information, especially if not trained carefully or initialized poorly (a common trick: initialize the forget-gate bias to a positive value like 1–2 so gates start closer to "remember by default").
+- **Confusing the cell state $c_t$ with the hidden state $h_t$.** Only $h_t$ is exposed to the next layer's readout; $c_t$ is an internal memory not directly used for prediction — this distinction is what's actually new relative to the vanilla RNN.
+- **Forgetting that BPTT unrolls the full sequence.** Memory cost during training scales with sequence length because every intermediate hidden/cell state must be kept for the backward pass, unless techniques like truncated BPTT or gradient checkpointing are used.
+- **Treating GRU as strictly better than LSTM (or vice versa).** Empirically their performance is close and task-dependent; GRUs are cheaper and often trains faster, but the separate cell state can help LSTMs on tasks requiring longer, more distinct memory content.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What is the specific mathematical reason repeated multiplication in BPTT causes vanishing gradients in a vanilla RNN?",
+    options: [
+      "The learning rate is too small for long sequences",
+      "The gradient of h_T with respect to an earlier h_k is a product of (T−k) Jacobian terms, each containing the same weight matrix W_h and a tanh' derivative typically less than 1, so the product shrinks exponentially with sequence length",
+      "RNNs use ReLU activations which zero out negative gradients",
+      "The softmax at the output layer saturates for long sequences",
+    ],
+    answerIndex: 1,
+    explanation: "∂h_T/∂h_k = ∏ ∂h_t/∂h_{t-1}, and each factor is diag(tanh'(·)) · W_h. Because the same W_h is reused at every step and tanh' ≤ 1, this product of (T−k) terms shrinks toward zero (or explodes) exponentially fast as the gap T−k grows — the core mechanism shared with vanishing gradients in very deep feedforward nets.",
+  },
+  {
+    question: "Why does the LSTM's cell-state update c_t = f_t ⊙ c_{t-1} + i_t ⊙ c̃_t help with vanishing gradients compared to a vanilla RNN?",
+    options: [
+      "Because sigmoid gates always output values near 1",
+      "Because the path from c_{t-1} to c_t is additive rather than a repeated matrix multiplication, so the gradient can flow through the (learned, input-dependent) forget gate largely unchanged instead of being forced through a fixed matrix and a saturating nonlinearity every step",
+      "Because the LSTM has more parameters than an RNN, giving it more capacity",
+      "Because the cell state is normalized at every time step",
+    ],
+    answerIndex: 1,
+    explanation: "∂c_t/∂c_{t-1} is dominated by f_t, a learned value in (0,1) rather than a fixed matrix's singular values raised to a power. When the network learns f_t ≈ 1 for relevant steps, gradient survives across long spans — an option the vanilla RNN's multiplicative recurrence structurally lacks.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Long Short-Term Memory", authors: "Hochreiter, S. & Schmidhuber, J.", venue: "Neural Computation", year: 1997, url: "https://www.bioinf.jku.at/publications/older/2604.pdf" },
+  { title: "Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation", authors: "Cho, K. et al.", venue: "EMNLP", year: 2014, url: "https://arxiv.org/abs/1406.1078" },
+]} />

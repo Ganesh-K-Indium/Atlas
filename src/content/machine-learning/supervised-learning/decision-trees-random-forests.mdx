@@ -1,0 +1,216 @@
+---
+title: "Decision Trees & Random Forests"
+description: "How a single greedy tree carves up feature space one axis-aligned split at a time, and why averaging many such trees over bootstrapped, decorrelated samples turns their high variance into a strength."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["machine-learning", "supervised-learning", "ensembles", "decision-trees", "random-forests"]
+prerequisites: ["Entropy and information theory basics", "Bias-variance tradeoff", "Basic probability (variance of sums of random variables)"]
+---
+
+<Prerequisites items={["Entropy and information theory basics", "Bias-variance tradeoff", "Basic probability (variance of sums of random variables)"]} />
+
+## Intuition
+
+A decision tree asks a sequence of yes/no questions about the features — "is age > 30?", "is income > $50k?" — recursively partitioning the training data into increasingly pure regions, then predicts the majority class (or mean value) within whichever region a new point lands in. A single deep tree is a low-bias, high-variance model: it can fit the training data almost perfectly, but small changes to the training set produce wildly different trees. A **random forest** exploits this instability on purpose — it grows many such high-variance trees on randomized versions of the data and averages their predictions, and averaging cancels out the variance while leaving the low bias largely intact.
+
+<Callout type="tip" title="The core idea">
+  A single decision tree overfits because it's an unconstrained, greedy, high-variance model. Random forests don't fix that instability directly — they embrace it, growing many *deliberately decorrelated* trees (via bootstrapping and random feature subsets) and averaging, so that the variance of the ensemble shrinks even though each individual tree remains just as noisy as before.
+</Callout>
+
+## Formal Definition: how a tree grows
+
+A decision tree recursively partitions the feature space by choosing, at each node, the single feature and threshold $(\, j, t\,)$ that splits the data $D$ into two children $D_L = \{x \in D : x_j \le t\}$ and $D_R = \{x \in D : x_j > t\}$ minimizing the weighted impurity of the children:
+
+$$
+(j^*, t^*) = \arg\min_{j, t} \; \frac{|D_L|}{|D|} \, I(D_L) + \frac{|D_R|}{|D|} \, I(D_R)
+$$
+
+where $I(\cdot)$ is an impurity measure. This process repeats recursively on each child until a stopping criterion is met (max depth, minimum samples per leaf, or zero remaining impurity).
+
+## Derivation: Gini impurity and entropy
+
+Let $p_k$ be the fraction of class-$k$ examples in a node, over $K$ classes.
+
+**Gini impurity** measures the probability of misclassifying a randomly chosen point if it were labeled randomly according to the class distribution in the node:
+
+$$
+G = \sum_{k=1}^K p_k(1 - p_k) = 1 - \sum_{k=1}^K p_k^2
+$$
+
+*(Derivation: pick two points independently at random from the node. The probability they have different classes, i.e., $P(\text{mismatch})$, is $\sum_k p_k(1-p_k)$ — for each class $k$, the chance the first point is class $k$ times the chance the second point is not.)* $G = 0$ when the node is pure ($p_k = 1$ for some $k$), and $G$ is maximized at $1 - 1/K$ when classes are perfectly balanced.
+
+**Entropy** measures the expected number of bits needed to encode the class label, drawn from information theory:
+
+$$
+H = -\sum_{k=1}^K p_k \log_2 p_k
+$$
+
+Both are concave functions of $p_k$ that are $0$ at purity and maximized at uniform class balance — Gini is cheaper to compute (no logarithm) and is CART's default; entropy is used by ID3/C4.5 and penalizes impure nodes very slightly more aggressively near the extremes.
+
+**Information gain** is the reduction in impurity achieved by a split, and is exactly what the split-selection $\arg\min$ above is maximizing (equivalently):
+
+$$
+\text{Gain}(D, j, t) = I(D) - \left[\frac{|D_L|}{|D|} I(D_L) + \frac{|D_R|}{|D|} I(D_R)\right]
+$$
+
+Trees are grown **greedily**: at every node the locally best split is chosen without any lookahead for how it affects splits deeper in the tree. This greediness (combined with growing trees deep enough to reach pure or near-pure leaves) is exactly what makes a single unpruned tree low-bias but high-variance — it will carve out idiosyncratic regions to fit noise in the training sample, and a slightly different training sample produces a substantially different tree structure.
+
+## Derivation: why bagging (random forests) reduces variance
+
+Suppose we grow $B$ trees, each on an independent bootstrap resample of the training data, and average their predictions: $\hat{f}_{\text{avg}}(x) = \frac{1}{B}\sum_{b=1}^B \hat{f}_b(x)$. Let each tree's prediction at a point have variance $\sigma^2$ and let $\rho$ be the average pairwise correlation between any two trees' predictions (nonzero because they're trained on overlapping bootstrap samples of the *same* underlying data). The variance of the average is:
+
+$$
+\text{Var}\!\left(\frac{1}{B}\sum_{b=1}^B \hat{f}_b(x)\right) = \rho\sigma^2 + \frac{1-\rho}{B}\sigma^2
+$$
+
+*(Derivation sketch: $\text{Var}(\bar{X}) = \frac{1}{B^2}\left[\sum_b \text{Var}(X_b) + \sum_{b \ne b'} \text{Cov}(X_b, X_{b'})\right] = \frac{1}{B^2}\left[B\sigma^2 + B(B-1)\rho\sigma^2\right]$, which simplifies to $\frac{\sigma^2}{B} + \frac{B-1}{B}\rho\sigma^2 \to \rho\sigma^2 + \frac{(1-\rho)\sigma^2}{B}$.)*
+
+As $B \to \infty$, the second term vanishes, but the **first term $\rho\sigma^2$ does not** — no matter how many trees you average, correlated variance survives. This is precisely why random forests add a *second* randomization on top of bagging: at each split, only a random subset of $m < d$ features (typically $\sqrt{d}$ for classification, $d/3$ for regression) is considered as candidates. This deliberately prevents every tree from picking the same dominant feature at the top of the tree, **decorrelating** the trees — lowering $\rho$ directly — which lowers the irreducible $\rho\sigma^2$ floor that plain bagging alone cannot touch. This is the single mechanical reason random forests generalize better than bagged trees using all features at every split.
+
+<Mermaid chart={`graph TD
+  A["Training data"] --> B["Bootstrap sample 1"]
+  A --> C["Bootstrap sample 2"]
+  A --> D["Bootstrap sample B"]
+  B --> E["Tree 1 (random feature subset per split)"]
+  C --> F["Tree 2 (random feature subset per split)"]
+  D --> G["Tree B (random feature subset per split)"]
+  E --> H["Average / majority vote"]
+  F --> H
+  G --> H
+  H --> I["Final prediction"]
+`} />
+
+## Bagging vs. Boosting
+
+Random forests (bagging) and [gradient boosting](/docs/machine-learning/supervised-learning/gradient-boosting) both build ensembles of trees, but they attack opposite ends of the bias-variance tradeoff and are structurally almost inverses of each other:
+
+<ComparisonTable
+  headers={["Aspect", "Random Forest (bagging)", "Gradient Boosting"]}
+  rows={[
+    ["Tree training", "Independent, in parallel, on bootstrapped samples", "Sequential — each tree fits the residual/gradient of the current ensemble"],
+    ["What it reduces", "Variance (averages many decorrelated high-variance trees)", "Bias (each new weak tree corrects the ensemble's remaining error)"],
+    ["Individual tree depth", "Usually deep, low-bias, high-variance trees", "Usually shallow, high-bias, low-variance trees (stumps to depth 6-8)"],
+    ["Overfitting risk", "Low — adding more trees rarely hurts, mainly a compute cost", "Higher — too many boosting rounds or too high a learning rate can overfit"],
+    ["Parallelism", "Trivial — every tree is independent", "Limited — trees must be built in sequence"],
+  ]}
+/>
+
+In short: bagging averages over many unstable, low-bias models to cancel their variance; boosting adds together many stable, high-bias models to progressively eliminate bias. Both use the same base learner (a shallow tree) for entirely opposite statistical reasons.
+
+## Code Example
+
+```python
+import numpy as np
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+
+X = np.random.randn(500, 6)
+y = (X[:, 0] + X[:, 1]**2 > 0.5).astype(int)
+
+# A single, deep, unconstrained tree: low bias, high variance
+tree = DecisionTreeClassifier(criterion="gini", max_depth=None)
+tree.fit(X, y)
+
+# A random forest: bagged + feature-subsampled trees, averaging away variance
+forest = RandomForestClassifier(
+    n_estimators=300,
+    max_features="sqrt",   # decorrelates trees — the key random forest ingredient
+    bootstrap=True,
+    n_jobs=-1,
+)
+forest.fit(X, y)
+
+# --- Gini impurity computed from scratch ---
+def gini(y):
+    _, counts = np.unique(y, return_counts=True)
+    p = counts / counts.sum()
+    return 1 - np.sum(p ** 2)
+
+def best_split(X_col, y):
+    best_gain, best_t = -np.inf, None
+    base_impurity = gini(y)
+    for t in np.unique(X_col):
+        left, right = y[X_col <= t], y[X_col > t]
+        if len(left) == 0 or len(right) == 0:
+            continue
+        weighted = (len(left) / len(y)) * gini(left) + (len(right) / len(y)) * gini(right)
+        gain = base_impurity - weighted
+        if gain > best_gain:
+            best_gain, best_t = gain, t
+    return best_t, best_gain
+```
+
+## Complexity
+
+| Operation | Time | Space | Notes |
+| --- | --- | --- | --- |
+| Building one tree | $O(n \cdot d \cdot \log n)$ | $O(n)$ | Sorting each feature at each level dominates; deep trees add a $\log n$ depth factor |
+| Building a random forest ($B$ trees) | $O(B \cdot n \cdot m \cdot \log n)$ | $O(B \cdot n)$ | $m < d$ features considered per split; trees parallelize trivially across $B$ |
+| Inference (one tree) | $O(\text{depth})$ | $O(1)$ | Just walk root to leaf |
+| Inference (forest of $B$ trees) | $O(B \cdot \text{depth})$ | $O(1)$ | Trivially parallelizable across trees |
+
+<ProsCons
+  pros={[
+    "Trees require no feature scaling and naturally handle mixed numeric/categorical data and non-linear, non-monotonic relationships.",
+    "Random forests are robust out-of-the-box, rarely overfit as you add more trees, and provide free variance estimates and feature importances.",
+    "Interpretable at the single-tree level (a full decision path can be read off directly), unlike most ensembles.",
+  ]}
+  cons={[
+    "A single decision tree is notoriously unstable — small data perturbations can produce a completely different tree structure.",
+    "Random forests lose the single-tree's interpretability advantage; explaining a 300-tree ensemble requires post-hoc tools (feature importance, SHAP).",
+    "Both split on axis-aligned boundaries, so they need many splits to approximate a diagonal decision boundary that a linear model would capture in one step.",
+    "Random forests can still underperform gradient boosting on tasks where bias, not variance, is the dominant source of error.",
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Gini impurity and entropy are both concave impurity measures with the same shape — zero at purity, maximal at balance — and greedy recursive splitting on whichever minimizes weighted child impurity is what grows a tree.",
+  "A single deep tree is low-bias, high-variance; it overfits by design once grown without constraints.",
+  "Bagging's variance reduction has a hard floor of rho*sigma^2 set by inter-tree correlation, no matter how many trees you add — random forests attack that floor directly by randomizing the feature subset at each split.",
+  "Random forests (bagging) reduce variance from independent, parallel, high-variance trees; gradient boosting reduces bias from sequential, correlated, low-variance trees — opposite mechanisms sharing the same base learner.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Frequent errors">
+  - Growing a single decision tree without any depth/leaf-size constraint and being surprised by severe overfitting — pruning or `max_depth` is not optional for a standalone tree.
+  - Setting `max_features` to the full feature count in a random forest, which removes the decorrelation mechanism and makes it behave like plain bagging (with a higher correlation floor $\rho\sigma^2$).
+  - Assuming more trees in a random forest can overfit the way more boosting rounds can — bagging's out-of-bag error typically plateaus rather than degrading, since averaging more independent estimators cannot increase bias.
+  - Interpreting a random forest's feature importances as strictly causal, when they can be biased toward high-cardinality features unless permutation importance is used instead of the default impurity-based importance.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does averaging more bagged trees not reduce variance all the way to zero?",
+    options: [
+      "Because trees are deterministic given the data",
+      "Because Var(average) = rho*sigma^2 + (1-rho)*sigma^2/B, and the rho*sigma^2 term — driven by correlation between trees trained on overlapping bootstrap samples — does not vanish as B grows",
+      "Because bagging only works for regression, not classification",
+      "Because Gini impurity has a nonzero minimum",
+    ],
+    answerIndex: 1,
+    explanation: "The variance-of-an-average formula for correlated variables has a term that scales with 1/B (which vanishes) and a term scaling with the pairwise correlation rho (which does not). Random forests specifically add per-split feature randomization to shrink rho, attacking the part of the variance that plain bagging alone cannot remove.",
+  },
+  {
+    question: "What is the fundamental statistical difference between how random forests and gradient boosting use decision trees?",
+    options: [
+      "There is no difference; both are identical algorithms",
+      "Random forests train trees independently and in parallel on bootstrapped data to reduce variance; gradient boosting trains trees sequentially, each fitting the current ensemble's error, to reduce bias",
+      "Random forests can only use shallow trees, while boosting requires deep trees",
+      "Gradient boosting doesn't use impurity-based splitting",
+    ],
+    answerIndex: 1,
+    explanation: "Random forests use deep, high-variance, low-bias trees and average many independent ones (parallel) to cancel variance. Gradient boosting uses shallow, high-bias, low-variance trees and sums them sequentially, each new tree targeting the residual of the ensemble so far, progressively reducing bias.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "The Elements of Statistical Learning", authors: "Hastie, T., Tibshirani, R., & Friedman, J.", venue: "Springer", year: 2009 },
+  { title: "Random Forests", authors: "Breiman, L.", venue: "Machine Learning", year: 2001 },
+  { title: "Classification and Regression Trees (CART)", authors: "Breiman, L., Friedman, J. H., Olshen, R. A., & Stone, C. J.", venue: "Wadsworth", year: 1984 },
+]} />

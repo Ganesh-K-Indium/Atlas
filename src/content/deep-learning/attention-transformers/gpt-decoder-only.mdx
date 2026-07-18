@@ -1,0 +1,185 @@
+---
+title: "GPT & Decoder-Only Models"
+description: "Why predicting the next token with a causal mask turned out to be a training objective that scales, and how the GPT series turned 'bigger model, more data' into qualitatively new capabilities."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "nlp", "transformers", "gpt", "language-modeling", "scaling"]
+prerequisites: ["The Transformer Architecture", "Self-Attention & Multi-Head Attention", "Cross-entropy loss"]
+---
+
+<Prerequisites items={["The Transformer Architecture", "Self-Attention & Multi-Head Attention", "Cross-entropy loss"]} />
+
+## Intuition
+
+Whereas BERT (see [BERT & Encoder-Only Models](/docs/deep-learning/attention-transformers/bert)) is built to *understand* a fixed piece of text using full bidirectional context, GPT is built to *generate* text — and generation is fundamentally sequential: you produce one token, then the next, each conditioned only on what came before. GPT's architecture and training objective are both organized around that constraint, and it turns out that constraint is not a limitation to work around — it's the thing that made large-scale generative pretraining tractable and scalable in the first place.
+
+<Callout type="tip" title="The one-sentence idea">
+  GPT is a decoder-only Transformer trained on one simple, self-supervised objective — predict the next token given everything before it — applied at massive scale; nearly everything distinctive about GPT-family models (their generation ability, their scaling behavior, their few-shot capabilities) follows from that one objective plus scale, not from task-specific engineering.
+</Callout>
+
+## The Causal (Autoregressive) Language Modeling Objective
+
+Given a sequence of tokens $x_1, \ldots, x_n$, the training objective factorizes the joint probability of the sequence using the chain rule of probability:
+
+$$
+P(x_1, \ldots, x_n) = \prod_{t=1}^{n} P(x_t \mid x_1, \ldots, x_{t-1})
+$$
+
+Training simply maximizes the log-likelihood of this factorization over a large text corpus:
+
+$$
+\mathcal{L} = -\sum_{t=1}^{n} \log P_\theta(x_t \mid x_1, \ldots, x_{t-1})
+$$
+
+The key architectural requirement this imposes: when computing $P(x_t \mid x_1, \ldots, x_{t-1})$, the model must **not** be allowed to see $x_t, x_{t+1}, \ldots$ — otherwise, exactly as discussed for BERT, the objective becomes trivial (predict the token by looking at the token). This is enforced with a **causal mask**: in every self-attention layer, position $i$'s attention scores to all positions $j > i$ are set to $-\infty$ before the softmax, so those positions receive exactly zero attention weight.
+
+$$
+\text{score}_{i,j} = \begin{cases} \dfrac{q_i \cdot k_j}{\sqrt{d_k}} & j \le i \\[4pt] -\infty & j > i \end{cases}
+$$
+
+Because this masking is the *only* thing distinguishing the decoder-only stack from BERT's bidirectional encoder — same self-attention math, same feed-forward blocks, same residuals and layer norm — the entire behavioral difference between "understanding model" and "generative model" traces back to this one masking decision plus what objective it makes trainable.
+
+### Why this objective scales so well
+
+A few properties of causal language modeling combine to make it an unusually good fit for scaling to enormous models and datasets:
+
+- **It's self-supervised on raw, unlabeled text.** Every sentence ever written is automatically a training example — no manual labeling required, so data availability scales with however much text exists, not with how much anyone can annotate.
+- **Every position in a training sequence provides its own supervision signal in parallel.** Even though the causal mask is present, all $n$ predictions in a training sequence ($x_1$ predicting $x_2$, $x_1 x_2$ predicting $x_3$, etc.) can be computed in one parallel forward pass over the whole sequence (this is why training a Transformer is much more parallelizable than training an RNN, even though both are ultimately modeling a sequential process — see [RNNs, LSTMs & GRUs](/docs/deep-learning/sequence-models/rnn-lstm-gru)) — only *generation* at inference time is forced to be sequential, one token at a time.
+- **The objective doesn't specialize the model to one task.** "Predict the next token" implicitly requires the model to learn grammar, facts, reasoning patterns, and style, because all of these help predict what comes next in real text. This generality is what allows a single pretraining run to transfer to an enormous range of downstream uses.
+
+## Architecture
+
+<Mermaid chart={`
+graph TD
+  Tokens["x1 x2 x3 ... x_t"] --> Emb["Token + Positional Embeddings"]
+  Emb --> Dec["Stack of Transformer blocks with CAUSAL self-attention (mask j > i)"]
+  Dec --> H["Hidden state at position t"]
+  H --> Head["Output head: softmax over vocabulary"]
+  Head --> Pred["P(x_{t+1} | x_1 ... x_t)"]
+  Pred -.sampled token fed back as next input.-> Tokens
+`} />
+
+At inference, generation proceeds one step at a time: sample (or greedily pick) $x_{t+1}$ from $P(\cdot \mid x_1, \ldots, x_t)$, append it to the sequence, and repeat — the same feed-back-the-previous-output pattern seen in the Seq2Seq decoder (see [Seq2Seq & Encoder-Decoder Models](/docs/deep-learning/sequence-models/seq2seq)), except here there's no separate encoder — the "encoder" and "decoder" are the same causal stack operating over one sequence.
+
+## The GPT-1 → GPT-2 → GPT-3 Scaling Narrative
+
+At a conceptual level (without asserting specific parameter counts, dataset sizes, or capabilities of any current-generation proprietary model), the GPT series demonstrated a pattern that reshaped how the field thinks about progress in language modeling:
+
+- **GPT-1** (Radford et al.) established the recipe: pretrain a decoder-only Transformer with the causal language modeling objective on a large unlabeled text corpus, then fine-tune on a specific downstream task. The core finding was that this generative pretraining, followed by lightweight task-specific fine-tuning, outperformed training task-specific architectures from scratch.
+- **GPT-2** (Radford et al.) scaled up the model size and training data substantially and found something qualitatively new: a sufficiently large model trained with *only* the causal language modeling objective — with no task-specific fine-tuning at all — could perform a range of downstream tasks (like summarization or translation) directly, just by being prompted appropriately, at a level that was surprising given no explicit training for those tasks occurred.
+- **GPT-3** (Brown et al., 2020) scaled up further still and characterized this phenomenon systematically as **few-shot (and even zero-shot) in-context learning**: showing the model a handful of task examples in its prompt — without updating any weights — was often enough for it to perform the task, with performance improving fairly predictably as model scale increased.
+
+The narrative these three steps establish, stated conceptually: **the same core objective (predict the next token) combined with more parameters and more data did not just make the model "a bit better at the same thing" — at sufficient scale, qualitatively new behaviors (task-general in-context learning without weight updates) emerged that smaller models trained with the identical objective did not exhibit.** This scale-dependent emergence of new capabilities, rather than any single architectural innovation after the original Transformer, is the throughline of the GPT series.
+
+<Callout type="warning">
+  This page deliberately stops at GPT-3-era, conceptually-described findings. Claims about the exact capabilities, scale, or training details of more recent or current-generation models are easy to get wrong or become outdated, and aren't asserted here — treat specific numbers or capability claims about any particular current model as something to verify against a primary source rather than assume.
+</Callout>
+
+## Complexity
+
+| Phase | Time | Parallelizable? |
+| --- | --- | --- |
+| Training (teacher-forced, full sequence known) | $O(n^2 \cdot d)$ per sequence for self-attention | Yes — all $n$ next-token predictions computed in one parallel forward pass |
+| Inference / generation | $O(n^2 \cdot d)$ total across all steps to generate $n$ tokens (naively) | No — strictly sequential, one new token at a time, since each token depends on the previous one being sampled |
+
+The training/inference asymmetry above is central to understanding decoder-only models in practice: training is embarrassingly parallel over the sequence dimension (a major reason Transformers displaced RNNs, see [The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture)), but autoregressive *generation* is inherently sequential regardless of architecture — which is the core motivation for techniques like KV caching (avoiding recomputation of past keys/values at each new step) and speculative decoding.
+
+## Code Sketch
+
+```python
+import torch
+import torch.nn as nn
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, d_model, num_heads, max_seq_len):
+        super().__init__()
+        self.mha = nn.MultiheadAttention(d_model, num_heads, batch_first=True)
+        # Precompute a causal mask: True where attention is disallowed (j > i)
+        mask = torch.triu(torch.ones(max_seq_len, max_seq_len), diagonal=1).bool()
+        self.register_buffer("causal_mask", mask)
+
+    def forward(self, x):
+        seq_len = x.size(1)
+        attn_mask = self.causal_mask[:seq_len, :seq_len]
+        out, _ = self.mha(x, x, x, attn_mask=attn_mask)
+        return out
+
+
+def train_step(model, token_ids, optimizer):
+    # token_ids: [batch, seq_len]
+    inputs = token_ids[:, :-1]
+    targets = token_ids[:, 1:]           # next-token targets, shifted by one
+    logits = model(inputs)               # [batch, seq_len-1, vocab_size]
+    loss = nn.functional.cross_entropy(
+        logits.reshape(-1, logits.size(-1)), targets.reshape(-1)
+    )
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    return loss.item()
+
+
+@torch.no_grad()
+def generate(model, prompt_ids, max_new_tokens, eos_token_id=None):
+    tokens = prompt_ids
+    for _ in range(max_new_tokens):
+        logits = model(tokens)                       # recompute over full sequence (naive)
+        next_token_logits = logits[:, -1, :]
+        next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+        tokens = torch.cat([tokens, next_token], dim=1)  # feed back — autoregressive
+        if eos_token_id is not None and (next_token == eos_token_id).all():
+            break
+    return tokens
+```
+
+<KeyTakeaways items={[
+  "GPT is a decoder-only Transformer trained with a single self-supervised objective: predict the next token given all previous tokens, enforced architecturally by a causal mask that zeroes out attention to future positions.",
+  "The causal mask is the primary architectural difference from BERT's bidirectional encoder — same attention mechanism, opposite masking decision, opposite class of task it's suited for.",
+  "Causal language modeling scales unusually well because it's self-supervised on unlabeled text, trains in parallel across all sequence positions, and doesn't specialize the model to one narrow task.",
+  "The GPT-1 to GPT-3 progression showed that scaling the same objective (more parameters, more data) can produce qualitatively new capabilities — like few-shot in-context learning — not present in smaller models trained identically.",
+  "Training is parallel across the sequence; autoregressive generation at inference time is inherently sequential regardless of model architecture, motivating techniques like KV caching.",
+]} />
+
+## Common Mistakes
+
+- **Thinking the causal mask is only applied at inference time.** It's applied during training too — the model is never allowed to see future tokens during teacher-forced training either, which is exactly what makes the parallel training-time computation valid and non-trivial.
+- **Conflating "decoder-only" with "cannot understand input."** GPT-style models build rich contextual representations of the input they've seen so far; what they lack is *bidirectional* attention over that input, not understanding of it.
+- **Assuming bigger models are simply "the same, but better" in a smooth, entirely predictable way.** The GPT-2/GPT-3 story is specifically about qualitatively new behaviors (in-context learning) appearing at scale — an important nuance beyond "more parameters, lower loss."
+- **Asserting specific facts about the internals, scale, or capabilities of current-generation proprietary models without a verified source.** Well-established facts about the original GPT-1/2/3 papers are safe to state; specifics about newer or unreleased models are not.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What does the causal mask in a decoder-only model like GPT actually enforce, and why is it necessary?",
+    options: [
+      "It removes positional encodings from tokens after the current position",
+      "It sets attention scores from position i to any position j > i to -infinity before the softmax, so future tokens get exactly zero attention weight — without it, the next-token-prediction objective would be trivial because the model could see the very token it's supposed to predict",
+      "It is only applied at inference time to speed up generation",
+      "It restricts the vocabulary available at each position",
+    ],
+    answerIndex: 1,
+    explanation: "The causal mask makes P(x_t | x_1...x_{t-1}) a genuinely well-posed prediction problem by preventing the model from attending to x_t itself or anything after it. Without this, the next-token objective would collapse into copying, both during training and inference.",
+  },
+  {
+    question: "What was the key qualitative finding that emerged across the GPT-1 to GPT-3 progression, beyond simply 'the model got more accurate'?",
+    options: [
+      "Each successive model required a fundamentally different training objective than the last",
+      "At sufficient scale (more parameters and data), models trained with the same causal language modeling objective began exhibiting few-shot and zero-shot in-context learning — performing new tasks from a handful of examples in the prompt, without any weight updates — a capability not present in smaller models trained identically",
+      "GPT-2 and GPT-3 abandoned the causal masking used in GPT-1",
+      "Scaling primarily improved training speed rather than any downstream capability",
+    ],
+    answerIndex: 1,
+    explanation: "GPT-1 established generative pretraining plus fine-tuning; GPT-2 showed a large enough model could perform tasks directly via prompting with no fine-tuning; GPT-3 characterized this as few-shot in-context learning that scaled fairly predictably with model size — the same core objective producing qualitatively new capabilities purely from scale.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Improving Language Understanding by Generative Pre-Training (GPT-1)", authors: "Radford, A. et al.", venue: "OpenAI preprint", year: 2018, url: "https://cdn.openai.com/research-covers/language-unsupervised/language_understanding_paper.pdf" },
+  { title: "Language Models are Unsupervised Multitask Learners (GPT-2)", authors: "Radford, A. et al.", venue: "OpenAI preprint", year: 2019, url: "https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf" },
+  { title: "Language Models are Few-Shot Learners (GPT-3)", authors: "Brown, T. et al.", venue: "NeurIPS", year: 2020, url: "https://arxiv.org/abs/2005.14165" },
+  { title: "Attention Is All You Need", authors: "Vaswani, A. et al.", venue: "NeurIPS", year: 2017, url: "https://arxiv.org/abs/1706.03762" },
+]} />

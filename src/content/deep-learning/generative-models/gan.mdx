@@ -1,0 +1,168 @@
+---
+title: "Generative Adversarial Networks (GANs)"
+description: "How framing generation as a two-player minimax game between a forger and a detector produces sharp samples — and why that same game is notoriously unstable to train."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "generative-models", "gan"]
+prerequisites: ["Binary cross-entropy loss", "Gradient descent", "Basic game theory (minimax) intuition"]
+---
+
+## Intuition
+
+Instead of writing down an explicit likelihood for the data (as a VAE does with its decoder distribution), a **GAN** trains a generator implicitly, by pitting it against an adversary. A **generator** $G$ tries to produce fake samples indistinguishable from real data; a **discriminator** $D$ tries to tell real samples from $G$'s fakes. Train both simultaneously, and — if the game reaches its intended equilibrium — $G$ ends up producing samples the discriminator can't distinguish from real data at all.
+
+This is a **counterfeiter vs. detective** setup: the counterfeiter ($G$) never sees real currency directly, only feedback from the detective ($D$) about whether its latest forgery got caught. As the detective gets better, the counterfeiter is forced to improve; as the counterfeiter gets better, the detective is forced to sharpen its detection. Neither network needs an explicit density model of the data — the discriminator's gradient is the only signal $G$ ever receives.
+
+<Callout type="tip" title="The one-sentence idea">
+  Train a generator and a discriminator against each other in a minimax game — the generator to fool the discriminator, the discriminator to catch the generator — until the generator's output distribution matches the real data distribution closely enough that the discriminator can do no better than a coin flip.
+</Callout>
+
+## The Minimax Objective
+
+Let $p_{\text{data}}$ be the true data distribution, $p_z$ a simple prior over a latent noise vector (e.g., $\mathcal{N}(0, I)$), $G$ a generator mapping noise to data space, and $D$ a discriminator mapping data to a scalar in $(0,1)$ interpreted as "probability this input is real." The original GAN objective is:
+
+$$
+\min_G \max_D \; V(D, G) = \mathbb{E}_{x \sim p_{\text{data}}}\big[\log D(x)\big] + \mathbb{E}_{z \sim p_z}\big[\log\big(1 - D(G(z))\big)\big]
+$$
+
+Read this from the inside out:
+
+- $D$ wants to **maximize** $V$: assign $D(x) \to 1$ for real data (maximizing $\log D(x)$) and $D(G(z)) \to 0$ for generated data (maximizing $\log(1 - D(G(z)))$). This is exactly the binary cross-entropy loss for a real-vs-fake classifier.
+- $G$ wants to **minimize** $V$: it only controls the second term, and minimizing $\mathbb{E}_z[\log(1 - D(G(z)))]$ means pushing $D(G(z)) \to 1$ — fooling the discriminator into classifying its fakes as real.
+
+**Why this is a well-defined game with a meaningful solution.** For a *fixed* $G$, the optimal discriminator has a closed form: $D^*(x) = \dfrac{p_{\text{data}}(x)}{p_{\text{data}}(x) + p_g(x)}$, where $p_g$ is the distribution induced by $G$ (derivable by taking the functional derivative of $V$ with respect to $D(x)$ pointwise and setting it to zero). Substituting $D^*$ back into $V$ and simplifying shows that, for the optimal discriminator, minimizing over $G$ is equivalent to minimizing the **Jensen-Shannon divergence** between $p_{\text{data}}$ and $p_g$ (up to an additive constant):
+
+$$
+V(D^*, G) = -\log 4 + 2 \cdot D_{JS}(p_{\text{data}} \,\|\, p_g)
+$$
+
+Since $D_{JS} \geq 0$ with equality iff the two distributions are identical, the global minimum of the game over $G$ (given an optimal $D$ at every step) is achieved exactly when $p_g = p_{\text{data}}$ — the generator's distribution matches the data distribution, and the optimal discriminator is $D^*(x) = \tfrac{1}{2}$ everywhere (it can do no better than chance).
+
+## Training Loop
+
+In practice, $D$ and $G$ are updated in alternation, not solved to convergence at each step (that closed-form $D^*$ assumes $G$ is fixed, which never truly holds during training):
+
+1. Sample a minibatch of real data $x \sim p_{\text{data}}$ and noise $z \sim p_z$; generate fakes $G(z)$.
+2. Update $D$ by ascending its gradient on $V(D,G)$ (a standard binary classification loss: real=1, fake=0), holding $G$ fixed.
+3. Sample fresh noise $z \sim p_z$; update $G$ by descending its gradient on $V(D,G)$ (equivalently, ascending $D(G(z))$), holding $D$ fixed.
+4. Repeat — the two networks chase a moving target defined by each other's most recent update.
+
+<Mermaid chart={`
+graph TD
+  Z["Noise z ~ p_z"] --> G["Generator G"]
+  G --> Fake["Fake sample G(z)"]
+  Real["Real sample x ~ p_data"] --> D["Discriminator D"]
+  Fake --> D
+  D --> Score["D(x) in (0,1): P(real)"]
+  Score --> DLoss["D loss: maximize log D(x) + log(1 - D(G(z)))"]
+  Score --> GLoss["G loss: fool D -- minimize log(1 - D(G(z))) or maximize log D(G(z))"]
+  DLoss -->|"gradient ascent"| D
+  GLoss -->|"gradient descent"| G
+`} />
+
+## Instability Issues
+
+The minimax formulation is elegant on paper but notoriously hard to optimize in practice, for two well-documented reasons:
+
+**1. Vanishing gradients when $D$ is too strong.** Early in training, $G$'s samples are easy to distinguish from real data, so $D$ quickly learns to output $D(G(z)) \approx 0$ confidently. But $G$'s original loss, $\log(1 - D(G(z)))$, has a **near-zero gradient with respect to $G$'s parameters exactly when $D(G(z)) \approx 0$** — the function $\log(1-y)$ is nearly flat near $y=0$. So the generator gets almost no learning signal precisely when it needs it most (when it's still bad).
+
+**2. Mode collapse.** $G$ can achieve a low loss by producing only a small, high-quality subset of the true data distribution's modes (e.g., generating only one or two distinct digit styles instead of the full variety) if that subset reliably fools the current $D$. Because $G$'s only objective is to fool $D$ — not to cover the full data distribution — nothing in the vanilla objective directly penalizes collapsing onto a few modes, and the alternating optimization can oscillate between different narrow modes without ever converging to full coverage.
+
+**The non-saturating loss fix.** The original GAN paper itself proposes a practical fix for the vanishing-gradient issue: instead of having $G$ minimize $\log(1 - D(G(z)))$, have it **maximize $\log D(G(z))$** directly:
+
+$$
+\max_G \; \mathbb{E}_{z \sim p_z}\big[\log D(G(z))\big]
+$$
+
+This objective has the same fixed point (both are optimized when $D(G(z)) \to 1$) but a much steeper gradient when $D(G(z))$ is small — $\log(y)$ has a large derivative near $y=0$, exactly where $\log(1-y)$'s derivative vanishes. This "non-saturating" loss is what's actually used in most practical GAN implementations, even though the original minimax derivation is stated in terms of the saturating form.
+
+Mode collapse has no single universally accepted fix within the vanilla framework; mitigations include minibatch discrimination (letting $D$ compare samples within a batch to detect low diversity), unrolled optimization, and architectural/objective changes in later GAN variants (e.g., Wasserstein GAN's use of the Earth Mover's distance, which provides a smoother, more informative training signal than Jensen-Shannon divergence in regions where the two distributions have little overlap).
+
+## Implementation Sketch
+
+```python
+import torch
+import torch.nn as nn
+
+# --- Training step (non-saturating generator loss) ---
+def train_step(G, D, opt_G, opt_D, real_batch, z_dim, device):
+    bce = nn.BCELoss()
+    batch_size = real_batch.size(0)
+    real_labels = torch.ones(batch_size, 1, device=device)
+    fake_labels = torch.zeros(batch_size, 1, device=device)
+
+    # 1) Update D: classify real as 1, fake (detached) as 0
+    z = torch.randn(batch_size, z_dim, device=device)
+    fake_batch = G(z)
+    d_loss = bce(D(real_batch), real_labels) + bce(D(fake_batch.detach()), fake_labels)
+    opt_D.zero_grad(); d_loss.backward(); opt_D.step()
+
+    # 2) Update G: non-saturating loss -- maximize log D(G(z)), i.e. minimize -log D(G(z))
+    z = torch.randn(batch_size, z_dim, device=device)
+    fake_batch = G(z)
+    g_loss = bce(D(fake_batch), real_labels)   # label flip is the "fool the discriminator" trick
+    opt_G.zero_grad(); g_loss.backward(); opt_G.step()
+
+    return d_loss.item(), g_loss.item()
+```
+
+Note the label-flip trick in step 2: computing binary cross-entropy against `real_labels` for the generator's fakes is algebraically the same as maximizing $\log D(G(z))$ — the standard way this non-saturating loss is implemented.
+
+<KeyTakeaways items={[
+  "The GAN minimax objective, at its optimal discriminator, is equivalent to minimizing the Jensen-Shannon divergence between the generator's distribution and the true data distribution.",
+  "The theoretical global optimum is p_g = p_data with D*(x) = 1/2 everywhere — the discriminator reduced to chance.",
+  "The saturating generator loss log(1 - D(G(z))) has vanishing gradients exactly when the generator is weak (D(G(z)) near 0) -- the non-saturating loss maximize log D(G(z)) fixes this while sharing the same fixed point.",
+  "Mode collapse arises because nothing in the vanilla objective rewards covering the full data distribution -- only fooling the current discriminator, which a narrow subset of modes can do.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Produces sharp, high-frequency-detail samples, generally sharper than vanilla VAE reconstructions for image data.",
+    "No explicit likelihood computation needed — useful when the true data distribution has no convenient tractable density form.",
+    "The adversarial signal from D can capture subtle realism cues that a fixed pixel-wise loss (as in VAEs) would average away.",
+  ]}
+  cons={[
+    "Training is a two-player game with no guaranteed convergence in practice — oscillation and instability are common, unlike a VAE's single well-posed optimization.",
+    "Mode collapse can silently reduce sample diversity while the loss curves look reasonable.",
+    "No explicit likelihood estimate is available, making quantitative comparison across models and detection of overfitting harder than for likelihood-based models.",
+    "Very sensitive to hyperparameters and the relative capacity/learning rate balance between G and D -- an imbalance in either direction (too-strong D or too-strong G) degrades training.",
+  ]}
+/>
+
+A common practical mistake: using the saturating loss $\log(1-D(G(z)))$ as written in the original minimax formula for the generator's actual gradient step, rather than the non-saturating $\log D(G(z))$ form — this reliably stalls generator learning once the discriminator becomes confident.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "At the theoretical optimum of the GAN minimax game (assuming D is always optimal for the current G), what does minimizing the objective over G correspond to?",
+    options: [
+      "Minimizing the mean squared error between generated and real samples",
+      "Minimizing the Jensen-Shannon divergence between the generator's distribution p_g and the true data distribution p_data, with the global minimum at p_g = p_data",
+      "Maximizing the KL divergence between p_g and p_data",
+      "There is no meaningful interpretation -- it's purely a heuristic loss",
+    ],
+    answerIndex: 1,
+    explanation: "Substituting the closed-form optimal discriminator D*(x) = p_data(x) / (p_data(x) + p_g(x)) back into V(D,G) shows the objective equals -log 4 + 2 * JS(p_data || p_g). Since JS divergence is nonnegative and zero only when the distributions are identical, the game's optimum (given an optimal D at each step) is p_g = p_data.",
+  },
+  {
+    question: "Why does the original (saturating) generator loss log(1 - D(G(z))) cause vanishing gradients early in training, and how does the non-saturating fix address it?",
+    options: [
+      "The saturating loss has no gradient issue -- the non-saturating version is purely a stylistic alternative",
+      "Early on, D confidently classifies fakes as fake (D(G(z)) near 0), and log(1-y) has a near-zero derivative near y=0, starving G of gradient signal; maximizing log D(G(z)) instead has a large derivative near y=0, giving strong gradients exactly when G is weak, while sharing the same fixed point",
+      "The non-saturating loss changes the game's optimal solution to a different equilibrium than p_g = p_data",
+      "Vanishing gradients only occur when G is too powerful relative to D, not the reverse",
+    ],
+    answerIndex: 1,
+    explanation: "d/dy[log(1-y)] = -1/(1-y), which is small in magnitude near y=0 -- exactly where a weak generator's D(G(z)) sits early in training. d/dy[log y] = 1/y is large near y=0, so maximizing log D(G(z)) gives much stronger gradient signal in that same regime, without changing where the objective's fixed point lies.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Generative Adversarial Networks", authors: "Goodfellow, I. et al.", venue: "NeurIPS", year: 2014, url: "https://arxiv.org/abs/1406.2661" },
+]} />

@@ -1,0 +1,219 @@
+---
+title: "Perceptrons & Multilayer Perceptrons"
+description: "Why a single linear threshold unit can't learn XOR, and how stacking nonlinear layers turns that dead end into a universal function approximator."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "neural-networks", "perceptron", "mlp"]
+prerequisites: ["Linear algebra basics (dot products, hyperplanes)", "Basic gradient descent"]
+---
+
+<Prerequisites items={["Linear algebra basics (dot products, hyperplanes)", "Basic gradient descent", "Vectors and inequalities"]} />
+
+## Intuition
+
+The perceptron is the oldest neural network model: a single artificial neuron that draws a straight line (or, in higher dimensions, a hyperplane) through the data and classifies points by which side of that line they fall on. It's simple, it has a beautifully simple learning rule, and it comes with a guarantee — if the data can be separated by a straight line, the perceptron *will* find one.
+
+But that guarantee is also its limitation. Many real problems — starting with the humble XOR function — cannot be separated by any single straight line. The fix, discovered and popularized decades after the original perceptron, is deceptively simple: stack perceptron-like units into layers, and put a nonlinearity between the layers. This "multilayer perceptron" (MLP) can bend and fold the input space into shapes that a single line never could, and it turns out this is enough to approximate essentially any continuous function.
+
+<Callout type="tip" title="The one idea that matters">
+  A single perceptron can only separate data with a straight line (a hyperplane). Stacking layers with a nonlinear activation between them lets the network compose bent, curved decision boundaries out of straight ones — this compositional bending is where all of deep learning's expressive power comes from.
+</Callout>
+
+## Formal Definition
+
+### The single perceptron
+
+A perceptron takes an input vector $x \in \mathbb{R}^d$, computes a weighted sum plus a bias, and passes it through a step function:
+
+$$
+\hat{y} = \text{sign}(w^\top x + b) = \begin{cases} +1 & \text{if } w^\top x + b \geq 0 \\ -1 & \text{otherwise} \end{cases}
+$$
+
+Geometrically, $w^\top x + b = 0$ defines a hyperplane; $w$ is normal to it. The perceptron classifies every point by which side of that hyperplane it lies on.
+
+### The multilayer perceptron (MLP)
+
+An MLP stacks $L$ such affine transformations, each followed by a nonlinear activation $\phi$ (sigmoid, tanh, ReLU, etc. — see [Activation Functions](/docs/deep-learning/fundamentals/activation-functions)):
+
+$$
+a^{(0)} = x, \qquad z^{(l)} = W^{(l)} a^{(l-1)} + b^{(l)}, \qquad a^{(l)} = \phi(z^{(l)}) \quad \text{for } l = 1, \dots, L
+$$
+
+The final layer's output $a^{(L)}$ is the network's prediction. Without the nonlinearity $\phi$, composing affine maps just produces another affine map — no matter how many layers you stack, $W^{(2)}(W^{(1)}x + b^{(1)}) + b^{(2)}$ is still linear in $x$. The nonlinearity is what gives depth its power.
+
+## Derivation and Mechanism
+
+### The perceptron learning rule
+
+Given a labeled training set $\{(x_i, y_i)\}$ with $y_i \in \{-1, +1\}$, the perceptron learning rule updates weights **only on misclassified examples**:
+
+$$
+w \leftarrow w + \eta \, y_i x_i, \qquad b \leftarrow b + \eta \, y_i \quad \text{whenever } y_i (w^\top x_i + b) \leq 0
+$$
+
+Why this update? If $x_i$ is misclassified, $y_i(w^\top x_i + b) \leq 0$. After the update, the new margin on that same example is:
+
+$$
+y_i \big( (w + \eta y_i x_i)^\top x_i + (b + \eta y_i) \big) = y_i(w^\top x_i + b) + \eta \, y_i^2 (\|x_i\|^2 + 1)
+$$
+
+Since $y_i^2 = 1$ and $\|x_i\|^2 + 1 > 0$, the margin on this example strictly increases by $\eta(\|x_i\|^2+1)$ after every update on it. Repeating this pushes every misclassified point toward (eventually across) the correct side.
+
+### Convergence guarantee (Perceptron Convergence Theorem)
+
+If the training data is linearly separable — i.e. there exists some $w^*$ (with $\|w^*\|=1$) and margin $\gamma > 0$ such that $y_i (w^{*\top} x_i) \geq \gamma$ for all $i$ — then the perceptron algorithm makes at most
+
+$$
+\frac{R^2}{\gamma^2}
+$$
+
+mistakes in total, where $R = \max_i \|x_i\|$. This bound is *independent of the number of training examples* — it depends only on how "hard" the geometry of the problem is (how large a margin separates the classes relative to how spread out the data is). The proof (Rosenblatt, and later Novikoff's cleaner version) tracks two quantities as updates happen: $w_t^\top w^*$ grows linearly with the number of updates $t$ (by at least $\gamma$ per update), while $\|w_t\|^2$ grows at most linearly (by at most $R^2$ per update). Since $w_t^\top w^* \leq \|w_t\|\|w^*\| = \|w_t\|$ by Cauchy-Schwarz, combining $t\gamma \leq \|w_t\| \leq \sqrt{tR^2}$ forces $t \leq R^2/\gamma^2$.
+
+### Why a single perceptron cannot represent XOR
+
+XOR takes two binary inputs and outputs 1 exactly when they differ:
+
+| $x_1$ | $x_2$ | XOR |
+| --- | --- | --- |
+| 0 | 0 | 0 |
+| 0 | 1 | 1 |
+| 1 | 0 | 1 |
+| 1 | 1 | 0 |
+
+Plot these four points in the plane. The two positive points $(0,1)$ and $(1,0)$ sit on one diagonal; the two negative points $(0,0)$ and $(1,1)$ sit on the other diagonal — and the diagonals cross. **No single straight line can put both positive points on one side and both negative points on the other**, because any line separating $(0,1)$ from $(0,0)$-$(1,1)$ would have to cross the segment joining $(1,0)$ to the negative points too — formally, the convex hull of the positive points intersects the convex hull of the negative points (they share the same centroid, $(0.5, 0.5)$), and two point sets can only be linearly separated if their convex hulls are disjoint. This is exactly the geometric argument Minsky and Papert made precise in *Perceptrons* (1969), and it was historically taken (somewhat overzealously) as a reason to abandon neural network research for over a decade.
+
+### How stacking layers restores expressiveness
+
+Adding a single hidden layer with a nonlinearity fixes this. One classic construction: use two hidden units to compute the OR-like and NAND-like intermediate features, then combine them with AND:
+
+$$
+h_1 = \phi(x_1 + x_2 - 0.5), \qquad h_2 = \phi(-x_1 - x_2 + 1.5), \qquad \hat{y} = \phi(h_1 + h_2 - 1.5)
+$$
+
+with $\phi$ a step function. $h_1$ fires when at least one input is on (OR); $h_2$ fires when at most one input is on (NAND); their AND is XOR. Geometrically, the hidden layer bends the input space so that points that were not linearly separable in the original coordinates *become* linearly separable in the transformed (hidden) coordinate space. This is the **Universal Approximation Theorem** in miniature: Cybenko (1989) and Hornik et al. (1989) showed that a feedforward network with a single hidden layer of sufficient width and a non-polynomial activation can approximate any continuous function on a compact domain to arbitrary precision. Width alone isn't free, though — the required hidden-layer size can grow exponentially for some functions, which is part of the practical motivation for *depth* (composing many modestly-wide layers) rather than a single very wide one.
+
+<Mermaid chart={`
+graph TD
+  x1["x1"] --> h1["h1 = phi(w11 x1 + w12 x2 + b1)"]
+  x2["x2"] --> h1
+  x1 --> h2["h2 = phi(w21 x1 + w22 x2 + b2)"]
+  x2 --> h2
+  h1 --> y["y_hat = phi(v1 h1 + v2 h2 + c)"]
+  h2 --> y
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+
+# --- Single perceptron: learns AND (linearly separable) ---
+def perceptron_fit(X, y, epochs=20, lr=1.0):
+    w = np.zeros(X.shape[1])
+    b = 0.0
+    for _ in range(epochs):
+        mistakes = 0
+        for xi, yi in zip(X, y):
+            if yi * (w @ xi + b) <= 0:
+                w += lr * yi * xi
+                b += lr * yi
+                mistakes += 1
+        if mistakes == 0:
+            break
+    return w, b
+
+X_and = np.array([[0, 0], [0, 1], [1, 0], [1, 1]])
+y_and = np.array([-1, -1, -1, 1])  # AND is linearly separable
+w, b = perceptron_fit(X_and, y_and)
+print("AND perceptron:", np.sign(X_and @ w + b))  # matches y_and
+
+# --- A tiny 2-layer MLP forward pass that solves XOR ---
+def relu(z):
+    return np.maximum(0, z)
+
+def mlp_xor(x1, x2):
+    x = np.array([x1, x2])
+    W1 = np.array([[1, 1], [1, 1]])
+    b1 = np.array([-0.5, -1.5])
+    v = np.array([1, -1])
+    c = -0.5
+    h = relu(W1 @ x + b1)          # h1 = OR-like, h2 = AND-like
+    return 1 if (v @ h + c) > 0 else 0
+
+for a in [0, 1]:
+    for b_ in [0, 1]:
+        print(a, b_, "->", mlp_xor(a, b_))
+```
+
+## Complexity
+
+| Model | Expressiveness | Learning guarantee |
+| --- | --- | --- |
+| Single perceptron | Linear decision boundaries only | Guaranteed convergence in $\leq R^2/\gamma^2$ mistakes, but *only* if data is linearly separable |
+| MLP, 1 hidden layer, enough units | Universal approximator (any continuous function on a compact domain) | No convergence guarantee; trained via gradient descent + [backpropagation](/docs/foundations/calculus-optimization/backpropagation-derivation), which can get stuck in local minima / saddle points |
+| Deep MLP | Same universal approximation, often far fewer total parameters for the same function class | Same caveats, plus vanishing/exploding gradients across depth |
+
+<ComparisonTable
+  headers={["Property", "Single Perceptron", "Multilayer Perceptron"]}
+  rows={[
+    ["Decision boundary", "Single hyperplane", "Piecewise-linear regions (with ReLU) or smooth curved boundary (with sigmoid/tanh)"],
+    ["Can solve XOR?", "No", "Yes, with ≥1 hidden layer"],
+    ["Training algorithm", "Perceptron rule (mistake-driven)", "Gradient descent + backpropagation"],
+    ["Convergence guarantee", "Yes, if linearly separable", "No general guarantee (non-convex loss)"],
+    ["Activation needed", "Step function (or none, just sign)", "Must be nonlinear or depth collapses to linear"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "A perceptron classifies by which side of a hyperplane a point falls on — it can only ever represent linearly separable functions.",
+  "The perceptron mistake bound R²/γ² depends only on the geometric margin of the data, not the dataset size.",
+  "XOR is not linearly separable because its positive and negative classes' convex hulls overlap — this was the key limitation exposed by Minsky & Papert (1969).",
+  "Stacking a hidden layer with a nonlinear activation lets the network reshape the input space so previously inseparable classes become separable — this is the seed of the Universal Approximation Theorem.",
+  "Without nonlinear activations, any depth of stacked linear layers collapses algebraically into a single linear layer.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Pitfalls">
+  - Forgetting the bias term $b$: without it, every decision hyperplane is forced through the origin, which fails on simple non-origin-centered data.
+  - Assuming perceptron convergence implies good generalization — the theorem only guarantees fitting the *training* data if it's separable; it says nothing about a margin-maximizing (SVM-like) solution.
+  - Building a "deep" network with no nonlinearity between layers (e.g., all linear layers) — this is mathematically identical to a single linear layer, and a common bug when refactoring code that removes activation calls.
+  - Confusing "1 hidden layer is a universal approximator" with "1 hidden layer is *practical*" — the required width can be exponential in the function's complexity, which is why deep (not just wide) networks dominate in practice.
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why can't a single-layer perceptron represent the XOR function?",
+    options: [
+      "Because XOR requires more than one output neuron",
+      "Because the positive-class points and negative-class points, plotted geometrically, have convex hulls that overlap, so no single hyperplane separates them",
+      "Because the perceptron learning rate must be too large",
+      "Because XOR is not a boolean function",
+    ],
+    answerIndex: 1,
+    explanation: "XOR's positive examples (0,1),(1,0) and negative examples (0,0),(1,1) share the same centroid (0.5,0.5) — their convex hulls intersect, so linear separability is geometrically impossible.",
+  },
+  {
+    question: "What does the perceptron convergence theorem guarantee, and under what condition?",
+    options: [
+      "It guarantees convergence to the maximum-margin hyperplane for any dataset",
+      "It guarantees the algorithm converges to zero training error within a finite number of updates bounded by R²/γ², but only if the data is linearly separable",
+      "It guarantees the network will generalize well on unseen data",
+      "It guarantees convergence for XOR-like non-separable data given enough epochs",
+    ],
+    answerIndex: 1,
+    explanation: "The mistake bound R²/γ² (R = max input norm, γ = margin) only holds when a separating hyperplane exists. On non-separable data the algorithm can cycle forever without converging.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "The Perceptron: A Probabilistic Model for Information Storage and Organization in the Brain", authors: "Rosenblatt, F.", venue: "Psychological Review", year: 1958 },
+  { title: "Perceptrons: An Introduction to Computational Geometry", authors: "Minsky, M. L., & Papert, S. A.", venue: "MIT Press", year: 1969 },
+  { title: "Approximation by Superpositions of a Sigmoidal Function", authors: "Cybenko, G.", venue: "Mathematics of Control, Signals, and Systems", year: 1989 },
+  { title: "Multilayer Feedforward Networks are Universal Approximators", authors: "Hornik, K., Stinchcombe, M., & White, H.", venue: "Neural Networks", year: 1989 },
+]} />

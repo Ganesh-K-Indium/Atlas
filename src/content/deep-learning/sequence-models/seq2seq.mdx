@@ -1,0 +1,203 @@
+---
+title: "Seq2Seq & Encoder-Decoder Models"
+description: "How encoder-decoder RNNs made variable-length translation possible, why squeezing a whole sentence into one vector caps quality, and how attention fixed it — the direct conceptual bridge to Transformers."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "nlp", "sequence-models", "attention", "machine-translation"]
+prerequisites: ["RNNs, LSTMs & GRUs", "Softmax", "Basic probability"]
+---
+
+## Intuition
+
+Translation, summarization, and speech recognition share a structural problem that plain classification doesn't have: the input and output are both sequences, and they can be **different lengths** and have **no fixed alignment** — "I am a student" (4 words) becomes "Je suis étudiant" (3 words) in French, and word order doesn't map one-to-one. A model that must output exactly one label per input token (like a tagger) can't handle this. You need something that reads the whole input first, then generates an output sequence of whatever length is appropriate.
+
+<Callout type="tip" title="The one-sentence idea">
+  Seq2Seq splits the job into two networks: an **encoder** that reads the entire input and compresses it into a representation, and a **decoder** that generates the output sequence one token at a time, conditioned on that representation and on its own previous outputs.
+</Callout>
+
+## The Original Architecture: One Vector to Rule Them All
+
+The original Seq2Seq formulation (Sutskever, Vinyals & Le, 2014) uses two RNNs (in practice, LSTMs):
+
+1. The **encoder** processes the source sequence $x_1, \ldots, x_n$ step by step, updating its hidden state as usual, and keeps *only the final hidden state* $h_n$ — call it the **context vector** $c$.
+2. The **decoder**, another RNN, is initialized with $c$ and generates the target sequence $y_1, \ldots, y_m$ autoregressively: at each step it takes its own previous output $y_{t-1}$ and hidden state, produces a distribution over the vocabulary for $y_t$, samples or greedily picks a token, and feeds it back in as input to the next step.
+
+$$
+P(y_1, \ldots, y_m \mid x_1, \ldots, x_n) = \prod_{t=1}^{m} P\big(y_t \mid y_1, \ldots, y_{t-1}, \, c\big)
+$$
+
+Training uses **teacher forcing**: during training, the decoder is fed the *true* previous token $y_{t-1}$ from the training data (not its own possibly-wrong prediction), which stabilizes and speeds up learning; at inference time it has no choice but to feed back its own generated tokens.
+
+<Mermaid chart={`
+graph LR
+  X1["x1"] --> Enc1["Encoder RNN"]
+  X2["x2"] --> Enc2["Encoder RNN"]
+  X3["x3"] --> Enc3["Encoder RNN"]
+  Enc1 --> Enc2 --> Enc3
+  Enc3 --> C["Context vector c (final hidden state)"]
+  C --> Dec1["Decoder RNN"]
+  Dec1 --> Y1["y1"]
+  Dec1 --> Dec2["Decoder RNN"]
+  Y1 -.feed back.-> Dec2
+  Dec2 --> Y2["y2"]
+  Dec2 --> Dec3["Decoder RNN"]
+  Y2 -.feed back.-> Dec3
+  Dec3 --> Y3["y3"]
+`} />
+
+## The Fixed-Context-Vector Bottleneck
+
+This design has an obvious structural flaw once you look closely: **the entire source sentence must be compressed into a single fixed-size vector $c$**, regardless of whether the sentence has 5 words or 50. The decoder never looks back at the source sequence again after that first step — everything it knows about the input has to survive the compression into $c$ and then get carried, unchanged in content, across every decoding step.
+
+Two consequences follow directly:
+
+- **Long sentences degrade disproportionately.** As $n$ grows, more information has to be squeezed into the same fixed-size $c$, and empirically translation quality drops sharply for longer source sentences — the exact symptom you'd expect from a fixed-capacity bottleneck.
+- **The decoder has no way to "look up" which part of the source is relevant to the word it's generating right now.** When generating the French word for "student," ideally the model would re-examine the region of the input near "student" — but $c$ has already discarded that positional distinction; it's one blended summary.
+
+This is structurally the same kind of information bottleneck as the vanishing-gradient problem in plain RNNs (see [RNNs, LSTMs & GRUs](/docs/deep-learning/sequence-models/rnn-lstm-gru)): a single fixed-size intermediate is being asked to carry more information than it can represent well as sequence length grows.
+
+## Fixing It: Attention Over Encoder States
+
+Bahdanau, Cho & Bengio (2014) proposed the fix that turned out to be one of the most consequential ideas in deep learning: **instead of discarding all but the final encoder hidden state, keep every encoder hidden state $h_1, \ldots, h_n$, and let the decoder look back at all of them at every decoding step**, weighting them by relevance to what it's currently generating.
+
+Concretely, at decoder step $t$, with decoder hidden state $s_t$:
+
+1. Compute an **alignment score** between the decoder's current state and every encoder hidden state:
+$$
+e_{t,i} = \text{score}(s_t, h_i)
+$$
+   (Bahdanau used a small feedforward network on $[s_t, h_i]$; Luong's later variant used a simpler dot product or bilinear form — the functional role is identical.)
+2. Normalize the scores into a probability distribution over source positions with softmax:
+$$
+\alpha_{t,i} = \frac{\exp(e_{t,i})}{\sum_{j=1}^{n} \exp(e_{t,j})}
+$$
+3. Form a **context vector specific to this decoding step** as a weighted sum of all encoder states:
+$$
+c_t = \sum_{i=1}^{n} \alpha_{t,i} \, h_i
+$$
+4. Feed $c_t$ (concatenated with the decoder's own state) into the output layer to produce $y_t$.
+
+The critical change from the original formulation: **the context vector is no longer fixed — it's recomputed at every decoder step**, and it's a weighted combination over the *entire* source sequence rather than a single compressed summary. The decoder effectively gets to "re-read" the source, focusing on different words as it generates different output words — which is exactly the soft-alignment behavior you'd want for translation, and it's visualizable: plotting $\alpha_{t,i}$ as a heatmap shows the model learning roughly monotonic (and sometimes reordered) word alignments between languages, learned entirely from data with no explicit alignment supervision.
+
+<Callout type="note" title="This is the direct ancestor of self-attention">
+  The Bahdanau/Luong attention mechanism above — query = decoder state, keys/values = encoder states, softmax-weighted sum — is *exactly* the Query/Key/Value pattern used in the Transformer's [self-attention](/docs/deep-learning/attention-transformers/self-attention-multi-head), generalized from "decoder attends to a separate encoder" (cross-attention) to "every token attends to every other token in the same sequence" (self-attention). See [The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture) for how removing the recurrence entirely, while keeping this attention mechanism as the *only* way information moves between positions, led to the modern Transformer.
+</Callout>
+
+## Complexity
+
+| Component | Time (attention-augmented Seq2Seq) | Memory | Sequential constraint |
+| --- | --- | --- | --- |
+| Encoder (RNN) | $O(n \cdot d^2)$ | $O(n \cdot d)$ to keep all hidden states | Sequential over $n$ |
+| Attention per decoder step | $O(n \cdot d)$ | $O(n)$ scores | — |
+| Full decode | $O(m \cdot n \cdot d)$ total for attention across all steps | $O(n \cdot d)$ encoder cache | Sequential over $m$ (autoregressive) |
+
+Attention adds an $O(n)$ cost per decoding step (attending over all $n$ encoder positions) but removes the information bottleneck entirely — a trade found to be overwhelmingly worth it, and one that generalizes directly to the Transformer's $O(n^2)$ self-attention, discussed in [The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture).
+
+## Code Sketch
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class Encoder(nn.Module):
+    def __init__(self, vocab_size, emb_dim, hidden_dim):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, emb_dim)
+        self.rnn = nn.LSTM(emb_dim, hidden_dim, batch_first=True)
+
+    def forward(self, src):
+        embedded = self.embed(src)
+        outputs, (h_n, c_n) = self.rnn(embedded)
+        return outputs, (h_n, c_n)   # keep ALL outputs, not just h_n
+
+
+class BahdanauAttention(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.attn = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.v = nn.Linear(hidden_dim, 1, bias=False)
+
+    def forward(self, decoder_state, encoder_outputs):
+        # decoder_state: [batch, hidden]  encoder_outputs: [batch, n, hidden]
+        n = encoder_outputs.size(1)
+        query = decoder_state.unsqueeze(1).repeat(1, n, 1)
+        energy = torch.tanh(self.attn(torch.cat([query, encoder_outputs], dim=-1)))
+        scores = self.v(energy).squeeze(-1)          # [batch, n]
+        alpha = F.softmax(scores, dim=-1)             # step 2: normalize
+        context = torch.bmm(alpha.unsqueeze(1), encoder_outputs).squeeze(1)  # step 3
+        return context, alpha
+
+
+class AttentionDecoderStep(nn.Module):
+    def __init__(self, vocab_size, emb_dim, hidden_dim):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, emb_dim)
+        self.rnn_cell = nn.LSTMCell(emb_dim + hidden_dim, hidden_dim)
+        self.attention = BahdanauAttention(hidden_dim)
+        self.output_layer = nn.Linear(hidden_dim * 2, vocab_size)
+
+    def forward(self, y_prev, h_prev, c_prev, encoder_outputs):
+        context, alpha = self.attention(h_prev, encoder_outputs)
+        rnn_input = torch.cat([self.embed(y_prev), context], dim=-1)
+        h_t, c_t = self.rnn_cell(rnn_input, (h_prev, c_prev))
+        logits = self.output_layer(torch.cat([h_t, context], dim=-1))
+        return logits, h_t, c_t, alpha
+```
+
+<ProsCons
+  pros={[
+    "Handles genuinely variable-length input and output with no fixed alignment assumption — the architecture that made neural machine translation practically viable.",
+    "Attention removes the fixed-context bottleneck and gives interpretable soft alignments between source and target positions.",
+    "The encoder-decoder split generalizes far beyond translation: summarization, speech-to-text, image captioning (CNN encoder + RNN/Transformer decoder), any transduction task.",
+  ]}
+  cons={[
+    "The RNN-based encoder and decoder are strictly sequential, so training doesn't parallelize across time — the same bottleneck discussed in RNNs, LSTMs & GRUs.",
+    "Even with attention, a recurrent encoder still has to propagate information through many sequential steps to build each hidden state, inheriting some of the same long-range gradient difficulties.",
+    "Autoregressive decoding is inherently sequential at inference regardless of architecture — a property Seq2Seq shares with modern Transformer decoders.",
+  ]}
+/>
+
+## Common Mistakes
+
+- **Thinking attention was invented for Transformers.** It was introduced specifically to fix the Seq2Seq context bottleneck years before "Attention Is All You Need" — the Transformer's contribution was showing that recurrence could be removed *entirely* and self-attention alone was sufficient.
+- **Confusing teacher forcing with the deployment behavior.** Training feeds ground-truth previous tokens; inference must feed the model's own (possibly wrong) predictions, a mismatch known as **exposure bias** that can degrade generation quality on long outputs.
+- **Assuming attention weights are a perfect alignment.** They're a learned soft weighting that often approximates linguistic alignment but isn't guaranteed to correspond to any ground-truth word alignment.
+- **Forgetting that the "context vector" in attention-augmented Seq2Seq is per-decoder-step**, not a single fixed vector — this is precisely the change that fixed the original bottleneck.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What specific limitation of the original Seq2Seq architecture does attention address?",
+    options: [
+      "It makes the encoder and decoder run in parallel instead of sequentially",
+      "It replaces the single fixed-size context vector (the final encoder hidden state) with a per-decoder-step weighted combination over all encoder hidden states, removing the requirement that the entire source sequence be compressed into one vector",
+      "It removes the need for a decoder entirely",
+      "It reduces the vocabulary size needed for translation",
+    ],
+    answerIndex: 1,
+    explanation: "In the original formulation the decoder only ever sees h_n, the final encoder hidden state — a fixed-capacity bottleneck that degrades quality on long sentences. Attention lets the decoder compute a fresh, relevance-weighted context vector over ALL encoder states at every decoding step.",
+  },
+  {
+    question: "How does Bahdanau/Luong-style attention in Seq2Seq relate to the self-attention used in Transformers?",
+    options: [
+      "They are unrelated mechanisms that happen to share the name 'attention'",
+      "Seq2Seq attention computes a query (decoder state) against a set of keys/values (encoder states) via a softmax-weighted sum — the same Query/Key/Value pattern the Transformer generalizes into self-attention, where every token attends to every other token in the same sequence instead of a decoder attending to a separate encoder",
+      "Self-attention is a special case that only works without a decoder",
+      "Seq2Seq attention operates on word embeddings while self-attention operates on raw tokens",
+    ],
+    answerIndex: 1,
+    explanation: "Seq2Seq attention is cross-attention: query from the decoder, keys/values from the encoder. The Transformer keeps the identical score → softmax → weighted-sum mechanism but applies it as self-attention (query, key, and value all derived from the same sequence) and removes recurrence entirely.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Sequence to Sequence Learning with Neural Networks", authors: "Sutskever, I., Vinyals, O. & Le, Q. V.", venue: "NeurIPS", year: 2014, url: "https://arxiv.org/abs/1409.3215" },
+  { title: "Neural Machine Translation by Jointly Learning to Align and Translate", authors: "Bahdanau, D., Cho, K. & Bengio, Y.", venue: "ICLR", year: 2015, url: "https://arxiv.org/abs/1409.0473" },
+  { title: "Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation", authors: "Cho, K. et al.", venue: "EMNLP", year: 2014, url: "https://arxiv.org/abs/1406.1078" },
+  { title: "Attention Is All You Need", authors: "Vaswani, A. et al.", venue: "NeurIPS", year: 2017, url: "https://arxiv.org/abs/1706.03762" },
+]} />

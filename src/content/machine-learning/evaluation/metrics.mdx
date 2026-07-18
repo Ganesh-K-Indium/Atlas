@@ -1,0 +1,205 @@
+---
+title: "Classification & Regression Metrics"
+description: "Why accuracy lies under class imbalance, how precision/recall/F1 and ROC/PR curves are actually derived from the confusion matrix, and which regression metric to trust."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["machine-learning", "evaluation", "metrics", "classification", "regression"]
+prerequisites: ["Confusion matrix basics", "Probability thresholds", "Basic regression"]
+---
+
+<Prerequisites items={["Confusion matrix (TP/FP/TN/FN)", "Classifier probability outputs and thresholds", "Basic linear regression"]} />
+
+## Intuition
+
+A single number like "accuracy" hides *what kind* of mistakes a model makes and *how many* of each. Two classifiers can have identical accuracy while one never catches any fraud and the other never falsely accuses an honest customer — the right metric depends entirely on which mistake is expensive. Regression metrics have a parallel issue: mean squared error punishes large errors far more than mean absolute error does, so the "best" model under one metric can differ from the "best" model under another.
+
+<Callout type="tip" title="The core idea">
+  Every classification metric below is a different summary statistic computed from the same four numbers in the confusion matrix (TP, FP, TN, FN); ROC-AUC and PR-AUC are what you get when you sweep the classification threshold from 0 to 1 and trace out how those summary statistics trade off against each other.
+</Callout>
+
+## Formal Definition: The Confusion Matrix
+
+For binary classification with a threshold on predicted probability, every prediction falls into one of four cells:
+
+|                  | Predicted Positive | Predicted Negative |
+| ---------------- | ------------------- | ------------------- |
+| **Actual Positive** | True Positive (TP)  | False Negative (FN)  |
+| **Actual Negative** | False Positive (FP) | True Negative (TN)   |
+
+## Derivation: Precision, Recall, F1
+
+**Precision** — of everything the model flagged positive, what fraction was actually positive:
+
+$$
+\text{Precision} = \frac{TP}{TP + FP}
+$$
+
+**Recall (a.k.a. sensitivity, true positive rate)** — of everything actually positive, what fraction did the model catch:
+
+$$
+\text{Recall} = \frac{TP}{TP + FN}
+$$
+
+These two trade off against each other as the decision threshold moves: lowering the threshold flags more cases positive, which can only keep $TP$ the same or increase it (raising recall) while also typically increasing $FP$ (lowering precision), and vice versa for raising the threshold.
+
+**F1 score** is the harmonic mean of precision and recall, chosen specifically (rather than the arithmetic mean) because the harmonic mean penalizes an imbalance between the two — a classifier with precision $1.0$ and recall $0.01$ gets an arithmetic mean of $0.505$ but an F1 of:
+
+$$
+F_1 = 2 \cdot \frac{\text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}} = \frac{2 \cdot 1.0 \cdot 0.01}{1.0 + 0.01} \approx 0.0198
+$$
+
+which correctly reflects that this classifier is nearly useless despite one perfect component metric. The harmonic mean of two positive numbers is always $\leq$ their arithmetic mean (AM-HM inequality), with equality only when the two numbers are equal — this is exactly why F1 is sensitive to imbalance between precision and recall while the arithmetic mean is not.
+
+**Why accuracy is misleading under class imbalance.** Accuracy is $\frac{TP+TN}{TP+FP+TN+FN}$. Consider a dataset where 99% of examples are negative (e.g., fraud detection). A trivial classifier that predicts "negative" for everything achieves 99% accuracy while having recall $= 0$ on the positive class it exists to catch — accuracy is dominated by the majority class and says nothing about performance on the minority class that usually matters most. Precision, recall, and F1 (computed with respect to the minority/positive class) do not have this blind spot because they condition on the actual or predicted class rather than pooling both classes together.
+
+## Derivation: ROC-AUC and PR-AUC as Areas Under Threshold-Swept Curves
+
+A probabilistic classifier outputs $\hat p(x) \in [0,1]$; a hard label requires choosing a threshold $\tau$ and predicting positive iff $\hat p(x) \geq \tau$. Every metric derived from the confusion matrix above is therefore actually a *function of* $\tau$: $\text{Precision}(\tau)$, $\text{Recall}(\tau)$, etc.
+
+**ROC curve**: plot $\text{TPR}(\tau) = \text{Recall}(\tau)$ against $\text{FPR}(\tau) = \frac{FP(\tau)}{FP(\tau)+TN(\tau)}$ for every $\tau$ from $1$ down to $0$. At $\tau=1$, nothing is predicted positive, so $(\text{FPR},\text{TPR}) = (0,0)$; at $\tau=0$, everything is predicted positive, so $(\text{FPR},\text{TPR}) = (1,1)$. **ROC-AUC** is the area under this curve:
+
+$$
+\text{AUC} = \int_0^1 \text{TPR}(\text{FPR}^{-1}(t)) \, dt
+$$
+
+It has a clean probabilistic interpretation: ROC-AUC equals the probability that a randomly chosen positive example is ranked (by $\hat p$) above a randomly chosen negative example — $\text{AUC} = P(\hat p(x^+) > \hat p(x^-))$, which is exactly the Mann-Whitney U statistic. An AUC of $0.5$ means the ranking is no better than random; $1.0$ means perfect separation.
+
+**PR curve**: plot $\text{Precision}(\tau)$ against $\text{Recall}(\tau)$ for every $\tau$. **PR-AUC** (also called average precision) is the area under that curve.
+
+**Why PR-AUC is preferred over ROC-AUC under severe class imbalance.** $\text{FPR} = \frac{FP}{FP+TN}$ has $TN$ in its denominator, and $TN$ is typically enormous when the negative class dominates — so a large *absolute* number of false positives can still be a tiny *fraction* of all negatives, keeping FPR (and hence ROC-AUC) looking good even while precision (which has $FP$ in its denominator without any $TN$ term) craters. Concretely: with 10,000 negatives and 100 positives, 100 false positives is only $\text{FPR}=0.01$ (barely moving the ROC curve) but could easily drag precision down to $50\%$ if the model also only catches 100 true positives. PR-AUC, having no $TN$ term at all, is far more sensitive to exactly this failure mode, which is precisely the failure mode that matters most in rare-event detection (fraud, disease screening, spam).
+
+## Regression Metrics
+
+$$
+\text{MAE} = \frac{1}{n}\sum_{i=1}^n |y_i - \hat y_i|, \qquad
+\text{MSE} = \frac{1}{n}\sum_{i=1}^n (y_i - \hat y_i)^2, \qquad
+\text{RMSE} = \sqrt{\text{MSE}}
+$$
+
+MAE weights every error linearly; MSE (and hence RMSE) squares errors, so a single large miss contributes disproportionately more than several small ones — MSE is more sensitive to outliers, which is desirable if large errors are truly costlier, and undesirable if a few outliers shouldn't dominate the metric.
+
+$$
+R^2 = 1 - \frac{\sum_i (y_i - \hat y_i)^2}{\sum_i (y_i - \bar y)^2} = 1 - \frac{\text{SS}_{\text{res}}}{\text{SS}_{\text{tot}}}
+$$
+
+$R^2$ compares the model's squared error against the squared error of the trivial baseline that always predicts the mean $\bar y$. $R^2 = 1$ means perfect prediction; $R^2 = 0$ means the model is no better than predicting the mean; $R^2 < 0$ is possible and means the model is worse than that trivial baseline (common when evaluating a model out-of-sample on data very different from training).
+
+## Diagram
+
+<Mermaid chart={`graph TD
+  A[Sweep threshold tau from 1 to 0] --> B[At each tau: compute TP, FP, TN, FN]
+  B --> C[Recall vs FPR -> ROC curve]
+  B --> D[Precision vs Recall -> PR curve]
+  C --> E[ROC-AUC = area under ROC curve]
+  D --> F[PR-AUC = area under PR curve]
+  E --> G{Class balance?}
+  F --> G
+  G -->|Balanced| E
+  G -->|Severe imbalance / rare positive class| F
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+from sklearn.metrics import (
+    precision_score, recall_score, f1_score, accuracy_score,
+    roc_auc_score, average_precision_score,
+    mean_absolute_error, mean_squared_error, r2_score,
+)
+from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import make_classification
+
+X, y = make_classification(n_samples=2000, weights=[0.95, 0.05], random_state=0)  # imbalanced
+model = LogisticRegression().fit(X, y)
+probs = model.predict_proba(X)[:, 1]
+preds = model.predict(X)
+
+print("Accuracy:  ", accuracy_score(y, preds))       # can look deceptively high
+print("Precision: ", precision_score(y, preds))
+print("Recall:    ", recall_score(y, preds))
+print("F1:        ", f1_score(y, preds))
+print("ROC-AUC:   ", roc_auc_score(y, probs))          # can look deceptively high under imbalance
+print("PR-AUC:    ", average_precision_score(y, probs))  # more honest signal here
+
+# Regression side
+y_true = np.array([3.0, -0.5, 2.0, 7.0, 25.0])  # last point is an outlier
+y_pred = np.array([2.5, 0.0, 2.1, 7.8, 12.0])
+print("MAE: ", mean_absolute_error(y_true, y_pred))
+print("MSE: ", mean_squared_error(y_true, y_pred))
+print("RMSE:", mean_squared_error(y_true, y_pred) ** 0.5)
+print("R2:  ", r2_score(y_true, y_pred))
+```
+
+## Comparing Metrics
+
+<ComparisonTable
+  headers={["Metric", "Formula focus", "Sensitive to", "Best used when"]}
+  rows={[
+    ["Accuracy", "(TP+TN) / all", "Majority class performance", "Classes are roughly balanced"],
+    ["Precision", "TP / (TP+FP)", "False positives", "False positives are costly (e.g., spam filter blocking real email)"],
+    ["Recall", "TP / (TP+FN)", "False negatives", "False negatives are costly (e.g., missing a cancer diagnosis)"],
+    ["F1", "Harmonic mean of P & R", "Imbalance between precision and recall", "Need one number balancing both, especially with class imbalance"],
+    ["ROC-AUC", "TPR vs FPR across all thresholds", "Overall ranking quality", "Roughly balanced classes, or comparing rankings independent of threshold"],
+    ["PR-AUC", "Precision vs Recall across all thresholds", "Positive-class performance specifically", "Severe class imbalance / rare positive class (fraud, disease, spam)"],
+    ["MAE", "Mean absolute error", "Typical-sized errors, robust to outliers", "Outliers shouldn't dominate the metric"],
+    ["RMSE", "Root mean squared error", "Large errors disproportionately", "Large errors are truly costlier than small ones"],
+    ["R2", "Fraction of variance explained", "Overall fit relative to mean baseline", "Communicating model fit on a normalized 0-1-ish scale"],
+  ]}
+/>
+
+<KeyTakeaways items={[
+  "Precision, recall, F1, accuracy, ROC-AUC and PR-AUC are all different summaries of the same underlying confusion matrix — pick the one that matches the cost asymmetry of your problem.",
+  "Accuracy is dominated by the majority class and can look excellent even when a model completely fails the minority class it was built to catch.",
+  "ROC-AUC has a clean probabilistic meaning: the probability a random positive example is ranked above a random negative one.",
+  "ROC-AUC can look misleadingly good under severe class imbalance because FPR's denominator (TN) is inflated by the huge negative class; PR-AUC has no such term and is more honest in that regime.",
+  "MSE/RMSE penalize large errors more than MAE does — choose based on whether large errors are truly proportionally costlier in your application.",
+  "R^2 can be negative: it measures improvement over predicting the mean, not an absolute 0-to-1 quality score.",
+]} />
+
+## Common Mistakes
+
+<Callout type="warning" title="Frequent errors">
+  - **Reporting accuracy as the headline metric on an imbalanced dataset.** As derived above, a trivial always-negative classifier can score 99%+ accuracy while being useless; report precision/recall/F1 or PR-AUC alongside (or instead of) accuracy whenever classes are imbalanced.
+  - **Using ROC-AUC as the deciding metric under severe imbalance.** It can stay high even as precision collapses, because $FPR$'s denominator absorbs a huge number of true negatives; prefer PR-AUC for rare-event detection tasks.
+  - **Picking a single threshold (often the default 0.5) without considering the cost asymmetry between false positives and false negatives.** The "right" threshold is a business decision, not a modeling default — compute precision/recall across the full threshold sweep and choose deliberately.
+  - **Using accuracy or F1 computed at threshold 0.5 to compare two models when what you actually care about is ranking quality.** If the deployed system will use whatever threshold is optimal for a downstream cost, ROC-AUC/PR-AUC (which are threshold-independent) is the fairer basis for comparing models.
+  - **Applying RMSE and concluding a model is "worse" purely because of a few extreme outliers.** Since MSE squares errors, a handful of outliers can dominate RMSE while MAE tells a very different, often more representative, story about typical performance — check both.
+  - **Computing metrics on the training set and treating that as an estimate of generalization performance.** Metrics are only meaningful for model comparison when computed on held-out data (see cross-validation).
+</Callout>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "A fraud-detection model achieves 99.2% accuracy on a dataset where 99% of transactions are legitimate. What is the most important follow-up question?",
+    options: [
+      "None — 99.2% accuracy is already excellent, ship it",
+      "What is the recall on the fraud (positive) class specifically — a model that predicts 'not fraud' for everything would already score 99% accuracy while catching zero fraud",
+      "Whether the model uses gradient boosting or logistic regression",
+      "Whether the dataset has enough total rows",
+    ],
+    answerIndex: 1,
+    explanation: "With 99% of transactions legitimate, a trivial always-negative classifier already achieves ~99% accuracy while having 0% recall on fraud. 99.2% accuracy is barely better than this useless baseline, so the real question is how well the model actually catches fraud (recall) and how many false alarms it raises (precision), typically summarized with F1 or PR-AUC rather than accuracy.",
+  },
+  {
+    question: "Why is PR-AUC often preferred over ROC-AUC when the positive class is rare (e.g., 1% of the data)?",
+    options: [
+      "PR-AUC is always mathematically larger, so it looks better in reports",
+      "ROC-AUC's false positive rate has the (typically huge) true-negative count in its denominator, so a large absolute number of false positives barely moves FPR/ROC-AUC even as precision collapses; PR-AUC, with no true-negative term, reflects that collapse directly",
+      "PR-AUC does not require choosing a decision threshold at all, unlike ROC-AUC",
+      "ROC-AUC is undefined when classes are imbalanced",
+    ],
+    answerIndex: 1,
+    explanation: "FPR = FP / (FP + TN). When negatives vastly outnumber positives, TN is huge, so even a large number of false positives is a tiny fraction of all negatives — FPR barely moves and ROC-AUC can look strong. Precision = TP / (TP + FP) has no TN term, so it directly reflects how many of the flagged cases are real positives, making PR-AUC a more honest signal under severe imbalance. Both curves are threshold-swept, so the threshold-related option is incorrect.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "The Relationship Between Precision-Recall and ROC Curves", authors: "Davis, J., & Goadrich, M.", venue: "ICML", year: 2006 },
+  { title: "An Introduction to ROC Analysis", authors: "Fawcett, T.", venue: "Pattern Recognition Letters", year: 2006 },
+  { title: "scikit-learn: Model evaluation — quantifying the quality of predictions", authors: "Pedregosa, F. et al.", venue: "scikit-learn documentation", year: 2011, url: "https://scikit-learn.org/stable/modules/model_evaluation.html" },
+]} />

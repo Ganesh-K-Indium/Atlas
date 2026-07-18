@@ -1,0 +1,154 @@
+---
+title: "Time Series Forecasting"
+description: "Why forecasting the future from the past requires respecting time itself as a first-class constraint — in modeling assumptions, and especially in how you evaluate."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["applied-ai", "time-series", "forecasting", "statistics"]
+prerequisites: ["Probability foundations", "Cross-validation", "Linear regression"]
+---
+
+## Intuition
+
+Time series forecasting looks, at first glance, like ordinary supervised regression: you have inputs, you have a target, you fit a model. What makes it a genuinely distinct discipline is that observations are **ordered and dependent** — today's value is correlated with yesterday's, this month's sales are correlated with last month's, and that dependency structure itself is the signal you're trying to model, not noise to average away.
+
+This has two consequences that shape everything else in the field. First, the *model* needs a way to represent temporal dependency explicitly — whether through classical statistical structure (autoregression, differencing) or a learned sequence model. Second, and just as important but far more often gotten wrong in practice, the *evaluation procedure* must respect time ordering: you can never validate a forecasting model on data from before the point you're predicting from, because that would let the model "see the future" during evaluation in a way it never can at deployment time.
+
+<Callout type="tip" title="The one-sentence idea">
+  A time series model is only as good as its explicit account of temporal dependency, and it's only as *trustworthy* as an evaluation procedure that never lets it peek at data from after the point it's forecasting from.
+</Callout>
+
+## Core Problem Formulations
+
+Given a sequence of observations $y_1, y_2, \dots, y_t$, the core task is to produce a forecast $\hat{y}_{t+h}$ for some horizon $h \geq 1$ — either a **point forecast** (a single best-guess number) or, more usefully in practice, a **probabilistic forecast** (a full predictive distribution or prediction interval, since decision-making under uncertainty needs more than a point estimate). Related but distinct tasks include **anomaly detection** (is this observation inconsistent with the learned temporal pattern?) and **multivariate forecasting** (jointly forecasting several correlated series, e.g. demand across related products).
+
+## Key Techniques and How They Connect
+
+**Classical statistical models — ARIMA.** The Autoregressive Integrated Moving Average model decomposes a time series into three explicit components:
+
+- **AR(p) — autoregressive:** the current value is a linear function of its own $p$ previous values, $y_t = c + \sum_{i=1}^{p} \phi_i y_{t-i} + \varepsilon_t$.
+- **I(d) — integrated:** the series is differenced $d$ times (i.e. modeling $y_t - y_{t-1}$ instead of $y_t$, possibly repeated) to remove trend and achieve stationarity, since AR and MA components assume a stationary process (constant mean/variance over time).
+- **MA(q) — moving average:** the current value also depends linearly on the past $q$ forecast errors, $\sum_{j=1}^{q} \theta_j \varepsilon_{t-j}$, capturing shocks that take several periods to fully dissipate.
+
+Put together, an ARIMA($p$, $d$, $q$) model on the differenced series $y_t'$ is:
+
+$$
+y_t' = c + \sum_{i=1}^{p} \phi_i y_{t-i}' + \sum_{j=1}^{q} \theta_j \varepsilon_{t-j} + \varepsilon_t
+$$
+
+ARIMA's appeal is interpretability and strong performance with limited data — it needs no large training corpus, and its parameters have direct statistical meaning. Seasonal extensions (SARIMA) add analogous AR/I/MA terms at a seasonal lag (e.g. 12 months) to capture recurring calendar patterns.
+
+**Modern deep learning approaches** treat forecasting as a sequence modeling problem: an RNN/LSTM/GRU processes the historical sequence and predicts future values, learning nonlinear temporal dependencies that ARIMA's linear structure cannot represent, at the cost of needing considerably more data and losing most of ARIMA's interpretability. See [RNNs, LSTMs, and GRUs](/docs/deep-learning/sequence-models/rnn-lstm-gru) (roadmap).
+
+**Transformer- and state-space-based sequence models** extend this further: Transformer variants adapted for time series apply self-attention across time steps to capture long-range dependencies without the sequential bottleneck of recurrence, while state-space models (a more recent architectural family) offer an alternative that scales more gracefully to very long sequences by maintaining a compressed, continuously-updated latent state — conceptually reminiscent of classical state-space formulations of time series (like the Kalman filter) but learned end-to-end. See [State-Space Models](/docs/deep-learning/modern-architectures/state-space-models) (roadmap).
+
+**Decomposition-based methods** (e.g. modern additive-component forecasting tools) explicitly separate a series into trend, seasonality, and residual components, fitting each with a flexible curve — a middle ground between ARIMA's rigid linear structure and a fully learned deep model, often favored for business forecasting because each component remains individually interpretable.
+
+<Mermaid chart={`
+graph TD
+  Y["Raw time series"] --> Stat{"Stationary?"}
+  Stat -->|No| Diff["Differencing (the 'I' in ARIMA)"]
+  Diff --> Stat
+  Stat -->|Yes| Choice{"Choose modeling approach"}
+  Choice --> ARIMA["ARIMA / SARIMA: AR + MA on differenced series"]
+  Choice --> Decomp["Decomposition: trend + seasonality + residual"]
+  Choice --> DL["Deep sequence model: RNN/LSTM, Transformer, or state-space model"]
+  ARIMA --> Forecast["Forecast + prediction interval"]
+  Decomp --> Forecast
+  DL --> Forecast
+`} />
+
+## The Evaluation Pitfall: Time Order Is Not Optional
+
+The single most common and most damaging mistake in applied time series work is evaluating a model with an ordinary random train/test split, or worse, k-fold cross-validation that shuffles observations. Because consecutive observations are correlated, a random split lets training data from *after* a given test point leak information about that test point (e.g. training on day 50 and day 52 while testing on day 51 lets the model interpolate rather than genuinely forecast forward). This inflates validation performance in a way that never survives real deployment, where the model only ever has access to the past.
+
+The correct approach is **walk-forward validation**: train on an initial window of the past, evaluate on the immediately following window, then slide the window forward (either expanding the training window or rolling it) and repeat — always training strictly on data that precedes the test window in time. See [Cross-Validation](/docs/machine-learning/evaluation/cross-validation) for the general walk-forward CV discussion and why it generalizes the same "no information from the future" principle used here.
+
+## Practical Trade-offs
+
+<ComparisonTable
+  headers={["Approach", "Data needs", "Interpretability", "Best for"]}
+  rows={[
+    ["ARIMA / SARIMA", "Low — works with a few hundred observations", "High — coefficients have direct statistical meaning", "Single series, limited history, need for explainable forecasts"],
+    ["Decomposition-based (trend + seasonality)", "Low to moderate", "High — components are individually inspectable", "Business/calendar-driven series with clear seasonal structure"],
+    ["RNN/LSTM sequence models", "Moderate to high", "Low", "Nonlinear dependencies, moderate-length series, some cross-series sharing"],
+    ["Transformer / state-space sequence models", "High — benefits from many related series trained jointly", "Low", "Long-horizon forecasting, many correlated series, very long input histories"],
+  ]}
+/>
+
+## Practical Example
+
+```python
+import pandas as pd
+from statsmodels.tsa.arima.model import ARIMA
+
+series = pd.read_csv("monthly_sales.csv", index_col="date", parse_dates=True)["sales"]
+
+# Walk-forward split: never evaluate on data that precedes training data in time.
+train, test = series[:-12], series[-12:]
+
+model = ARIMA(train, order=(2, 1, 2))  # AR(2), first difference, MA(2)
+fit = model.fit()
+
+forecast = fit.get_forecast(steps=len(test))
+mean_forecast = forecast.predicted_mean
+conf_int = forecast.conf_int(alpha=0.05)  # 95% prediction interval
+```
+
+<KeyTakeaways items={[
+  "ARIMA's three components have precise meanings: AR regresses on past values, I differences the series to induce stationarity, MA regresses on past forecast errors.",
+  "Deep sequence models (RNN/Transformer/state-space) trade ARIMA's interpretability and low data requirements for the ability to learn nonlinear dependencies and share statistical strength across many related series.",
+  "Random or shuffled train/test splits are invalid for time series — they leak future information into training and inflate apparent performance.",
+  "Walk-forward validation, which always trains strictly on the past relative to each test window, is the only evaluation procedure that reflects genuine deployment conditions.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "ARIMA and decomposition methods give strong baselines with minimal data and fully interpretable parameters.",
+    "Deep sequence models can share statistical strength across many related series (e.g. thousands of SKUs), something classical per-series ARIMA can't do natively.",
+    "Probabilistic forecasts (prediction intervals, not just point estimates) directly support downstream decision-making under uncertainty.",
+  ]}
+  cons={[
+    "Using random k-fold cross-validation on time-ordered data is the most common evaluation error in the field and silently invalidates the entire evaluation.",
+    "Fitting ARIMA without checking stationarity (or without differencing appropriately) produces a model whose statistical assumptions are violated, even if it appears to fit historical data well.",
+    "Ignoring changepoints/regime shifts (e.g. a pandemic, a pricing change) means a model trained purely on historical patterns will confidently extrapolate a pattern that no longer holds.",
+    "Reporting only point-forecast error (e.g. RMSE) without prediction intervals hides how uncertain a forecast actually is, which is often the more decision-relevant quantity.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is a random train/test split invalid for evaluating a time series forecasting model?",
+    options: [
+      "Random splits are always invalid for any machine learning problem",
+      "Time series observations are temporally correlated, so a random split can place future data in the training set relative to a test point, letting the model interpolate rather than genuinely forecast — inflating apparent performance in a way that won't hold at deployment",
+      "Random splits require too much computational power for time series data",
+      "ARIMA models cannot be evaluated with any train/test split",
+    ],
+    answerIndex: 1,
+    explanation: "Because consecutive time series observations are dependent, training on data that falls after a given test point (which a random or shuffled split can easily do) leaks future information into the model, letting it perform artificially well during validation. Walk-forward validation avoids this by always training strictly on data preceding each evaluation window, matching real deployment conditions where the future genuinely is unavailable.",
+  },
+  {
+    question: "In an ARIMA(p, d, q) model, what specifically does the 'd' (integrated) component represent?",
+    options: [
+      "The number of seasonal periods in the data",
+      "The number of times the series is differenced to remove trend and achieve stationarity, since the AR and MA components assume a stationary process",
+      "The number of past forecast errors included in the moving-average term",
+      "The number of external regressor variables included in the model",
+    ],
+    answerIndex: 1,
+    explanation: "ARIMA's AR and MA components are only statistically well-behaved under the assumption of a stationary process (roughly constant mean and variance over time). The 'I' (integrated) component applies differencing — subtracting each value from the previous one, repeated d times — specifically to remove trend and achieve that stationarity before the AR and MA terms are fit.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Time Series Analysis: Forecasting and Control", authors: "Box, G. E. P., Jenkins, G. M., Reinsel, G. C., Ljung, G. M.", venue: "Wiley", year: 2015, url: "https://onlinelibrary.wiley.com/doi/book/10.1002/9781118619193" },
+  { title: "Forecasting: Principles and Practice", authors: "Hyndman, R. J., Athanasopoulos, G.", venue: "OTexts", year: 2021, url: "https://otexts.com/fpp3/" },
+  { title: "Deep Learning", authors: "Goodfellow, I., Bengio, Y., Courville, A.", venue: "MIT Press", year: 2016, url: "https://www.deeplearningbook.org/" },
+]} />

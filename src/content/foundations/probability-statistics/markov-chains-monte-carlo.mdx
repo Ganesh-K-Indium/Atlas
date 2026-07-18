@@ -1,0 +1,205 @@
+---
+title: "Markov Chains & Monte Carlo (MCMC)"
+description: "How to sample from a posterior distribution you can't integrate, by designing a random walk whose long-run visiting frequencies equal the probabilities you actually want."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["probability", "statistics", "math", "mcmc", "bayesian-inference", "sampling"]
+prerequisites: ["Bayesian Statistics & Inference", "Random Variables & Distributions"]
+---
+
+## Intuition
+
+Bayesian posteriors $p(\theta \mid \mathcal{D}) \propto p(\mathcal{D}\mid\theta)p(\theta)$ are usually easy to evaluate *up to a constant* (just multiply likelihood by prior) but nearly impossible to normalize or integrate over in more than a couple of dimensions. **Markov Chain Monte Carlo** sidesteps integration entirely: it constructs a random walk over parameter space that is deliberately designed so that, after enough steps, the fraction of time it spends in each region is exactly proportional to the posterior probability of that region — turning sampling into simulation instead of calculus.
+
+<Callout type="tip" title="One-sentence definition">
+  MCMC builds a Markov chain whose stationary distribution equals the target distribution you want to sample from, then just runs the chain and collects visited states as (correlated) samples.
+</Callout>
+
+If you can build a chain that "spends time proportional to $p(\theta)$" without ever computing the normalizing constant of $p(\theta)$, you've solved the sampling problem — this is precisely what Metropolis-Hastings accomplishes, using only the *ratio* $p(\theta')/p(\theta)$, in which any unknown normalizing constant cancels out.
+
+## Formal Background: Markov Chains and Stationary Distributions
+
+A **Markov chain** is a sequence of random variables $X_0, X_1, X_2, \ldots$ where the next state depends only on the current one (the Markov property):
+
+$$
+P(X_{t+1} = x' \mid X_t = x, X_{t-1}, \ldots, X_0) = P(X_{t+1} = x' \mid X_t = x) =: T(x \to x')
+$$
+
+A distribution $\pi$ is **stationary** for transition kernel $T$ if, once reached, the chain stays distributed as $\pi$ forever:
+
+$$
+\pi(x') = \sum_x \pi(x)\, T(x \to x')
+$$
+
+A sufficient (not necessary) condition for $\pi$ to be stationary is **detailed balance**:
+
+$$
+\pi(x)\, T(x \to x') = \pi(x')\, T(x' \to x) \quad \text{for all } x, x'
+$$
+
+**Proof that detailed balance implies stationarity:** sum both sides over $x$:
+
+$$
+\sum_x \pi(x) T(x\to x') = \sum_x \pi(x') T(x' \to x) = \pi(x') \sum_x T(x' \to x) = \pi(x')
+$$
+
+using $\sum_x T(x' \to x) = 1$ (transition probabilities from any state sum to 1). This matches the stationarity condition exactly. Under mild conditions (irreducibility, aperiodicity), a chain with stationary distribution $\pi$ converges to $\pi$ regardless of its starting point — this is the **ergodic theorem**, and it's what justifies discarding a "burn-in" period and treating later samples as approximately drawn from $\pi$.
+
+## Derivation: The Metropolis-Hastings Algorithm
+
+**Goal.** Sample from a target $\pi(\theta) = \frac{1}{Z}\tilde\pi(\theta)$, where $\tilde\pi(\theta)$ (e.g. likelihood × prior) is easy to evaluate but $Z$ (the normalizing constant) is not.
+
+**Construction.** At state $\theta_t$, propose a candidate $\theta'$ from a proposal distribution $q(\theta' \mid \theta_t)$ (e.g. a Gaussian centered at $\theta_t$). Accept the proposal with probability:
+
+$$
+A(\theta_t \to \theta') = \min\left(1,\ \frac{\tilde\pi(\theta')\, q(\theta_t \mid \theta')}{\tilde\pi(\theta_t)\, q(\theta' \mid \theta_t)}\right)
+$$
+
+If accepted, set $\theta_{t+1} = \theta'$; otherwise $\theta_{t+1} = \theta_t$ (stay put).
+
+**Step 1 — notice $Z$ cancels.** Since $\tilde\pi(\theta) = Z\pi(\theta)$, the ratio $\tilde\pi(\theta')/\tilde\pi(\theta_t) = \pi(\theta')/\pi(\theta_t)$ — the unknown normalizing constant divides out. This is the entire point of the algorithm: you never need $Z$.
+
+**Step 2 — verify detailed balance holds for $\pi$.** The full transition kernel is $T(\theta_t \to \theta') = q(\theta'\mid\theta_t) A(\theta_t\to\theta')$ for $\theta' \neq \theta_t$. We need $\pi(\theta_t)T(\theta_t\to\theta') = \pi(\theta')T(\theta'\to\theta_t)$. Substituting:
+
+$$
+\pi(\theta_t)\, q(\theta'\mid\theta_t)\, \min\left(1, \frac{\pi(\theta')q(\theta_t\mid\theta')}{\pi(\theta_t)q(\theta'\mid\theta_t)}\right)
+$$
+
+Using $\min(1,r) \cdot a = \min(a, ar)$ with $a = \pi(\theta_t)q(\theta'\mid\theta_t)$ and $r$ the ratio above, this simplifies to:
+
+$$
+\min\big(\pi(\theta_t)q(\theta'\mid\theta_t),\ \pi(\theta')q(\theta_t\mid\theta')\big)
+$$
+
+which is *symmetric* in swapping $(\theta_t, \theta') \leftrightarrow (\theta', \theta_t)$. So it equals the same expression computed starting from $\theta'$, i.e. $\pi(\theta')T(\theta'\to\theta_t)$. Detailed balance holds, so by the earlier proof, $\pi$ is the stationary distribution of this chain — exactly the distribution we wanted to sample from.
+
+**Special case — symmetric proposals.** If $q(\theta'\mid\theta_t) = q(\theta_t\mid\theta')$ (e.g. a Gaussian random walk proposal), the $q$ terms cancel and acceptance simplifies to the original **Metropolis algorithm**:
+
+$$
+A(\theta_t \to \theta') = \min\left(1, \frac{\pi(\theta')}{\pi(\theta_t)}\right)
+$$
+
+Always accept moves to higher-probability regions; accept moves to lower-probability regions only with probability equal to the density ratio.
+
+<Mermaid chart={`
+graph TD
+  A["Current state θ_t"] --> B["Propose θ' ~ q(θ' | θ_t)"]
+  B --> C["Compute acceptance ratio A = min(1, π(θ')q(θ_t|θ')/π(θ_t)q(θ'|θ_t))"]
+  C --> D{"Accept with probability A?"}
+  D -->|Yes| E["θ_{t+1} = θ'"]
+  D -->|No| F["θ_{t+1} = θ_t (stay)"]
+  E --> G["Repeat many iterations"]
+  F --> G
+  G --> H["Discard burn-in, keep remaining samples as draws from π"]
+`} />
+
+## Why This Matters for ML
+
+MCMC is the workhorse for Bayesian inference whenever a posterior isn't conjugate (see [Bayesian Statistics & Inference](/docs/foundations/probability-statistics/bayesian-statistics)): Bayesian neural networks, hierarchical models, and probabilistic programming frameworks (Stan, PyMC, NumPyro) all run some flavor of MCMC — usually **Hamiltonian Monte Carlo (HMC)**, which uses gradients of $\log\tilde\pi(\theta)$ to propose distant, high-acceptance-rate moves instead of the small local steps of plain random-walk Metropolis, making it far more efficient in high dimensions.
+
+## Code Example: Metropolis-Hastings for a Bayesian Posterior
+
+```python
+import numpy as np
+
+rng = np.random.default_rng(0)
+
+# Target: posterior for a Gaussian mean with unknown mean, known variance,
+# given a Gaussian prior — chosen so we can check MCMC against the analytic answer.
+data = rng.normal(loc=5.0, scale=2.0, size=50)
+prior_mean, prior_std = 0.0, 10.0     # weak/uninformative prior
+likelihood_std = 2.0                   # assumed known
+
+def log_target(mu):
+    log_prior = -0.5 * ((mu - prior_mean) / prior_std) ** 2
+    log_lik = np.sum(-0.5 * ((data - mu) / likelihood_std) ** 2)
+    return log_prior + log_lik   # unnormalized log-posterior; Z never needed
+
+def metropolis(n_samples, step_size=0.5, mu0=0.0):
+    samples = np.empty(n_samples)
+    mu = mu0
+    log_p_current = log_target(mu)
+    for t in range(n_samples):
+        mu_proposed = mu + rng.normal(0, step_size)      # symmetric proposal
+        log_p_proposed = log_target(mu_proposed)
+        log_accept_ratio = log_p_proposed - log_p_current
+        if np.log(rng.random()) < log_accept_ratio:       # accept in log-space
+            mu, log_p_current = mu_proposed, log_p_proposed
+        samples[t] = mu
+    return samples
+
+samples = metropolis(20_000)
+burned_in = samples[2000:]           # discard burn-in
+print(f"MCMC posterior mean: {burned_in.mean():.3f}, std: {burned_in.std():.3f}")
+# Analytic Gaussian-Gaussian posterior for comparison: precision-weighted average
+n = len(data)
+post_precision = 1/prior_std**2 + n/likelihood_std**2
+post_mean = (prior_mean/prior_std**2 + data.sum()/likelihood_std**2) / post_precision
+print(f"Analytic posterior mean: {post_mean:.3f}, std: {np.sqrt(1/post_precision):.3f}")
+```
+
+## Complexity and Diagnostics
+
+| Method | Cost per sample | Notes |
+| --- | --- | --- |
+| Random-walk Metropolis | 1 target evaluation | Simple, but mixes slowly and scales poorly in high dimensions |
+| Gibbs sampling | 1 conditional sample per variable | Requires tractable full conditionals; no acceptance/rejection needed |
+| Hamiltonian Monte Carlo (HMC) / NUTS | Several gradient evaluations | Much better mixing in high dimensions; standard in Stan/PyMC |
+| Effective sample size (ESS) | Diagnostic, not a sampling cost | Correlated MCMC samples carry less information than i.i.d. samples — ESS quantifies how many "independent" samples the chain effectively produced |
+
+<KeyTakeaways items={[
+  "MCMC solves sampling by constructing a Markov chain whose stationary distribution equals the target — the normalizing constant never needs to be computed since only ratios of the target density are used.",
+  "Detailed balance is a sufficient condition for a chain to have the desired stationary distribution, and it's the condition Metropolis-Hastings is explicitly engineered to satisfy.",
+  "Samples from a Markov chain are correlated, not i.i.d. — 'burn-in' discards early samples before convergence, and effective sample size accounts for remaining autocorrelation.",
+  "Hamiltonian Monte Carlo uses gradient information to propose far-away, high-acceptance moves, dramatically improving mixing over plain random-walk Metropolis in high-dimensional posteriors.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Working in log-space throughout (log-target, log-acceptance-ratio) to avoid numerical underflow when probabilities are extremely small.",
+    "Running multiple chains from dispersed starting points and checking they converge to the same distribution (e.g. via the Gelman-Rubin R-hat diagnostic) before trusting the samples.",
+  ]}
+  cons={[
+    "Treating MCMC samples as independent when computing summary statistics — autocorrelation inflates the apparent precision of estimates unless accounted for via effective sample size.",
+    "Using too large a proposal step size (near-zero acceptance rate) or too small (slow, inefficient exploration) without tuning — acceptance rates around 20-50% are a common rule-of-thumb target for random-walk Metropolis.",
+    "Not discarding burn-in — early samples reflect the arbitrary starting point, not the target distribution, and can bias summary statistics if included.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does the Metropolis-Hastings acceptance ratio never require computing the normalizing constant Z of the target distribution?",
+    options: [
+      "Because Z is always equal to 1 for probability distributions",
+      "Because the acceptance ratio is a ratio of the target density evaluated at two points, π(θ')/π(θ_t), and since π = (1/Z)·π̃, the shared factor of Z cancels out algebraically",
+      "Because Metropolis-Hastings avoids using the target distribution entirely",
+      "Z only matters for continuous distributions, not discrete ones",
+    ],
+    answerIndex: 1,
+    explanation: "The acceptance probability only ever involves the ratio π̃(θ')/π̃(θ_t) (times a proposal-density ratio). Since both the numerator and denominator carry the same missing normalizing constant Z, it divides out — this is exactly why MCMC can sample from a distribution known only up to a constant, like an unnormalized Bayesian posterior.",
+  },
+  {
+    question: "Why are samples from a Markov chain not treated as i.i.d. samples from the target distribution when computing summary statistics?",
+    options: [
+      "They actually are i.i.d. by construction and can be used directly",
+      "Consecutive samples are correlated because each state depends on the previous one (the Markov property) — this autocorrelation means the effective sample size is smaller than the raw number of MCMC iterations, and must be accounted for to avoid overstating precision",
+      "MCMC samples are always biased and should never be used for statistics",
+      "This only matters for discrete-state Markov chains",
+    ],
+    answerIndex: 1,
+    explanation: "By construction, X_{t+1} depends on X_t, so consecutive draws are correlated (especially with small proposal steps). While the *marginal* distribution of each sample converges to the target as t grows, treating correlated samples as independent overstates the precision of downstream estimates — this is why practitioners compute effective sample size (ESS) rather than just counting raw iterations.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Bayesian Data Analysis", authors: "Andrew Gelman, John B. Carlin, Hal S. Stern, David B. Dunson, Aki Vehtari, Donald B. Rubin", venue: "CRC Press", year: 2013 },
+  { title: "Equation of State Calculations by Fast Computing Machines", authors: "Metropolis, N., Rosenbluth, A. W., Rosenbluth, M. N., Teller, A. H., Teller, E.", venue: "The Journal of Chemical Physics", year: 1953 },
+  { title: "Monte Carlo Statistical Methods", authors: "Christian P. Robert, George Casella", venue: "Springer", year: 2004 },
+]} />

@@ -1,0 +1,209 @@
+---
+title: "Derivatives, Gradients & Jacobians"
+description: "The single idea of 'best linear approximation' scales from a scalar derivative to gradients and Jacobians — the vocabulary every optimization and backprop algorithm is built from."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["calculus", "linear-algebra", "math", "optimization"]
+prerequisites: ["Single-variable calculus", "Vectors and matrices"]
+---
+
+## Intuition
+
+A derivative answers one question: *if I nudge the input a tiny bit, how much does the output change, and in which direction?* For a scalar function of a scalar, that's a single number — the slope. But most functions in machine learning don't take a single number as input; they take a vector of parameters (millions of them) and often produce a vector of outputs (e.g., a softmax over classes). The gradient and the Jacobian are exactly the same idea — "best linear approximation of a nudge" — generalized to those shapes.
+
+<Callout type="tip" title="The one idea that matters">
+  Every derivative object (derivative, gradient, Jacobian) is the same thing: the unique linear map that best approximates a function near a point. The only thing that changes is the *shape* of the input and output, which determines whether that linear map is a number, a vector, or a matrix.
+</Callout>
+
+## Formal Definitions
+
+### Scalar derivative
+
+For $f: \mathbb{R} \to \mathbb{R}$, the derivative at $x$ is:
+
+$$
+f'(x) = \lim_{h \to 0} \frac{f(x+h) - f(x)}{h}
+$$
+
+Equivalently, $f'(x)$ is the number such that $f(x+h) \approx f(x) + f'(x) \, h$ for small $h$ — a linear (affine) approximation of $f$ near $x$.
+
+### Partial derivatives
+
+For $f: \mathbb{R}^n \to \mathbb{R}$, the partial derivative with respect to $x_i$ holds every other coordinate fixed:
+
+$$
+\frac{\partial f}{\partial x_i}(x) = \lim_{h \to 0} \frac{f(x + h e_i) - f(x)}{h}
+$$
+
+where $e_i$ is the $i$-th standard basis vector.
+
+### Gradient
+
+The **gradient** collects all partial derivatives into a vector, and it is defined so that it satisfies the same first-order approximation property, now via a dot product:
+
+$$
+\nabla f(x) = \begin{bmatrix} \dfrac{\partial f}{\partial x_1} \\ \vdots \\ \dfrac{\partial f}{\partial x_n} \end{bmatrix}, \qquad f(x + h) \approx f(x) + \nabla f(x)^\top h
+$$
+
+This is the *only* vector for which that linear approximation holds for every direction $h$ — which is why the gradient is well-defined (basis-independent) even though it's built from basis-dependent partial derivatives.
+
+**Why $\nabla f$ points in the direction of steepest ascent.** Consider the directional derivative along a unit vector $u$:
+
+$$
+D_u f(x) = \nabla f(x)^\top u = \|\nabla f(x)\| \, \|u\| \cos\theta = \|\nabla f(x)\| \cos\theta
+$$
+
+where $\theta$ is the angle between $\nabla f(x)$ and $u$. This is maximized when $\cos\theta = 1$, i.e., $u$ points in the same direction as $\nabla f(x)$. So the gradient is, by construction, the direction of maximum rate of increase — and $-\nabla f(x)$ is the direction of steepest descent, the entire basis for gradient descent.
+
+### Jacobian
+
+For a vector-valued function $f: \mathbb{R}^n \to \mathbb{R}^m$, each of the $m$ output components has its own gradient with respect to the $n$ inputs. Stacking those gradients as rows gives the **Jacobian**, an $m \times n$ matrix:
+
+$$
+J_f(x) = \begin{bmatrix}
+\dfrac{\partial f_1}{\partial x_1} & \cdots & \dfrac{\partial f_1}{\partial x_n} \\
+\vdots & \ddots & \vdots \\
+\dfrac{\partial f_m}{\partial x_1} & \cdots & \dfrac{\partial f_m}{\partial x_n}
+\end{bmatrix}, \qquad f(x+h) \approx f(x) + J_f(x)\, h
+$$
+
+Row $i$ of $J_f$ is exactly $\nabla f_i(x)^\top$. So the gradient is the special case $m = 1$ (a $1 \times n$ Jacobian, transposed into a column vector by convention), and a single-variable derivative is the special case $n = m = 1$.
+
+<ComparisonTable
+  headers={["Object", "Input shape", "Output shape", "Result shape", "ML example"]}
+  rows={[
+    ["Derivative", "scalar", "scalar", "scalar", "d(loss)/d(single weight) in a 1-parameter toy model"],
+    ["Gradient", "vector ($\\mathbb{R}^n$)", "scalar", "vector ($\\mathbb{R}^n$)", "∇(loss) with respect to all network weights"],
+    ["Jacobian", "vector ($\\mathbb{R}^n$)", "vector ($\\mathbb{R}^m$)", "matrix ($m \\times n$)", "∂(layer output)/∂(layer input) inside backprop"],
+  ]}
+/>
+
+## Worked Example: Composing Them (the Chain Rule)
+
+Let $f(x) = W x + b$ (a linear layer, $W \in \mathbb{R}^{m \times n}$) and $g(z) = \sigma(z)$ (an elementwise nonlinearity, $\mathbb{R}^m \to \mathbb{R}^m$). Consider $h(x) = g(f(x))$.
+
+**Jacobian of $f$:** since $f_i(x) = \sum_k W_{ik} x_k + b_i$, we get $\partial f_i / \partial x_j = W_{ij}$, so $J_f(x) = W$ directly — a linear map's Jacobian is just its matrix.
+
+**Jacobian of $g$:** since $g$ acts elementwise, $\partial g_i/\partial z_j = 0$ for $i \ne j$ and $\sigma'(z_i)$ for $i = j$, so $J_g(z) = \operatorname{diag}(\sigma'(z))$, a diagonal matrix.
+
+**Chain rule for Jacobians:** for $h = g \circ f$, the Jacobians compose by matrix multiplication:
+
+$$
+J_h(x) = J_g(f(x)) \, J_f(x) = \operatorname{diag}(\sigma'(Wx+b)) \, W
+$$
+
+This is exactly the object that appears in backpropagation — see [Backpropagation: Full Derivation](/docs/foundations/calculus-optimization/backpropagation-derivation), which unrolls this same composition through many layers and shows why we never materialize the full Jacobian but instead multiply it against a vector (a vector-Jacobian product) for efficiency.
+
+<Mermaid chart={`
+graph LR
+  x["x ∈ R^n"] -->|"J_f = W"| z["z = Wx+b ∈ R^m"]
+  z -->|"J_g = diag(σ'(z))"| a["a = σ(z) ∈ R^m"]
+  x -.->|"J_h = J_g · J_f"| a
+`} />
+
+## Code Example
+
+```python
+import numpy as np
+
+def numerical_gradient(f, x, eps=1e-6):
+    """Central-difference gradient of scalar-valued f: R^n -> R."""
+    grad = np.zeros_like(x, dtype=float)
+    for i in range(len(x)):
+        x_plus, x_minus = x.copy(), x.copy()
+        x_plus[i] += eps
+        x_minus[i] -= eps
+        grad[i] = (f(x_plus) - f(x_minus)) / (2 * eps)
+    return grad
+
+def numerical_jacobian(f, x, eps=1e-6):
+    """Central-difference Jacobian of vector-valued f: R^n -> R^m."""
+    fx = f(x)
+    J = np.zeros((len(fx), len(x)))
+    for j in range(len(x)):
+        x_plus, x_minus = x.copy(), x.copy()
+        x_plus[j] += eps
+        x_minus[j] -= eps
+        J[:, j] = (f(x_plus) - f(x_minus)) / (2 * eps)
+    return J
+
+# Example: f(x) = Wx + b, g(z) = sigmoid(z), h = g(f(x))
+W = np.array([[1.0, -2.0], [0.5, 1.5]])
+b = np.array([0.1, -0.2])
+sigmoid = lambda z: 1 / (1 + np.exp(-z))
+
+x0 = np.array([0.3, -0.7])
+h = lambda x: sigmoid(W @ x + b)
+
+J_numeric = numerical_jacobian(h, x0)
+J_analytic = np.diag(sigmoid(W @ x0 + b) * (1 - sigmoid(W @ x0 + b))) @ W
+print(np.allclose(J_numeric, J_analytic, atol=1e-5))  # True
+```
+
+## Complexity
+
+| Operation | Time | Space |
+| --- | --- | --- |
+| Analytic gradient (reverse-mode autodiff), $f: \mathbb{R}^n \to \mathbb{R}$ | $O(\text{cost of } f)$ | $O(\text{cost of } f)$ intermediate storage |
+| Numerical gradient (finite differences) | $O(n \cdot \text{cost of } f)$ — one extra evaluation per dimension | $O(n)$ |
+| Full Jacobian, $f: \mathbb{R}^n \to \mathbb{R}^m$, via forward-mode autodiff | $O(n \cdot \text{cost of } f)$ | $O(mn)$ to store |
+| Full Jacobian via reverse-mode autodiff | $O(m \cdot \text{cost of } f)$ | $O(mn)$ to store |
+
+This asymmetry — reverse-mode is cheap when $m \ll n$ (many inputs, few outputs, e.g. a scalar loss) and forward-mode is cheap when $n \ll m$ — is exactly why deep learning frameworks default to reverse-mode (backprop): losses are scalars ($m=1$) and parameter counts are enormous ($n$ in the billions).
+
+<KeyTakeaways items={[
+  "A derivative, gradient, and Jacobian are the same object — the best linear approximation of a function near a point — differing only in input/output dimensionality.",
+  "The gradient points in the direction of steepest ascent; this falls directly out of maximizing the directional derivative ∇f(x)ᵀu over unit vectors u.",
+  "Jacobians compose by matrix multiplication under function composition (the chain rule) — this is the mathematical foundation of backpropagation.",
+  "Reverse-mode autodiff is efficient exactly when outputs are few relative to inputs (the typical ML setting: scalar loss, millions of parameters); forward-mode is efficient in the opposite regime.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Gradients give a cheap, local, first-order signal for optimization without needing to explore the whole function.",
+    "Jacobians unify how we reason about composition — chain rule is literally matrix multiplication of Jacobians.",
+  ]}
+  cons={[
+    "Confusing the gradient (a column vector, ∇f) with the Jacobian of a scalar function (a row vector by some conventions) — a common source of shape-mismatch bugs in manual backprop implementations.",
+    "Assuming a function is differentiable everywhere — ReLU, absolute value, and max() have kinks where the gradient is undefined (though subgradients exist); autodiff frameworks pick a convention (e.g., ReLU'(0) = 0) silently.",
+    "Forgetting that the gradient only guarantees the *steepest local* ascent direction — it says nothing about global structure, which is why gradient-based methods can get stuck at saddle points or in flat regions.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is the gradient ∇f(x) defined as the vector that makes f(x+h) ≈ f(x) + ∇f(x)ᵀh hold, rather than just 'the vector of partial derivatives'?",
+    options: [
+      "Because partial derivatives don't exist for most functions",
+      "Both definitions agree, but the linear-approximation definition is the one that generalizes correctly to Jacobians and to directional derivatives, and shows why the gradient is basis-independent",
+      "Because the vector of partial derivatives always points in the wrong direction",
+      "There's no meaningful difference; this is a purely notational choice with no mathematical content",
+    ],
+    answerIndex: 1,
+    explanation: "The vector-of-partials characterization is correct but coordinate-dependent in appearance; the first-order approximation definition is what actually explains why the gradient is the direction of steepest ascent and why it composes correctly via the chain rule.",
+  },
+  {
+    question: "For f: R^1000 → R (e.g., a neural network loss with 1000 parameters), why does reverse-mode automatic differentiation (backprop) compute the full gradient far more cheaply than forward-mode?",
+    options: [
+      "Reverse-mode uses less memory than forward-mode in every case",
+      "Reverse-mode's cost scales with the number of outputs (here, 1) while forward-mode's cost scales with the number of inputs (here, 1000), so reverse-mode needs roughly one backward pass total instead of one per input dimension",
+      "Forward-mode cannot compute gradients at all, only Jacobians",
+      "Reverse-mode is only faster for convex functions",
+    ],
+    answerIndex: 1,
+    explanation: "Reverse-mode autodiff costs O(m · cost of f) where m is the number of outputs; forward-mode costs O(n · cost of f) where n is the number of inputs. With a scalar loss (m=1) and many parameters (n large), reverse-mode wins by a factor of n.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Deep Learning", authors: "Ian Goodfellow, Yoshua Bengio, Aaron Courville", venue: "MIT Press", year: 2016 },
+  { title: "Automatic Differentiation in Machine Learning: a Survey", authors: "Baydin, A. G. et al.", venue: "JMLR", year: 2018 },
+  { title: "Calculus", authors: "Michael Spivak", venue: "Publish or Perish", year: 2008 },
+]} />
