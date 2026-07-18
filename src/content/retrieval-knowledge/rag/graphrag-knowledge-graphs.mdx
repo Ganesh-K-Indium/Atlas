@@ -1,0 +1,210 @@
+---
+title: "GraphRAG & Knowledge Graphs"
+description: "Why answering 'what are the main themes in this corpus?' requires building a knowledge graph and summarizing its communities, since no single retrieved chunk can ever contain a theme that spans an entire dataset."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["rag", "retrieval", "graphrag", "knowledge-graphs", "community-detection"]
+prerequisites: ["Retrieval-Augmented Generation (RAG)", "Hybrid Search & Reranking"]
+---
+
+## Intuition
+
+Standard RAG retrieves the top-$k$ chunks most similar to a query and hands them to an LLM. This works well for **local, factual** questions — "What was Acme Corp's Q3 revenue?" — where the answer genuinely lives inside one or two chunks that a similarity search can surface directly.
+
+It breaks down for **global, thematic** questions — "What are the main themes across this entire corpus?" or "How do these three organizations' strategies relate to each other?" No single chunk *contains* a corpus-wide theme; a theme is a property that emerges from synthesizing information scattered across potentially thousands of chunks. Vector similarity search can't retrieve something that isn't localized anywhere in the source text, no matter how many chunks you retrieve or how good the embedding model is — this is a structural limitation of similarity-based retrieval, not a tuning problem.
+
+**GraphRAG**, introduced by Microsoft Research in 2024, addresses this by building an explicit knowledge graph over the corpus at indexing time — extracting entities and their relationships — and then using graph structure (specifically, detecting and summarizing *communities* of densely connected entities) to pre-compute answers to the "what are the themes" class of question, rather than trying to answer it from scratch at query time via similarity search alone.
+
+<Callout type="tip" title="The one-sentence idea">
+  GraphRAG trades some indexing-time cost (LLM calls to extract entities/relationships and pre-summarize graph communities) for the ability to answer corpus-wide thematic questions that pure chunk-similarity RAG cannot answer at all, not just answers poorly.
+</Callout>
+
+## Why Vector-Only RAG Fails on Global Questions
+
+<Callout type="note" title="Query-focused summarization">
+  Microsoft's GraphRAG paper frames the global-question problem as **query-focused summarization (QFS)** — the task is closer to "summarize this corpus with respect to a given question" than to "retrieve the passage that answers this question." Standard RAG is architected for the latter, not the former.
+</Callout>
+
+Consider asking a corpus of news articles "what are the main risks discussed across this dataset?" A pure vector-similarity retriever will fetch chunks that are semantically similar to the words *risk*, *main*, *discussed* — but the true answer requires synthesizing patterns across possibly hundreds of chunks discussing many distinct, unrelated-looking risks, none of which individually says "here is the full list of risk themes in this corpus." Increasing $k$ doesn't fix this: at some point you're just handing the LLM most of the corpus, defeating the purpose of retrieval and blowing the context budget.
+
+## The GraphRAG Mechanism, Step by Step
+
+<Mermaid chart={`
+graph TD
+  Docs["Source corpus"] --> Chunk["Chunk documents"]
+  Chunk --> Extract["LLM extracts entities + relationships + claims per chunk"]
+  Extract --> Graph[("Entity knowledge graph\n(nodes=entities, edges=relationships)")]
+  Graph --> Community["Community detection (Leiden algorithm), hierarchical"]
+  Community --> Summarize["LLM pre-generates a summary per community, per hierarchy level"]
+  Summarize --> Store[("Community summary store")]
+  Query["User query"] --> Route{"Local or global question?"}
+  Route -->|"local/factual"| VecSearch["Vector similarity search over chunks/entities"]
+  Route -->|"global/thematic"| MapReduce["Map-reduce over community summaries"]
+  VecSearch --> Answer["Answer"]
+  MapReduce --> Answer
+`} />
+
+**1. Entity and relationship extraction (indexing time).** Each chunk is passed to an LLM with a prompt asking it to extract entities (people, organizations, concepts — whatever's relevant to the domain), the relationships between them, and optionally short claims/covariates about each entity. This produces a set of `(entity, relationship, entity)` triples per chunk, which are aggregated into a single graph across the whole corpus — the same entity mentioned in different chunks gets resolved/merged into one graph node.
+
+**2. Community detection.** The resulting entity graph is partitioned into **communities** — groups of entities that are more densely connected to each other than to the rest of the graph — using the **Leiden algorithm**, a graph-clustering method that improves on the earlier Louvain algorithm by guaranteeing well-connected communities (Louvain can produce internally disconnected communities in some cases; Leiden fixes this). GraphRAG applies Leiden **hierarchically**: it detects top-level (coarse) communities first, then recursively re-applies community detection *within* each community to find finer-grained sub-communities, producing multiple levels of granularity — coarse communities capture broad themes, fine communities capture narrow sub-topics.
+
+**3. Community summarization.** For every community at every hierarchy level, an LLM generates a natural-language summary describing what that community of entities is about and how they relate — done once, offline, at indexing time, not per query. This is the expensive step (many LLM calls proportional to the number of communities), but it's paid once per corpus update, not once per query.
+
+**4. Query time — local vs. global.** At query time, GraphRAG routes differently depending on question type:
+   - **Local questions** (about specific entities/facts) use something closer to standard retrieval — searching the graph and associated text chunks around the relevant entities.
+   - **Global questions** (thematic, corpus-wide) use a **map-reduce** approach over the pre-computed community summaries: relevant community summaries are retrieved, each is used to generate a partial answer to the query independently (the "map" step), and those partial answers are combined into a final answer (the "reduce" step) — this is what actually solves the query-focused summarization problem, since it aggregates *pre-synthesized* thematic information rather than trying to synthesize it from raw chunks on the fly.
+
+## Formal Sketch
+
+Let a corpus be chunked into $\{c_1, \dots, c_n\}$. Entity extraction produces a graph $G = (V, E)$ where $V$ is the set of extracted entities and $E$ the set of extracted relationships (edges may carry weights, e.g. co-occurrence frequency or extracted relationship strength). Leiden community detection partitions $V$ hierarchically into $\{C_1^{(0)}, \dots\}$ at level 0, with each $C_i^{(0)}$ further partitioned into $\{C_{i,1}^{(1)}, \dots\}$ at level 1, and so on, optimizing a modularity-style objective that rewards partitions with dense intra-community edges and sparse inter-community edges:
+
+$$
+Q = \frac{1}{2m} \sum_{i,j} \left[ A_{ij} - \frac{k_i k_j}{2m} \right] \delta(g_i, g_j)
+$$
+
+where $A_{ij}$ is the edge weight between nodes $i,j$, $k_i$ is the (weighted) degree of node $i$, $m$ is the total edge weight, and $\delta(g_i, g_j) = 1$ iff nodes $i$ and $j$ are assigned to the same community. Each community $C$ is then mapped to a natural-language summary $S(C)$ via an LLM call. Global query answering becomes:
+
+$$
+\text{answer}(q) = \text{Reduce}\Big(\big\{\, \text{Map}(q, S(C)) : C \in \text{relevant communities} \,\big\}\Big)
+$$
+
+## GraphRAG vs. Vector-Only vs. Hybrid Retrieval
+
+<ComparisonTable
+  headers={["Approach", "Handles local/factual queries", "Handles global/thematic queries", "Indexing cost"]}
+  rows={[
+    ["Vector-only RAG", "Yes — this is its core strength", "Poorly — no chunk contains a corpus-wide theme", "Low (embed and index chunks)"],
+    ["Hybrid (dense + sparse) RAG", "Yes, and more robust to exact-match queries too", "Poorly — same structural limitation as vector-only for global questions", "Low-moderate (add a sparse index)"],
+    ["GraphRAG", "Yes, via graph/entity-localized search", "Yes — pre-computed community summaries directly target thematic synthesis", "High — many LLM calls for extraction and per-community summarization"],
+  ]}
+/>
+
+GraphRAG's cost is real and shouldn't be understated: extracting entities/relationships and summarizing every community at every hierarchy level requires many LLM calls at indexing time, scaling with corpus size and graph density. It's a deliberate trade — worth it specifically when your application genuinely needs to answer global/thematic questions over a private corpus, and not worth it if your workload is purely local factual lookup, where standard (or hybrid) RAG is cheaper and sufficient. See [Retrieval-Augmented Generation (RAG)](/docs/retrieval-knowledge/rag/retrieval-augmented-generation) for the baseline this extends, and [Hybrid Search & Reranking](/docs/retrieval-knowledge/rag/hybrid-search-reranking) for how retrieval quality is improved without a graph.
+
+## Implementation Sketch
+
+```python
+from openai import OpenAI
+import networkx as nx
+import igraph as ig
+import leidenalg
+
+client = OpenAI()
+
+def extract_entities_relationships(chunk: str) -> list[tuple[str, str, str]]:
+    """LLM call: returns a list of (entity, relationship, entity) triples."""
+    prompt = f"""Extract entities and relationships from this text as a list of
+(entity, relationship, entity) triples, one per line, format: entity1 | relationship | entity2
+
+Text: {chunk}"""
+    resp = client.chat.completions.create(
+        model="gpt-4o", messages=[{"role": "user", "content": prompt}]
+    )
+    triples = []
+    for line in resp.choices[0].message.content.strip().splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) == 3:
+            triples.append(tuple(parts))
+    return triples
+
+def build_graph(chunks: list[str]) -> nx.Graph:
+    graph = nx.Graph()
+    for chunk in chunks:
+        for entity_a, relation, entity_b in extract_entities_relationships(chunk):
+            graph.add_edge(entity_a, entity_b, relationship=relation)
+    return graph
+
+def detect_communities(graph: nx.Graph) -> dict[str, int]:
+    """Leiden community detection via igraph/leidenalg."""
+    ig_graph = ig.Graph.TupleList(graph.edges(), directed=False)
+    partition = leidenalg.find_partition(ig_graph, leidenalg.ModularityVertexPartition)
+    return {ig_graph.vs[i]["name"]: community_id
+            for community_id, community in enumerate(partition) for i in community}
+
+def summarize_community(entities: list[str], graph: nx.Graph) -> str:
+    """LLM call: pre-generate a natural-language summary of one community."""
+    subgraph_edges = [
+        f"{u} -[{d['relationship']}]-> {v}"
+        for u, v, d in graph.edges(data=True)
+        if u in entities and v in entities
+    ]
+    prompt = f"Summarize the theme connecting these entities and relationships:\n" + "\n".join(subgraph_edges)
+    resp = client.chat.completions.create(
+        model="gpt-4o", messages=[{"role": "user", "content": prompt}]
+    )
+    return resp.choices[0].message.content
+
+def answer_global_query(query: str, community_summaries: list[str]) -> str:
+    """Map-reduce: partial answer per community, then combine."""
+    partials = []
+    for summary in community_summaries:
+        prompt = f"Community summary: {summary}\n\nQuestion: {query}\nPartial answer (or 'not relevant'):"
+        resp = client.chat.completions.create(
+            model="gpt-4o", messages=[{"role": "user", "content": prompt}]
+        )
+        partials.append(resp.choices[0].message.content)
+    reduce_prompt = "Combine these partial answers into one final answer:\n" + "\n".join(partials)
+    final = client.chat.completions.create(
+        model="gpt-4o", messages=[{"role": "user", "content": reduce_prompt}]
+    )
+    return final.choices[0].message.content
+```
+
+<KeyTakeaways items={[
+  "GraphRAG targets a structural failure mode of vector-similarity RAG: global/thematic questions have no single localized chunk containing the answer, so no amount of top-k tuning fixes it.",
+  "The pipeline is: extract entities/relationships into a knowledge graph, detect communities (Leiden algorithm, applied hierarchically), and pre-summarize each community with an LLM — all at indexing time, before any query arrives.",
+  "Global query answering uses a map-reduce pattern over pre-computed community summaries: generate a partial answer per relevant community, then combine (reduce) into a final answer.",
+  "Leiden improves on the earlier Louvain community-detection algorithm by guaranteeing well-connected communities, which matters because GraphRAG's community summaries are only coherent if the community itself is coherent.",
+  "GraphRAG's indexing cost is substantially higher than vector-only or hybrid RAG (many LLM calls for extraction and summarization) — it's a deliberate trade worth making specifically for thematic/global-query workloads, not a strict upgrade for every RAG application.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Directly solves query-focused summarization over a whole corpus, a class of question standard RAG structurally cannot answer regardless of k.",
+    "Community summaries are pre-computed once at indexing time, so global queries don't pay the full extraction/summarization cost at query time — only the map-reduce read cost.",
+    "The explicit graph structure also improves multi-hop local questions (e.g. 'who did X's collaborator later work with'), since relationships are explicit edges rather than implicit in embedding similarity.",
+]}
+  cons={[
+    "Applying GraphRAG to a workload that's actually all local/factual queries adds large indexing cost for no benefit over standard or hybrid RAG.",
+    "Entity extraction quality is bottlenecked by the LLM doing the extraction — noisy or inconsistent entity resolution (the same real-world entity extracted under different surface names) fragments the graph and degrades community quality.",
+    "Community summaries can go stale as the corpus updates — unlike a vector index where adding a document is cheap, meaningfully updating the graph may require re-running community detection and re-summarizing affected communities.",
+    "The map step in map-reduce query answering issues one LLM call per relevant community, which can be a lot of calls (and cost/latency) for a broad query touching many communities.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does increasing k (the number of retrieved chunks) fail to fix vector-similarity RAG's poor performance on 'what are the main themes in this corpus?'-style questions?",
+    options: [
+      "Because vector databases have a hard limit on how many chunks can be retrieved",
+      "Because a corpus-wide theme is not localized in any single chunk or small set of chunks — it's a property that emerges only from synthesizing information scattered across the whole corpus, which similarity search to a query embedding cannot surface no matter how many chunks are retrieved",
+      "Because embedding models cannot represent more than a fixed number of concepts",
+      "Because increasing k always decreases retrieval precision",
+    ],
+    answerIndex: 1,
+    explanation: "This is a structural limitation, not a tuning problem: similarity search finds chunks whose content resembles the query, but a theme spanning hundreds of chunks isn't literally present as text in any one of them. At some point, increasing k just means feeding most of the corpus to the LLM, defeating retrieval's purpose. GraphRAG instead pre-synthesizes thematic summaries offline via community detection, which is what actually targets this failure mode.",
+  },
+  {
+    question: "What role does the Leiden algorithm play in the GraphRAG pipeline, and why was it chosen over the earlier Louvain algorithm?",
+    options: [
+      "Leiden extracts entities and relationships from text chunks using an LLM",
+      "Leiden performs hierarchical community detection over the entity graph, and is preferred over Louvain because it guarantees well-connected communities, whereas Louvain can produce internally disconnected communities",
+      "Leiden generates the natural-language summaries for each community",
+      "Leiden is used only for the final map-reduce step when answering global queries",
+    ],
+    answerIndex: 1,
+    explanation: "Leiden partitions the extracted entity graph into communities of densely-connected entities, applied hierarchically to produce both coarse and fine-grained community levels. Microsoft's GraphRAG paper specifically chose Leiden over Louvain because Leiden guarantees well-connected communities — a property that matters here since incoherent communities would produce incoherent, useless summaries in the next pipeline step.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "From Local to Global: A Graph RAG Approach to Query-Focused Summarization", authors: "Edge, D., Trinh, H., Cheng, N., Bradley, J., Chao, A., Mody, A., Truitt, S., & Larson, J.", venue: "arXiv preprint (Microsoft Research)", year: 2024, url: "https://arxiv.org/abs/2404.16130" },
+  { title: "From Louvain to Leiden: guaranteeing well-connected communities", authors: "Traag, V. A., Waltman, L., & van Eck, N. J.", venue: "Scientific Reports", year: 2019, url: "https://www.nature.com/articles/s41598-019-41695-z" },
+]} />

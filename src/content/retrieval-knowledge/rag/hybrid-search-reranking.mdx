@@ -1,0 +1,186 @@
+---
+title: "Hybrid Search & Reranking"
+description: "Why combining sparse and dense retrieval with reciprocal rank fusion, then reranking with a cross-encoder, consistently beats any single retrieval method alone in production RAG."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["rag", "retrieval", "hybrid-search", "reranking", "cross-encoder"]
+prerequisites: ["Retrieval-Augmented Generation (RAG)", "Vector Databases & Similarity Search"]
+---
+
+## Intuition
+
+Dense retrieval (embedding similarity) and sparse retrieval (BM25-style keyword matching) fail on almost disjoint sets of queries. Dense retrieval is strong at paraphrase and semantic similarity but can under-weight an exact rare token — a product SKU, an error code, an uncommon proper noun — because the embedding model was never specifically trained to guarantee exact-match priority for such tokens. Sparse retrieval is the mirror image: it nails exact term overlap but has no notion of meaning, so a query about "car" won't match a document that only says "automobile."
+
+**Hybrid search** runs both retrieval methods and combines their outputs into a single ranked list, covering both failure modes at once. But dense similarity scores and BM25 scores live on completely different, non-comparable scales — you can't just add them. This is exactly the problem **reciprocal rank fusion (RRF)** solves: instead of combining scores, it combines *ranks*, which are always comparable regardless of the underlying scoring function.
+
+Separately, even a good hybrid retrieval pass over a large corpus is optimizing for recall (don't miss anything relevant) more than precision (put the single best answer first) — because it has to run cheaply over the entire corpus. **Reranking** adds a second, much more expensive but much more accurate model that only scores the small top-$N$ candidate set the first pass already narrowed down, refining precision at the top of the list.
+
+<Callout type="tip" title="The one-sentence idea">
+  Retrieve cheaply and broadly (hybrid: sparse + dense) to maximize the chance the right document is *somewhere* in your candidate set, then rerank expensively and narrowly (cross-encoder) to make sure it's *at the top*.
+</Callout>
+
+## The Two-Stage Retrieve-Then-Rerank Pattern
+
+<Mermaid chart={`
+graph LR
+  Q["Query"] --> S["Sparse retrieval (BM25)"]
+  Q --> D["Dense retrieval (embeddings)"]
+  S --> F["Fuse ranked lists (RRF)"]
+  D --> F
+  F --> Top["Top-N candidates (e.g. N=50-100)"]
+  Top --> CE["Cross-encoder reranker scores each (query, doc) pair jointly"]
+  CE --> Final["Final top-k passed to LLM"]
+`} />
+
+This pattern exists because there's a fundamental tension between retrieval cost and retrieval accuracy that no single model resolves well:
+
+- **Bi-encoders** (used for both sparse-style and dense embedding retrieval) encode the query and each document *independently* into fixed vectors, so document embeddings can be precomputed once and indexed. Similarity is then a cheap dot product or BM25 score lookup. This scales to millions/billions of documents but the independence assumption caps accuracy — the model never actually looks at the query and document together.
+- **Cross-encoders** concatenate the query and a candidate document and pass both through a transformer *jointly*, letting attention directly model interactions between query tokens and document tokens. This is far more accurate at judging true relevance, but it cannot be precomputed — every (query, document) pair requires a fresh forward pass, making it computationally infeasible to run over an entire corpus per query.
+
+The two-stage pattern resolves this by applying the cheap bi-encoder/BM25 stage to the whole corpus (optimizing recall) and the expensive cross-encoder stage only to a small top-$N$ shortlist (optimizing precision), getting most of the accuracy of cross-encoding at a small fraction of its cost.
+
+## Reciprocal Rank Fusion (RRF), Precisely
+
+Given multiple ranked lists over the same document set (e.g., one from BM25, one from dense retrieval), RRF assigns each document a fused score based purely on its rank position in each list — not its raw score:
+
+$$
+\text{RRF}(d) = \sum_{r \,\in\, R} \frac{1}{k + \text{rank}_r(d)}
+$$
+
+where `R` is the set of rankers (e.g. sparse and dense), `rank_r(d)` is the rank of document `d` in ranker `r`'s list (1-indexed; documents not present in a list are simply omitted from that ranker's sum term), and `k` is a small constant (commonly 60, per the original paper's empirical tuning) that dampens the influence of very high ranks so the fused score doesn't blow up disproportionately for rank 1 versus rank 2.
+
+Documents are then re-sorted by their fused `RRF(d)` score, descending. A few properties make RRF attractive as a fusion method specifically:
+
+- **Scale-free.** It never touches the raw scores from either ranker, so it sidesteps the problem of BM25 scores and cosine similarities living on incomparable numeric ranges — a document ranked 1st by BM25 and one ranked 1st by dense retrieval contribute identically, regardless of the underlying score magnitudes.
+- **Parameter-light.** The only real knob is `k`, and results are known to be fairly insensitive to its exact value across a reasonable range.
+- **No training required.** Unlike learned fusion (e.g. training a small model to combine scores), RRF requires no labeled relevance data — it's a fixed formula, which makes it a strong, robust default before investing in a learned re-ranking layer.
+
+### Worked example
+
+Suppose a document `d` is ranked 2nd by BM25 and 5th by dense retrieval, with `k = 60`:
+
+$$
+\text{RRF}(d) = \frac{1}{60 + 2} + \frac{1}{60 + 5} = \frac{1}{62} + \frac{1}{65} \approx 0.0316
+$$
+
+A document ranked 1st by only one ranker and absent from the other's top results (say, rank 1 in BM25, not present in dense retrieval's list at all) would score just `1/61 ≈ 0.0164` — lower than `d` above, illustrating how RRF naturally rewards documents that multiple rankers agree are at least moderately relevant, over documents that only one ranker loves.
+
+## Cross-Encoder Reranking, Precisely
+
+A cross-encoder reranker is typically a transformer (often BERT-style) fine-tuned specifically for relevance scoring, taking the concatenated input `[CLS] query [SEP] document [SEP]` and producing a single scalar relevance score from the pooled output (commonly the `[CLS]` token representation passed through a small classification head). Because query and document tokens attend to each other directly within the same forward pass, the model can capture fine-grained interactions — negation, entity disambiguation, numerical comparison — that two independently-computed embeddings structurally cannot.
+
+The trade-off is cost: a cross-encoder forward pass costs roughly as much as encoding a full sequence of `query + document` tokens, for every candidate, every query — there's no way to precompute or cache document-side representations the way bi-encoders allow. This is why cross-encoders are applied only to a shortlist (commonly $N = 20$ to $100$ candidates) rather than the full corpus.
+
+$$
+\text{score}_{\text{CE}}(q, d) = \text{Linear}\big(\text{Transformer}([\text{CLS}]\, q \,[\text{SEP}]\, d \,[\text{SEP}])_{\text{CLS}}\big)
+$$
+
+## Comparing Retrieval Strategies
+
+<ComparisonTable
+  headers={["Strategy", "Precision at top of list", "Cost per query", "Best for"]}
+  rows={[
+    ["Sparse only (BM25)", "Good for exact-match queries, weak otherwise", "Very low", "Keyword-heavy domains, IDs, exact phrase search"],
+    ["Dense only (embeddings)", "Good for semantic/paraphrase queries, weak on exact match", "Low (single ANN lookup)", "Natural-language, paraphrase-heavy queries"],
+    ["Hybrid (RRF fusion)", "Better than either alone across mixed query types", "Low-moderate (two retrieval passes + cheap fusion)", "General-purpose production RAG"],
+    ["Hybrid + cross-encoder rerank", "Highest — most accurate ranking at the top", "Moderate-high (adds a transformer pass per candidate)", "Latency-tolerant, precision-critical applications"],
+  ]}
+/>
+
+See [Vector Databases & Similarity Search](/docs/retrieval-knowledge/rag/vector-databases) for how the dense side of hybrid retrieval is executed at scale, and [Retrieval-Augmented Generation (RAG)](/docs/retrieval-knowledge/rag/retrieval-augmented-generation) for how the fused/reranked results feed into generation.
+
+## Implementation Sketch
+
+```python
+from collections import defaultdict
+from sentence_transformers import CrossEncoder
+
+def reciprocal_rank_fusion(
+    ranked_lists: list[list[str]], k: int = 60
+) -> list[tuple[str, float]]:
+    """ranked_lists: e.g. [bm25_doc_ids_in_rank_order, dense_doc_ids_in_rank_order]"""
+    scores: dict[str, float] = defaultdict(float)
+    for ranked_list in ranked_lists:
+        for rank, doc_id in enumerate(ranked_list, start=1):
+            scores[doc_id] += 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda item: item[1], reverse=True)
+
+def rerank(query: str, candidates: list[str], top_n: int = 10) -> list[tuple[str, float]]:
+    model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    pairs = [[query, doc] for doc in candidates]
+    scores = model.predict(pairs)  # single forward pass per (query, doc) pair
+    ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+    return ranked[:top_n]
+
+def hybrid_retrieve_and_rerank(
+    query: str,
+    bm25_results: list[str],
+    dense_results: list[str],
+    doc_lookup: dict[str, str],
+    fusion_top_n: int = 50,
+    final_k: int = 10,
+):
+    fused = reciprocal_rank_fusion([bm25_results, dense_results])
+    shortlist_ids = [doc_id for doc_id, _ in fused[:fusion_top_n]]
+    shortlist_texts = [doc_lookup[doc_id] for doc_id in shortlist_ids]
+    return rerank(query, shortlist_texts, top_n=final_k)
+```
+
+<KeyTakeaways items={[
+  "Dense and sparse retrieval fail on largely disjoint query types — dense misses exact-match/rare-token queries, sparse misses semantic/paraphrase queries — which is why hybrid search consistently outperforms either alone.",
+  "RRF fuses ranked lists using only rank position (score(d) = sum of 1/(k + rank)), not raw scores — sidestepping the problem that BM25 and cosine-similarity scores are on incomparable scales.",
+  "Cross-encoders jointly encode query and document, letting attention model their interaction directly — far more accurate than independently-encoded bi-encoder similarity, but too expensive to run over an entire corpus.",
+  "The retrieve-then-rerank pattern applies cheap bi-encoder/BM25 retrieval broadly (optimizing recall over the whole corpus) and expensive cross-encoder reranking narrowly (optimizing precision over a small shortlist).",
+  "RRF's k constant (commonly 60) dampens the disproportionate weight of rank 1 versus rank 2 — results are relatively insensitive to its exact value, which is part of why RRF is a robust default fusion method.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "RRF requires no training data or score normalization — a robust, parameter-light default for combining ranked lists from any number of retrievers.",
+    "Cross-encoder reranking captures query-document interactions that independent bi-encoder embeddings structurally cannot represent.",
+    "The two-stage pattern lets you scale cheap retrieval to the full corpus while reserving expensive computation for a small, high-value shortlist.",
+]}
+  cons={[
+    "Reranking the wrong shortlist size wastes the pattern's benefit — too small a fusion_top_n and the right document may already be excluded before the reranker even sees it; too large and reranking latency balloons.",
+    "Naively averaging or summing raw BM25 and cosine-similarity scores (instead of using rank-based fusion) is a common bug — the two scores are not on comparable scales and the result is dominated by whichever score happens to have larger magnitude.",
+    "Treating reranking as strictly necessary for every application — for latency-sensitive use cases with a strong hybrid first pass, the added cost may not be worth the precision gain.",
+    "Assuming a cross-encoder reranker generalizes zero-shot to a very different domain from its fine-tuning data (e.g. legal or medical text) without evaluation — reranker quality is domain-sensitive like any fine-tuned model.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does reciprocal rank fusion combine document ranks rather than raw scores from BM25 and dense retrieval?",
+    options: [
+      "Because raw scores are always identical between BM25 and dense retrieval",
+      "Because BM25 scores and cosine/inner-product similarity scores are on different, non-comparable numeric scales, so directly summing or averaging them would let whichever ranker happens to produce larger-magnitude scores dominate the fusion regardless of actual relevance",
+      "Because ranks are cheaper to compute than similarity scores",
+      "Because rank-based fusion requires labeled training data while score-based fusion does not",
+    ],
+    answerIndex: 1,
+    explanation: "BM25 scores and embedding similarity scores have no shared scale or calibration — a BM25 score of 8.2 and a cosine similarity of 0.71 aren't directly comparable. RRF sidesteps this entirely by using only each document's rank position within each list, which is always comparable across any pair of rankers regardless of their internal scoring mechanics.",
+  },
+  {
+    question: "Why is cross-encoder reranking applied only to a small top-N shortlist rather than the entire retrieved corpus?",
+    options: [
+      "Cross-encoders can only process a maximum of N documents in their architecture",
+      "Cross-encoders jointly encode each (query, document) pair in a single forward pass with no precomputable document-side representation, so scoring the full corpus per query would be computationally infeasible — the retrieve-then-rerank pattern reserves this expensive step for a small shortlist already narrowed down by cheap retrieval",
+      "Cross-encoders are less accurate than bi-encoders, so using them on more documents would hurt quality",
+      "N is a hard limit set by vector database vendors",
+    ],
+    answerIndex: 1,
+    explanation: "Bi-encoders precompute document embeddings once, offline, so a query only needs one new encoding at search time. Cross-encoders have no such shortcut — every (query, document) pair needs its own fresh joint forward pass — so applying them corpus-wide per query would be far too slow. Restricting reranking to a shortlist of the cheap first pass's top candidates captures most of the cross-encoder's precision benefit at a small fraction of the cost.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Reciprocal Rank Fusion outperforms Condorcet and Individual Rank Learning Methods", authors: "Cormack, G. V., Clarke, C. L. A., & Buettcher, S.", venue: "SIGIR", year: 2009, url: "https://dl.acm.org/doi/10.1145/1571941.1572114" },
+  { title: "Passage Re-ranking with BERT", authors: "Nogueira, R. & Cho, K.", venue: "arXiv preprint", year: 2019, url: "https://arxiv.org/abs/1901.04085" },
+]} />

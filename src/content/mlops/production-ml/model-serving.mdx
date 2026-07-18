@@ -1,0 +1,152 @@
+---
+title: "Model Serving & Deployment"
+description: "Why the choice between batch, online, shadow, and canary serving is a latency-and-risk engineering decision, not a deployment-script afterthought."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["mlops", "model-serving", "deployment", "canary", "shadow-deployment"]
+prerequisites: ["ML pipelines & orchestration", "Basic REST API concepts", "Model evaluation metrics"]
+---
+
+<Prerequisites items={["ML pipelines & orchestration", "Basic REST API concepts", "Model evaluation metrics"]} />
+
+## Intuition
+
+Training a good model solves half the problem. The other half is getting predictions to whatever consumes them, under real constraints: some systems need a prediction in under 50 milliseconds while a user waits; others need millions of predictions computed overnight with no user waiting at all. Conflating these — or deploying a new model version everywhere at once with no way to detect a regression before it's fully live — is how a model with a great offline evaluation score causes a production incident.
+
+<Callout type="tip" title="A concrete failure mode this prevents">
+  A recommendation model is retrained, passes its offline evaluation with a higher NDCG than the current production model, and is deployed by replacing the production model wholesale, for all traffic, at once. Within an hour, click-through rate drops sharply — the new model, it turns out, was trained on a slightly different feature normalization and produces systematically miscalibrated scores for a specific user segment that was underrepresented in the offline test set. Because the rollout was instantaneous and total, every user is affected before anyone notices, and rolling back requires a full redeploy under pressure. A canary rollout — sending 5% of traffic to the new model and comparing live metrics before expanding — would have caught this on a small fraction of users, with a one-line traffic-split change to roll back.
+</Callout>
+
+## Batch vs. Online Serving: A Latency and Throughput Trade-off
+
+The fundamental question is: **does a prediction need to exist before it's requested, or can it be computed on demand?**
+
+- **Batch inference** runs on a schedule (hourly, nightly) over a large volume of inputs, writing predictions to a store for later lookup. It's latency-insensitive by construction — nobody is waiting synchronously — which means it can be optimized purely for throughput: large batch sizes, full GPU utilization, no per-request overhead. It's the right fit whenever the set of things to predict is known in advance (e.g., "score every customer for churn risk tonight") and a lookup can tolerate staleness.
+- **Online (real-time) serving** responds to individual requests synchronously, typically via a REST/gRPC endpoint, with a latency budget measured in milliseconds. This requires the model (and its featurization) to be loaded and ready, optimized for low per-request latency rather than throughput, and typically running behind an autoscaled service to absorb variable request volume. It's necessary whenever the input isn't known until request time (e.g., "score this specific transaction as it happens") or freshness requirements make batch staleness unacceptable (e.g., fraud detection).
+
+A common hybrid: **near-real-time / streaming inference**, where predictions are computed shortly after an event occurs (via a stream processor) and cached for fast lookup — trading some staleness for much lower serving-path latency than fully synchronous online inference.
+
+<Mermaid chart={`graph TD
+  subgraph Batch
+  A1[Scheduled job - nightly/hourly] --> A2[Score full dataset]
+  A2 --> A3[Write predictions to store]
+  A3 --> A4[Downstream systems look up precomputed prediction]
+  end
+  subgraph Online
+  B1[Incoming request] --> B2[Feature lookup - online store]
+  B2 --> B3[Model inference - low latency]
+  B3 --> B4[Return prediction synchronously]
+  end
+`} />
+
+## Safely Rolling Out a New Model Version
+
+Replacing a production model outright is the highest-risk deployment pattern available — it bets the entire user base on the new model being correct in every way the offline evaluation didn't catch. Two patterns exist specifically to reduce that risk:
+
+**Shadow deployment**: the new model runs *in parallel* with the current production model on live traffic, but its predictions are logged and compared — never actually returned to users or acted upon. This validates the new model's real-world behavior (latency, error rate, prediction distribution versus the incumbent) with zero user-facing risk, at the cost of double inference compute and the fact that it cannot validate downstream effects that depend on the prediction actually being *acted on* (e.g., a recommender's effect on click-through can't be shadow-tested, since shadow predictions are never shown to users).
+
+**Canary release**: the new model serves a small, real slice of traffic (e.g., 1-5%) whose *actual outcomes* are used to compare live business/quality metrics against the incumbent, before gradually increasing the traffic share if metrics hold up (or instantly rolling back the split if they don't). This does validate real user-facing impact, at the cost of exposing some real users to a possibly-worse model during the canary window.
+
+<ComparisonTable
+  headers={["Pattern", "User-facing risk", "What it validates", "What it can't validate"]}
+  rows={[
+    ["Full replacement", "Highest — 100% of traffic immediately", "Nothing extra beyond offline eval", "Anything the offline eval missed, at full blast"],
+    ["Shadow deployment", "None — predictions never shown to users", "Latency, error rate, prediction distribution vs. incumbent on real traffic", "Actual downstream effects of users seeing/acting on the new predictions"],
+    ["Canary release", "Low — small traffic slice", "Real business/quality metrics under real usage, before full rollout", "Rare edge cases outside the canary sample; requires enough traffic to reach statistical significance"],
+  ]}
+/>
+
+## Example: Traffic-Split Canary Configuration
+
+```yaml
+# Kubernetes-style traffic split for a canary rollout (e.g. via a service mesh / Istio VirtualService)
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: recommendation-model-service
+spec:
+  hosts:
+    - recommendation-model
+  http:
+    - route:
+        - destination:
+            host: recommendation-model
+            subset: v2-canary
+          weight: 5   # 5% of traffic to the new model version
+        - destination:
+            host: recommendation-model
+            subset: v1-production
+          weight: 95  # remaining traffic stays on the incumbent
+```
+
+```python
+# Application-level shadow scoring — log the new model's predictions without acting on them
+def handle_recommendation_request(user_id, context):
+    production_result = production_model.predict(user_id, context)
+
+    try:
+        shadow_result = candidate_model.predict(user_id, context)
+        log_shadow_comparison(
+            user_id=user_id,
+            production_prediction=production_result,
+            shadow_prediction=shadow_result,
+            timestamp=now(),
+        )
+    except Exception as e:
+        # Shadow failures must never affect the served response
+        log_shadow_error(e)
+
+    return production_result  # only the production model's output is ever returned
+```
+
+The critical detail in the shadow-scoring code: a failure in the candidate model is caught and logged, never propagated — shadow deployment's entire value proposition depends on it being unable to affect what users actually see.
+
+<Callout type="note" title="LLM-specific serving is a related but distinct problem">
+  Everything above applies to serving classical ML models (regressions, tree ensembles, small neural nets), where the dominant cost is typically per-request latency and throughput at a fixed, small compute footprint. Serving large language models introduces additional constraints — KV-cache memory management, continuous/dynamic batching to keep GPUs saturated under variable-length generation, and quantization trade-offs — that general-purpose model-serving infrastructure doesn't address. See [Serving with vLLM & TensorRT-LLM](/docs/llms/inference-serving/serving-vllm-tensorrt) for the LLM-specific serving stack and its distinct engineering trade-offs.
+</Callout>
+
+## Common Mistakes
+
+- **Deploying a full replacement because "the offline metrics were better."** Offline evaluation cannot capture every real-world failure mode (feature skew, segment-specific miscalibration, downstream feedback effects) — canary or shadow validation exists precisely to catch what offline evaluation missed.
+- **Using shadow deployment to validate something it structurally can't validate.** Shadow mode compares raw predictions, not the effect of those predictions being acted on — it cannot validate a recommender's effect on engagement, since users never see the shadow predictions.
+- **Canarying with too little traffic or too short a window to reach significance.** A 1% canary evaluated for ten minutes on a low-traffic endpoint may show "no difference" purely from noise, not because the model is actually safe.
+- **No fast, tested rollback path.** A canary or gradual rollout is only as safe as the ability to instantly shift traffic back to the incumbent — if rollback requires a full redeploy, the "safety" of gradual rollout is largely theoretical under time pressure.
+- **Conflating batch staleness tolerance with actual business requirements.** Using nightly batch scoring for a use case that actually needs same-session freshness (e.g., fraud checks on the current transaction) reintroduces a serving-path failure that looks like a model problem but is actually an architecture mismatch.
+
+<KeyTakeaways items={[
+  "Batch inference optimizes for throughput on latency-insensitive, precomputed workloads; online serving optimizes for per-request latency on demand-driven workloads — the choice is an architecture decision, not just a config flag.",
+  "Shadow deployment validates a new model's real-world prediction behavior with zero user-facing risk, but cannot validate effects that depend on users actually seeing/acting on the prediction.",
+  "Canary release validates real business impact on a small, real slice of traffic before full rollout, trading a small amount of user-facing risk for genuine outcome validation.",
+  "LLM serving (vLLM, TensorRT-LLM) has additional constraints — KV-cache management, continuous batching — that general classical-ML serving infrastructure doesn't solve.",
+]} />
+
+<Quiz questions={[
+  {
+    question: "Why can't a shadow deployment fully validate a new recommendation model before rollout, even though it runs on 100% of live production traffic?",
+    options: [
+      "Shadow deployments only work for classification models",
+      "Shadow predictions are never shown to or acted upon by real users, so effects that depend on user behavior in response to the prediction (like click-through or engagement) cannot be measured — only the raw prediction output itself can be compared",
+      "Shadow deployments are always too slow to run on full traffic",
+      "Shadow deployments require taking the production model offline",
+    ],
+    answerIndex: 1,
+    explanation: "Shadow deployment compares the candidate model's predictions against the incumbent's on real traffic, but since shadow predictions are never actually served to users, it cannot capture any downstream effect that depends on users seeing and reacting to those predictions — that requires a canary release, which does expose some real users to the new model's actual outputs.",
+  },
+  {
+    question: "A team wants to score every customer in a database for churn risk once per night, with no real-time request path. What serving pattern fits this best, and why?",
+    options: [
+      "Online serving, because it's always more accurate",
+      "Batch inference, because the workload is latency-insensitive and known in advance, allowing optimization purely for throughput rather than per-request latency",
+      "Shadow deployment, because it's the safest option",
+      "Canary release, because it minimizes risk",
+    ],
+    answerIndex: 1,
+    explanation: "Batch inference is the right fit precisely because the set of entities to score is known ahead of time and nobody is waiting synchronously for an individual result — this lets the system optimize for throughput (large batches, full hardware utilization) rather than the low single-request latency that online serving requires.",
+  },
+]} />
+
+<ReferenceList items={[
+  { title: "Hidden Technical Debt in Machine Learning Systems", authors: "Sculley, D. et al.", venue: "NeurIPS", year: 2015, url: "https://papers.nips.cc/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf" },
+  { title: "Istio Traffic Management — Official Documentation", authors: "Istio project", venue: "Official documentation", year: 2026, url: "https://istio.io/latest/docs/concepts/traffic-management/" },
+]} />

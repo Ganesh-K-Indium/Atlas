@@ -1,0 +1,232 @@
+---
+title: "Docker, Kubernetes & CI/CD for ML"
+description: "Why 'it works on my machine' is really a dependency-pinning problem, and why ML CI/CD needs data and model validation gates that standard software CI was never designed to enforce."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["mlops", "docker", "kubernetes", "ci-cd", "production-ml"]
+prerequisites: ["Basic Docker concepts", "Basic Kubernetes concepts", "Experiment tracking (MLflow, W&B)"]
+---
+
+<Prerequisites items={["Basic Docker concepts", "Basic Kubernetes concepts", "Experiment tracking (MLflow, W&B)"]} />
+
+## Intuition
+
+"It works on my machine" is not a joke about flaky engineers — it is a precise description of an unpinned dependency graph. Your machine has a specific Python interpreter, specific versions of every library, specific system libraries (BLAS, CUDA drivers), and a specific OS, all invisibly contributing to whether your code runs and what it computes. None of that is captured by copying source code alone. For ML specifically, this problem is worse than typical software: a `scikit-learn` or `torch` minor version bump can silently change numerical results (different default hyperparameters, different floating-point reduction order, different random number generation), which means "the code is the same" does not imply "the model is the same."
+
+<Callout type="tip" title="A concrete failure mode this prevents">
+  A model is trained and validated on a data scientist's laptop using a locally installed environment, then "deployed" by having an engineer manually recreate what they believe are the same package versions on a production server. The production server's `numpy` and `scikit-learn` versions differ by a minor version from what was used in training — nothing failed to install, no error was raised — but a changed default in a preprocessing transformer silently produces slightly different feature scaling in production than during training. The model's predictions in production are subtly, silently wrong for weeks, with no code difference to point to, because the actual difference was never in the code at all — it was in the untracked runtime environment surrounding it. Containerizing the exact training environment and shipping that same image to production would have made this class of bug structurally impossible.
+</Callout>
+
+## Containerization: Bundling the Runtime, Not Just the Code
+
+A container image doesn't just package "your code" — it packages the entire runtime needed to execute it: the OS base layer, system libraries, the language runtime and interpreter version, every installed package at an exact pinned version, and any GPU driver interface libraries needed. This is the precise mechanism by which "works on my machine" is solved: the thing that runs in production is bit-for-bit *the same environment* that was tested, not a best-effort manual recreation of it.
+
+```dockerfile
+# Dockerfile — pins the exact runtime for a model-serving container
+FROM python:3.11-slim@sha256:2b1e97c8c4d1e37bcdc0b7d3d2f3c1a2b8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3
+
+WORKDIR /app
+
+# requirements.txt is version-pinned, not just named packages
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY model_server.py .
+COPY model_artifact/ ./model_artifact/
+
+# Non-root user — standard hardening practice for production containers
+RUN useradd --create-home appuser
+USER appuser
+
+EXPOSE 8080
+CMD ["uvicorn", "model_server:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+```text
+# requirements.txt — exact pins, not loose ranges
+scikit-learn==1.5.2
+numpy==1.26.4
+uvicorn==0.30.6
+fastapi==0.115.0
+```
+
+Pinning the base image by digest (`sha256:...`), not just by tag, and pinning every Python dependency to an exact version, is what makes the image reproducible — a tag like `python:3.11-slim` can point to a different underlying image over time as it's rebuilt upstream, silently reintroducing the exact problem containerization is meant to solve.
+
+## Kubernetes' Role for ML Workloads Specifically
+
+Kubernetes matters for ML beyond "it's how we run containers" because ML workloads have resource needs standard web services typically don't:
+
+- **GPU scheduling.** Kubernetes exposes GPUs as a schedulable resource (conventionally `nvidia.com/gpu`) via a device plugin running on GPU-equipped nodes, letting a pod request a specific number of GPUs the scheduler then places on nodes with availability. Because a full GPU is often more compute than a single inference workload needs, more advanced setups use partitioning technologies (e.g., NVIDIA MIG, which physically splits a supported GPU into multiple isolated instances) or fractional/dynamic allocation approaches to avoid wasting expensive accelerator capacity on underutilized workloads.
+- **Autoscaling inference deployments.** A `Deployment` serving a model can be scaled horizontally (more replica pods) in response to request volume or GPU/CPU utilization via a Horizontal Pod Autoscaler, and the underlying node pool can itself be scaled up/down (adding or removing GPU nodes) via cluster autoscaling — critical for keeping expensive GPU capacity matched to actual traffic rather than provisioned for peak load at all times.
+- **Batch job orchestration.** Kubernetes `Job` and `CronJob` resources natively express "run this training/scoring workload to completion" (as opposed to a long-running service), with built-in retry-on-failure semantics — the natural fit for scheduled batch inference or periodic retraining triggered by an orchestrator like Airflow or Kubeflow Pipelines running its tasks as Kubernetes pods.
+
+<Mermaid chart={`graph TD
+  A[GitHub Actions CI trigger - PR / merge] --> B[Run unit tests + lint]
+  B --> C[Run data validation tests]
+  C --> D[Train / retrain model in CI]
+  D --> E[Run model validation gate vs. baseline]
+  E -->|fails| F[Block merge / deployment]
+  E -->|passes| G[Build container image - pinned deps]
+  G --> H[Push image to registry]
+  H --> I[Deploy to Kubernetes - canary rollout]
+  I --> J[Kubernetes: GPU scheduling, HPA, batch Jobs]
+`} />
+
+```yaml
+# Kubernetes Deployment for online model serving — GPU request + autoscaling
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recommendation-model-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: recommendation-model-server }
+  template:
+    metadata:
+      labels: { app: recommendation-model-server }
+    spec:
+      containers:
+        - name: server
+          image: registry.internal/recommendation-model:1.4.2  # pinned, immutable tag
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
+          ports:
+            - containerPort: 8080
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: recommendation-model-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: recommendation-model-server
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+```
+
+## What CI/CD for ML Needs Beyond Standard Software CI
+
+Standard software CI/CD checks "does the code compile, pass unit tests, and pass linting." ML CI/CD needs all of that, plus checks that have no equivalent in typical application code, because a passing test suite says nothing about whether a *model* is good:
+
+- **Data validation as a CI gate.** Schema checks, null-rate thresholds, and distribution sanity checks on training data need to run *before* training, as an automated gate — not something checked manually and forgotten, since bad data silently produces a bad model that still "passes" every code-level test.
+- **Model validation gates, not just code tests.** A CI pipeline for ML needs an explicit step that trains (or retrains) the model and compares its evaluation metrics against the current production model's baseline, failing the pipeline (blocking deployment) if the new model underperforms — this is fundamentally different from a unit test, which checks code behavior, not statistical model quality.
+- **Data and model versioning tied to the pipeline run.** CI/CD for ML needs to record exactly which data version and which resulting model artifact came out of a given pipeline run (typically via integration with an experiment tracking/registry system), so a deployed model can always be traced back to what produced it — plain code-version tracking (a git commit) is necessary but not sufficient.
+- **Reproducible training environments as part of the pipeline, not just the serving image.** If the training step itself runs in an unpinned environment, the model validation gate's result isn't trustworthy — the same containerization discipline used for serving needs to extend to the training/CI environment.
+
+```yaml
+# GitHub Actions-style CI workflow with an ML-specific model validation gate
+name: ml-ci
+on: [pull_request]
+
+jobs:
+  validate-and-train:
+    runs-on: ubuntu-latest
+    container: registry.internal/ml-training-env:2.3.0  # pinned training environment
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run unit tests
+        run: pytest tests/unit/
+
+      - name: Validate training data
+        run: python scripts/validate_data.py --min-rows 100000 --max-null-rate 0.01
+
+      - name: Train candidate model
+        run: python scripts/train.py --log-to-mlflow --experiment ml-ci-candidate
+
+      - name: Model validation gate — must not regress vs. production baseline
+        run: |
+          python scripts/evaluate_gate.py \
+            --candidate-run "$(cat run_id.txt)" \
+            --baseline-alias production \
+            --min-f1-delta -0.005
+
+      - name: Build serving image (only if gate passed)
+        run: docker build -t registry.internal/model-server:${{ github.sha }} .
+
+      - name: Push image
+        run: docker push registry.internal/model-server:${{ github.sha }}
+```
+
+<ComparisonTable
+  headers={["Concern", "Standard software CI/CD", "ML CI/CD"]}
+  rows={[
+    ["Correctness check", "Unit/integration tests on deterministic code behavior", "Unit tests plus a statistical model-quality gate against a live baseline"],
+    ["What's versioned", "Code (git commit)", "Code, training data snapshot, and the resulting model artifact, all linked"],
+    ["Deployment artifact", "Application binary/image", "Serving image plus a specific registered model version"],
+    ["Failure mode unique to ML", "N/A", "Passing all code tests while training data or model quality has silently regressed"],
+  ]}
+/>
+
+<ProsCons
+  pros={[
+    "Containerization eliminates an entire class of 'silent environment mismatch' bugs by making the runtime itself part of the versioned, tested artifact.",
+    "Kubernetes gives ML workloads GPU-aware scheduling and autoscaling that generic VM-based deployment doesn't provide out of the box.",
+    "A model-validation CI gate catches statistical regressions before they reach production, the same way a unit test catches a logic regression.",
+  ]}
+  cons={[
+    "GPU scheduling adds real operational complexity — fractional/shared GPU allocation across workloads is still a less mature area than CPU scheduling.",
+    "Training environments are often heavier and slower to build/rebuild than typical service images, making CI pipeline runtime a real cost to manage.",
+    "A model-validation gate requires a trustworthy, up-to-date production baseline to compare against — without it, the gate has nothing meaningful to check against.",
+  ]}
+/>
+
+## Common Mistakes
+
+- **Pinning package names but not versions.** `pip install scikit-learn` in a Dockerfile with no version pin reintroduces the exact non-reproducibility containerization is meant to solve — the image is only reproducible if every dependency is pinned.
+- **Using a mutable image tag (`:latest`) in a Kubernetes manifest.** This makes "which model is actually running" ambiguous and non-reproducible; production manifests should reference immutable, specific tags or image digests.
+- **Requesting GPUs without setting both `requests` and `limits`.** Omitting resource limits on GPU-scheduled workloads can lead to unpredictable scheduling behavior and resource contention with other pods on shared nodes.
+- **Treating a green CI run as sufficient to deploy a retrained model.** Code tests passing says nothing about whether the newly trained model is actually as good as the one it would replace — without an explicit model-quality gate, CI/CD for ML is really just CI/CD for the training *code*, not the model.
+- **No rollback plan tied to the deployment pipeline.** If a bad model reaches production, the fastest safe response is reverting to the last known-good registered model version — this only works if the CI/CD pipeline treats model versions as first-class, traceable, revertible artifacts, not just "whatever the last successful build produced."
+
+<KeyTakeaways items={[
+  "Containerization solves 'works on my machine' by packaging the entire runtime — OS, system libraries, exact pinned dependency versions — not just the source code, so the tested and deployed environments are identical.",
+  "Kubernetes matters for ML specifically because of GPU-aware scheduling, autoscaling of inference deployments to match variable traffic against expensive accelerator capacity, and native batch Job/CronJob primitives for training and scoring workloads.",
+  "ML CI/CD needs everything standard software CI has, plus data validation gates and a model-quality validation gate comparing a candidate against the current production baseline — passing code tests says nothing about whether the trained model itself regressed.",
+  "Data, code, and model versions all need to be traceable to a single pipeline run for CI/CD to actually support safe rollback, not just forward deployment.",
+]} />
+
+<Quiz questions={[
+  {
+    question: "A team's Dockerfile installs `pip install scikit-learn pandas numpy` with no version pins, and their production Kubernetes manifest references the image tag `model-server:latest`. What specific reproducibility problem does this recreate?",
+    options: [
+      "No problem — Docker guarantees reproducibility regardless of version pinning",
+      "Both the unpinned package versions and the mutable `:latest` tag mean the actual runtime that gets built or deployed can silently differ between builds, reintroducing the same untracked-environment mismatch that containerization is meant to eliminate",
+      "This only matters for GPU workloads, not general model serving",
+      "The issue is exclusively about numpy, not scikit-learn or the image tag",
+    ],
+    answerIndex: 1,
+    explanation: "Containerization's reproducibility guarantee depends on every layer being pinned: base image (ideally by digest), every installed package at an exact version, and an immutable deployment tag. Unpinned packages mean a rebuild can silently pull newer versions with different behavior; a `:latest` tag means the deployed image itself isn't a fixed, traceable artifact.",
+  },
+  {
+    question: "Why is a green CI run (all unit tests passing) insufficient to safely deploy a newly retrained model, without additional ML-specific gates?",
+    options: [
+      "Unit tests are inherently unreliable and should not be used for ML projects",
+      "Unit tests validate code behavior/logic, but say nothing about whether the retrained model's statistical quality (accuracy, calibration, etc.) has regressed relative to the current production baseline — that requires an explicit model-validation gate",
+      "CI systems cannot run Python code",
+      "Green CI runs are actually sufficient and no additional gates are needed",
+    ],
+    answerIndex: 1,
+    explanation: "Standard CI tests check that code behaves as expected (e.g., a function returns the right shape or type) — they cannot detect that a newly trained model, despite well-behaved code, performs worse than production on real evaluation metrics. That requires a dedicated model-quality gate that trains/evaluates the candidate and compares it against a live baseline before allowing deployment.",
+  },
+]} />
+
+<ReferenceList items={[
+  { title: "Hidden Technical Debt in Machine Learning Systems", authors: "Sculley, D. et al.", venue: "NeurIPS", year: 2015, url: "https://papers.nips.cc/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf" },
+  { title: "Schedule GPUs — Kubernetes Official Documentation", authors: "Kubernetes project", venue: "Official documentation", year: 2026, url: "https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/" },
+  { title: "Horizontal Pod Autoscaling — Kubernetes Official Documentation", authors: "Kubernetes project", venue: "Official documentation", year: 2026, url: "https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/" },
+]} />

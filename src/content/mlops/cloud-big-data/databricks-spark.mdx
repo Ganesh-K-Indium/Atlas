@@ -1,0 +1,163 @@
+---
+title: "Databricks & Spark"
+description: "How Spark's driver-executor model turns a dataset too large for one machine into a lazily-evaluated distributed computation, and how Databricks builds a managed Lakehouse and ML platform on top of it."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["mlops", "cloud", "spark", "databricks", "lakehouse", "mlflow", "big-data"]
+prerequisites: ["MLOps fundamentals"]
+---
+
+## Intuition
+
+Most ML tooling assumes your data and computation fit on one machine. Once a dataset is too large for that — hundreds of gigabytes to petabytes — you need a system that splits both the data and the computation across many machines, coordinates them, and recovers automatically when one of those machines fails. **Apache Spark** is the dominant engine for this, and **Databricks** is the company founded by Spark's original creators that turned it into a managed platform, then layered a data-warehouse-style storage architecture (the **Lakehouse**) and an ML/AI product suite on top.
+
+<Callout type="tip" title="The one-sentence idea">
+  Spark solves "how do I run one logical computation across a cluster of machines without writing distributed-systems code myself"; Databricks solves "how do I get a managed Spark cluster, a governed table format that behaves like a warehouse but stores data like a data lake, and an ML/LLMOps platform, without operating any of that infrastructure myself."
+</Callout>
+
+## Spark's Core Distributed-Computing Model
+
+Spark's foundational abstraction, introduced in the original Zaharia et al. paper, was the **Resilient Distributed Dataset (RDD)**: an immutable, partitioned collection of records distributed across a cluster, with enough lineage information (the sequence of transformations that produced it) to recompute any lost partition after a machine failure — this is what "resilient" means. Modern Spark code mostly operates on the higher-level **DataFrame** API, which is built on RDDs but adds a schema and lets Spark's query optimizer (Catalyst) plan the computation more intelligently, closer to how a SQL engine plans a query.
+
+<Mermaid chart={`
+graph TD
+  Driver["Driver program\n(builds the logical execution plan)"] --> Plan["Catalyst optimizer\n(logical plan -> physical plan)"]
+  Plan --> Sched["Cluster manager\n(allocates executors)"]
+  Sched --> E1["Executor 1\n(processes partition 1..n)"]
+  Sched --> E2["Executor 2\n(processes partition n+1..m)"]
+  Sched --> E3["Executor 3\n(processes partition m+1..k)"]
+  E1 --> Shuffle["Shuffle\n(redistribute data across executors,\ne.g. for a groupBy or join)"]
+  E2 --> Shuffle
+  E3 --> Shuffle
+  Shuffle --> Result["Result collected back\nto driver, or written to storage"]
+`} />
+
+Three ideas make Spark's model precise:
+
+- **Driver-executor architecture:** a single **driver** process holds the logical plan and coordinates work; many **executor** processes, each running on a cluster node, actually process data partitions in parallel. The driver never touches the raw data at full scale — it only ships instructions and collects small results (aggregates, samples) back.
+- **Partitioning:** data is split into partitions, the unit of parallelism. Operations that only need each partition's own data (`map`, `filter`) run embarrassingly parallel with no cross-machine communication. Operations that need data grouped by some key across partitions (`groupBy`, `join`) require a **shuffle** — physically moving data between executors over the network — which is by far the most expensive operation in Spark and the usual target of performance tuning.
+- **Lazy evaluation:** transformations (`map`, `filter`, `select`, `join`) build up a logical plan but execute nothing. Only an **action** (`count`, `collect`, `write`) triggers Catalyst to optimize the accumulated plan and actually run it. This lets Spark fuse and reorder operations (e.g. push a filter before a join) for a much cheaper physical execution than a naive line-by-line interpretation would produce.
+
+## Databricks: Lakehouse and ML Platform on Top of Spark
+
+Databricks' central architectural bet is the **Lakehouse**: store data in open file/table formats (built on Parquet, with transactional guarantees via Delta Lake) directly in cheap cloud object storage — the economics and flexibility of a data lake — while adding the schema enforcement, ACID transactions, and governance (via **Unity Catalog**) traditionally associated with a data warehouse. This removes the older two-system pattern of a data lake for raw/ML data plus a separate warehouse for BI, which required constantly copying and reconciling data between them.
+
+On top of that foundation, Databricks' **Mosaic AI** is the current umbrella for its ML/AI-specific capabilities:
+
+- **MLflow**, an open-source project that originated at Databricks, is the de facto standard for experiment tracking, model packaging, and model registry across the industry — not limited to Databricks itself. **MLflow 3** extends this into GenAI-specific concerns: tracing agent/LLM calls and storing them (increasingly in OpenTelemetry format, governed through Unity Catalog table permissions) for evaluation and debugging.
+- **Model Serving** hosts both custom-trained models and foundation models behind managed endpoints, with an **AI Gateway** in front for centralized governance, rate limiting, and monitoring of access to those endpoints.
+- **Vector Search** is a serverless vector database integrated with the Lakehouse, used to build RAG pipelines directly against governed enterprise data — see [Retrieval-Augmented Generation (RAG)](/docs/retrieval-knowledge/rag/retrieval-augmented-generation) for the retrieval mechanics this implements.
+- **Agent Bricks / Agent Framework** provide managed tooling for building, evaluating, and deploying LLM-based agents, including automatic generation of domain-specific evaluation benchmarks — an area Databricks has invested in heavily as agentic workflows have become the dominant new application pattern industry-wide.
+
+The unifying theme: Databricks' pitch is that data engineering (Spark, Delta Lake), data warehousing/BI, and ML/AI development can all run against the *same* governed copy of data in the *same* platform, rather than requiring separate systems that need to be kept in sync.
+
+## Comparing Databricks to Cloud-Native ML Platforms
+
+<ComparisonTable
+  headers={["Aspect", "Databricks", "Cloud-native ML platform (SageMaker / Vertex AI / Azure ML)"]}
+  rows={[
+    ["Core compute model", "Spark clusters — distributed data processing at the core", "Managed training jobs/endpoints — compute is scoped per ML task, not a general data-processing engine"],
+    ["Data storage philosophy", "Lakehouse: one governed copy of data for BI, data engineering, and ML", "Typically assumes data already lives in the cloud's own warehouse/lake service"],
+    ["Cloud portability", "Runs on AWS, Azure, and GCP with a consistent experience", "Tied to its own cloud provider"],
+    ["Best fit", "Organizations with large-scale data engineering needs feeding directly into ML/AI", "Organizations whose data already lives natively in one cloud's ecosystem"],
+]}
+/>
+
+## A Minimal Example
+
+```python
+# PySpark: lazy transformations, then an action triggers execution
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, avg
+
+spark = SparkSession.builder.appName("feature-engineering").getOrCreate()
+
+# Nothing executes yet — this just builds a logical plan
+transactions = spark.read.table("catalog.schema.transactions")
+enriched = (
+    transactions
+    .filter(col("amount") > 0)
+    .groupBy("customer_id")
+    .agg(avg("amount").alias("avg_transaction_amount"))
+)
+
+# .count() is an action — this is what actually triggers a shuffle + execution
+print(enriched.count())
+enriched.write.mode("overwrite").saveAsTable("catalog.schema.customer_features")
+```
+
+```python
+# MLflow: track an experiment and register a model, typically run on Databricks
+import mlflow
+from sklearn.ensemble import GradientBoostingClassifier
+
+with mlflow.start_run():
+    model = GradientBoostingClassifier(n_estimators=200, max_depth=4)
+    model.fit(X_train, y_train)
+
+    mlflow.log_params({"n_estimators": 200, "max_depth": 4})
+    mlflow.log_metric("val_auc", roc_auc_score(y_val, model.predict_proba(X_val)[:, 1]))
+    mlflow.sklearn.log_model(model, "model", registered_model_name="fraud-classifier")
+```
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Spark's lazy evaluation and Catalyst optimizer mean you rarely need to hand-tune execution order — the optimizer usually reorders filters/projections better than manual tuning would.",
+    "The Lakehouse pattern eliminates the perpetual sync problem between a separate data lake (for ML/data science) and a separate warehouse (for BI) by keeping one governed copy of data.",
+    "MLflow's broad industry adoption (well beyond Databricks itself) means experiment-tracking skills and artifacts transfer across organizations rather than being platform-locked.",
+]}
+  cons={[
+    "Triggering repeated actions (e.g. multiple `.count()` or `.show()` calls) on the same unpersisted DataFrame silently re-executes the whole upstream computation each time — a very common source of surprising cost and slowness.",
+    "Joins and groupBys that require a shuffle across a poorly partitioned or skewed dataset (one partition vastly larger than others) can bottleneck an entire job on a single overloaded executor.",
+    "Treating Spark as a drop-in replacement for single-machine pandas code without accounting for shuffle cost, partition skew, or serialization overhead often makes distributed code slower than the single-machine version for small-to-medium data.",
+    "Assuming Databricks' Lakehouse governance (Unity Catalog) is automatically in place — it must be deliberately configured, and ungoverned tables can reintroduce the very data-sprawl problem the Lakehouse is meant to solve.",
+]}
+/>
+
+<KeyTakeaways items={[
+  "Spark's RDD/DataFrame model splits both data (into partitions) and computation (across executors coordinated by a driver) — with lazy evaluation letting the Catalyst optimizer plan the whole computation before running anything.",
+  "Shuffles — moving data across the network to group it by key — are the dominant cost in most Spark jobs and the primary target of performance tuning.",
+  "Databricks' Lakehouse architecture stores data once, in open formats with warehouse-like governance (Unity Catalog), for use by data engineering, BI, and ML/AI alike.",
+  "MLflow, which originated at Databricks, is the de facto standard for experiment tracking and model registry across the industry, independent of which platform you run it on.",
+  "Databricks' Mosaic AI (Model Serving, Vector Search, Agent Bricks) extends the Lakehouse into a managed ML/LLMOps platform, mirroring the RAG and agent-orchestration capabilities offered natively by the major clouds.",
+]} />
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does calling `.count()` twice on the same Spark DataFrame (without caching it) typically re-run the entire upstream computation both times?",
+    options: [
+      "Spark always caches DataFrames automatically after the first action",
+      "Spark transformations are lazy and build a logical plan rather than materializing results; each action re-triggers the plan from scratch unless the DataFrame is explicitly persisted/cached",
+      "This only happens if the data doesn't fit in memory",
+      "Actions in Spark are idempotent and reuse prior results by default",
+    ],
+    answerIndex: 1,
+    explanation: "Spark transformations (map, filter, groupBy, etc.) only build a logical execution plan — nothing runs until an action like count() or collect() is called. Without an explicit .cache()/.persist(), each action re-executes the full plan from the original data source, which is why repeated actions on the same unpersisted DataFrame silently duplicate work.",
+  },
+  {
+    question: "What problem does the Databricks Lakehouse architecture primarily solve relative to the older pattern of a separate data lake plus a separate data warehouse?",
+    options: [
+      "It eliminates the need for any distributed computation",
+      "It keeps one governed copy of data in open formats with warehouse-like transactional guarantees, avoiding the need to continuously copy and reconcile data between a lake (for ML) and a warehouse (for BI)",
+      "It replaces Spark entirely with a new query engine",
+      "It only works for structured tabular data, not for ML workloads",
+    ],
+    answerIndex: 1,
+    explanation: "The Lakehouse pattern stores data directly in cloud object storage using open table formats (Delta Lake on Parquet) with ACID transactions and catalog-level governance, so the same governed data can serve BI, data engineering, and ML/AI use cases without the older two-system sync problem between a data lake and a data warehouse.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Spark: Cluster Computing with Working Sets", authors: "Zaharia, M. et al.", venue: "USENIX HotCloud", year: 2010, url: "https://www.usenix.org/legacy/event/hotcloud10/tech/full_papers/Zaharia.pdf" },
+  { title: "Apache Spark Documentation", venue: "Apache Software Foundation", year: 2026, url: "https://spark.apache.org/docs/latest/" },
+  { title: "Production-quality ML and GenAI (Mosaic AI)", venue: "Databricks", year: 2026, url: "https://www.databricks.com/product/artificial-intelligence" },
+  { title: "MLflow Documentation", venue: "MLflow", year: 2026, url: "https://mlflow.org/docs/latest/index.html" },
+  { title: "What is a Data Lakehouse?", venue: "Databricks Documentation", year: 2026, url: "https://www.databricks.com/glossary/data-lakehouse" },
+]} />

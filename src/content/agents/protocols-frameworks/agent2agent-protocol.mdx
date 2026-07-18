@@ -1,0 +1,136 @@
+---
+title: "Agent2Agent Protocol (A2A)"
+description: "The open, vendor-neutral protocol that lets independently-built AI agents discover each other's capabilities, delegate tasks, and exchange results — now under Linux Foundation governance with production adoption at scale."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["agents", "a2a", "protocols", "multi-agent"]
+prerequisites: ["Model Context Protocol (MCP)", "Multi-Agent Systems"]
+---
+
+## Intuition
+
+MCP solves how one agent talks to a *tool*. A2A solves a related but distinct problem: how one autonomous agent talks to *another autonomous agent* — potentially built by a different team, on a different framework, with no shared code and no visibility into the other's internal reasoning. Without a shared protocol, every pair of interoperating agents needs its own bespoke integration, the same $M \times N$ problem MCP solved for agent-to-tool, just one layer up.
+
+<Callout type="tip" title="The one-sentence idea">
+  A2A is an open protocol for agent-to-agent interoperability: agents publish "Agent Cards" describing their capabilities so other agents can discover them, then communicate through a standardized task lifecycle (submit a task, get status updates, exchange artifacts) without either side needing to know how the other is implemented internally.
+</Callout>
+
+## Origin and Governance
+
+A2A was introduced by Google in April 2025 as an open protocol for cross-vendor agent interoperability. On June 23, 2025, Google donated A2A to the **Linux Foundation**, establishing it as an independently-governed Agent2Agent Protocol Project rather than a single-vendor standard — mirroring the same move toward neutral, multi-vendor stewardship that MCP made under the Agentic AI Foundation.
+
+<Callout type="warning" title="Fast-moving governance and adoption numbers">
+  As of this page's last-verified date, A2A has reported reaching v1.0 with signed Agent Cards and an extension mechanism (v1.0.1), 22,000+ GitHub stars, SDKs across five languages (Python, JavaScript, Java, Go, .NET), and 150+ organizations reported in production. Treat specific adoption figures and version numbers as a snapshot — check the Linux Foundation's Agent2Agent Protocol project page and the official spec for current status before building against it.
+</Callout>
+
+## What A2A Actually Standardizes
+
+<ComparisonTable
+  headers={["Capability", "What it means"]}
+  rows={[
+    ["Agent Cards", "A published, machine-readable (JSON-based) description of an agent's capabilities, skills, and endpoint — lets a calling agent discover what a remote agent can do before invoking it, similar in spirit to an API's OpenAPI spec"],
+    ["Task lifecycle management", "A standardized state machine for a delegated task — submitted, working, input-required, completed, failed — so a calling agent can track a long-running task on a remote agent without polling ad hoc or guessing at status semantics"],
+    ["Artifact exchange", "A structured way for the responding agent to return results (documents, structured data, files) back to the calling agent as part of the task lifecycle, rather than an unstructured text blob"],
+    ["Streaming & push updates", "Support for incremental status/result updates on long-running tasks, rather than only a single request/response round trip"],
+  ]}
+/>
+
+<Mermaid chart={`
+graph LR
+  A["Calling Agent"] -->|"1. Discover capabilities"| Card["Agent Card"]
+  A -->|"2. Submit task"| B["Remote Agent"]
+  B -->|"3. Status updates (working / input-required / completed)"| A
+  B -->|"4. Return artifacts"| A
+`} />
+
+## A2A vs. MCP
+
+These two protocols are frequently confused because both are "agent protocols," but they standardize different relationships:
+
+<ComparisonTable
+  headers={["", "MCP", "A2A"]}
+  rows={[
+    ["Relationship standardized", "Agent ↔ tool/data server", "Agent ↔ agent"],
+    ["Typical unit exposed", "Tools, Resources, Prompts (a server's capabilities)", "An Agent Card describing a whole agent's skills and how to invoke it"],
+    ["Interaction shape", "Discrete function calls with structured arguments and returns", "A task lifecycle — submit, track status over time, receive artifacts, potentially over a longer-running interaction"],
+    ["Governance", "Agentic AI Foundation (Linux Foundation directed fund), donated by Anthropic Dec 2025", "Agent2Agent Protocol Project (Linux Foundation), donated by Google June 2025"],
+    ["Complementary, not competing", "An agent still needs MCP to call its own tools", "The same agent can expose itself to *other* agents via A2A while internally using MCP to reach its tools"],
+  ]}
+/>
+
+The two are designed to compose: an agent built with MCP-based tool access can itself be exposed as an A2A-discoverable agent to other systems, and a multi-agent orchestrator (see [Multi-Agent Systems](/docs/agents/architectures/multi-agent-systems)) may use A2A to delegate a sub-task to an independently-hosted agent while that agent, internally, uses MCP to reach its own tools and data. See [Model Context Protocol (MCP)](/docs/agents/protocols-frameworks/model-context-protocol) for the agent-to-tool side of this layering.
+
+## A Minimal Agent Card Sketch
+
+```json
+{
+  "name": "invoice-processing-agent",
+  "description": "Extracts structured line items from invoice documents and validates them against a purchase order.",
+  "url": "https://agents.example.com/invoice-processor",
+  "version": "1.0.0",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false
+  },
+  "skills": [
+    {
+      "id": "extract-invoice",
+      "description": "Extract structured line items, totals, and vendor info from an invoice document.",
+      "inputModes": ["file/pdf", "text/plain"],
+      "outputModes": ["application/json"]
+    }
+  ]
+}
+```
+
+A calling agent fetches this card, confirms the `extract-invoice` skill matches what it needs, and submits a task referencing that skill — without ever needing to know whether the invoice-processing agent is built on LangGraph, CrewAI, or a custom stack.
+
+<KeyTakeaways items={[
+  "A2A standardizes agent-to-agent interoperability — capability discovery via Agent Cards, a task lifecycle for tracking delegated work, and structured artifact exchange.",
+  "Introduced by Google in April 2025 and donated to the Linux Foundation as an independently-governed project in June 2025, mirroring MCP's move to neutral governance under the Agentic AI Foundation.",
+  "A2A and MCP are complementary, not competing: MCP is agent-to-tool, A2A is agent-to-agent, and a single agent commonly uses both at once (MCP internally, A2A externally).",
+  "Adoption and version numbers here are a snapshot as of this page's last-verified date — check the Linux Foundation's project page for the current spec version and ecosystem status.",
+]} />
+
+## Common Mistakes
+
+- **Assuming A2A replaces MCP**: they address different relationships; an agent that adopts A2A for external interoperability still needs a way (often MCP) to reach its own tools internally.
+- **Treating an Agent Card as a guarantee of behavior**: a card describes advertised capabilities, not a formal contract on output quality or correctness — the calling agent still needs its own validation of returned artifacts.
+- **Ignoring the task lifecycle's intermediate states**: treating a delegated A2A task as a single synchronous call rather than tracking its status transitions can cause a calling agent to time out on or mishandle legitimately long-running remote work.
+- **Building against unstable specifics without checking current governance**: A2A moved organizations once already (Google to Linux Foundation) and continues to version its spec — cite the current spec source rather than a cached understanding when accuracy matters.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What problem does A2A solve that MCP does not?",
+    options: [
+      "A2A lets a model call a Python function directly",
+      "A2A standardizes how one autonomous agent discovers and communicates with another independently-built agent, whereas MCP standardizes how an agent communicates with external tools and data servers",
+      "A2A is a replacement for tool calling entirely",
+      "There is no difference; A2A is simply MCP's successor",
+    ],
+    answerIndex: 1,
+    explanation: "MCP standardizes the agent-to-tool relationship. A2A standardizes a different relationship: agent-to-agent, including capability discovery (Agent Cards), task delegation and lifecycle tracking, and artifact exchange between agents that may be built on entirely different stacks.",
+  },
+  {
+    question: "What organizational change did A2A undergo, and what does it mirror?",
+    options: [
+      "A2A has always been governed by a single company with no changes",
+      "Google donated A2A to the Linux Foundation in June 2025, establishing neutral multi-vendor governance — mirroring MCP's donation from Anthropic to the Agentic AI Foundation (a Linux Foundation directed fund) in December 2025",
+      "A2A was created by the Linux Foundation from scratch with no prior vendor involvement",
+      "A2A merged directly into the MCP specification",
+    ],
+    answerIndex: 1,
+    explanation: "Both major agent protocols moved from single-vendor origins to neutral, Linux-Foundation-adjacent governance: A2A from Google (June 2025) and MCP from Anthropic (December 2025, via the Agentic AI Foundation) — a pattern reflecting the industry's push toward vendor-neutral interoperability standards for agentic AI.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Google Cloud donates A2A to Linux Foundation", venue: "Google Developers Blog", year: 2025, url: "https://developers.googleblog.com/en/google-cloud-donates-a2a-to-linux-foundation/" },
+  { title: "Linux Foundation Launches the Agent2Agent Protocol Project", venue: "Linux Foundation", year: 2025, url: "https://www.linuxfoundation.org/press/linux-foundation-launches-the-agent2agent-protocol-project-to-enable-secure-intelligent-communication-between-ai-agents" },
+  { title: "Agent2Agent (A2A) Protocol — Project Insights", venue: "LFX Insights, Linux Foundation", url: "https://insights.linuxfoundation.org/project/agent2agent-a2a-protocol" },
+]} />

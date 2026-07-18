@@ -1,0 +1,236 @@
+---
+title: "Vector Databases & Similarity Search"
+description: "How approximate nearest neighbor indexes like HNSW and IVF let vector databases search billions of embeddings in milliseconds by deliberately trading a little recall for a lot of speed."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["rag", "retrieval", "vector-databases", "ann", "hnsw"]
+prerequisites: ["Embeddings", "Retrieval-Augmented Generation (RAG)"]
+---
+
+## Intuition
+
+Once you've embedded a corpus into dense vectors, retrieval reduces to a geometry problem: given a query vector, find the $k$ vectors in the corpus closest to it. Brute-force search — compute the distance to every vector, sort — is exact, but it's $O(n)$ per query in the size of the corpus. At a few thousand vectors that's instant. At a billion, it's not: even a fast dot product at that scale means scanning gigabytes of data per query, which is unworkable for interactive latency budgets.
+
+**Vector databases** exist to solve this at scale. Their core trick is **approximate nearest neighbor (ANN) search**: instead of guaranteeing the exact top-$k$, they build an index structure that finds vectors *very likely* to be among the true top-$k$, in time that grows far slower than linearly with corpus size — typically logarithmically or sublinearly. The price is a small, tunable chance of missing a true neighbor.
+
+<Callout type="tip" title="The one-sentence idea">
+  ANN indexing turns "compare against everything" into "compare against a cleverly chosen small subset," accepting a small, controllable recall loss in exchange for orders-of-magnitude faster search.
+</Callout>
+
+## Why Exact Search Doesn't Scale
+
+Exact nearest-neighbor search over $n$ vectors of dimension $d$ costs $O(n \cdot d)$ per query. Worse, in high dimensions (typical embeddings are 384–3072 dimensions), the geometric pruning tricks that make exact search fast in low dimensions — like k-d trees — stop helping: this is the well-known **curse of dimensionality**, where in high-dimensional spaces most points end up roughly equidistant from a query, so spatial partitioning provides little benefit over scanning everything. This is precisely why the field abandoned exact methods for high-dimensional embedding search and standardized on approximate methods instead.
+
+The two dominant ANN index families used in production vector databases are **HNSW** (graph-based) and **IVF** (cluster-based). They make different trade-offs and are worth understanding at the mechanism level, not just as black boxes.
+
+## HNSW: Hierarchical Navigable Small World Graphs
+
+HNSW builds a **multi-layer graph** over the vector set, where each vector is a node and edges connect it to a set of approximate nearest neighbors. The key structural idea is borrowed from *skip lists*: multiple layers, with the top layer sparse (few nodes, long-range edges) and the bottom layer dense (every node, short-range edges).
+
+**Construction.** Vectors are inserted one at a time. Each new vector is randomly assigned a maximum layer $l$ it will appear in, drawn from an exponentially decaying distribution — so most vectors only appear in layer 0, and progressively fewer appear in higher layers. This exponential decay is what makes the structure logarithmic: it mirrors the layer distribution of a skip list. At each layer the vector is connected to its $M$ nearest already-inserted neighbors (found via greedy search within that layer), subject to a heuristic that also preserves graph navigability (avoiding purely greedy edge sets that create disconnected clusters).
+
+**Search.** A query starts at the single entry point in the top (sparsest) layer, greedily walks to the neighbor closest to the query at that layer, and once no neighbor is closer, drops down one layer and repeats — using the layer-0 arrival point as a good starting position for the next layer down. This continues until layer 0, where a wider beam search (tracking `ef` candidates, not just one) collects the final top-$k$ candidates.
+
+$$
+\text{layer}(v) = \lfloor -\ln(\text{uniform}(0,1)) \cdot m_L \rfloor
+$$
+
+The greedy-then-descend pattern is what gives HNSW its near-logarithmic query time: the top layers let the search "teleport" across large distances in vector space quickly, and lower layers refine the answer locally — the same reason skip lists beat linked lists for search.
+
+<Mermaid chart={`
+graph TD
+  subgraph "Layer 2 (sparse, long-range)"
+    A2["entry point"] --> B2["node"]
+  end
+  subgraph "Layer 1"
+    A1["node"] --> B1["node"] --> C1["node"]
+  end
+  subgraph "Layer 0 (dense, all nodes)"
+    A0["node"] --> B0["node"] --> C0["node"] --> D0["node"] --> E0["node"]
+  end
+  A2 -.->|"descend"| A1
+  B1 -.->|"descend"| C0
+`} />
+
+## IVF: Inverted File Index
+
+IVF takes a different approach: **cluster first, then search only relevant clusters.**
+
+**Construction (training step).** Run $k$-means (or a similar clustering algorithm) over a sample of the corpus to learn $n_{\text{list}}$ centroids. Every vector in the corpus is then assigned to its nearest centroid, and an inverted list (a simple array/bucket) is built per centroid holding the IDs of all vectors assigned to it. Unlike HNSW, this requires an explicit training phase before any vectors can be indexed — the centroids must exist first.
+
+**Search.** Given a query, compute its distance to all $n_{\text{list}}$ centroids, take the $n_{\text{probe}}$ closest centroids, and exhaustively (or with a secondary quantized index, in the IVF-PQ variant) search only the vectors in those clusters' inverted lists — ignoring everything else in the corpus entirely.
+
+$$
+\text{candidates}(q) = \bigcup_{c \,\in\, \text{top-}n_{\text{probe}}(q,\, \text{centroids})} \text{list}(c)
+$$
+
+Increasing $n_{\text{probe}}$ trades latency for recall: probing more clusters catches more true neighbors that happen to sit near a cluster boundary, at the cost of scanning more vectors.
+
+IVF is very often paired with **product quantization (PQ)**, which compresses each vector into a short code (a concatenation of sub-vector cluster indices) so the inverted lists themselves take a fraction of the memory of raw float vectors — this is the basis of the popular IVF-PQ / IVFFlat variants.
+
+## HNSW vs. IVF
+
+<ComparisonTable
+  headers={["Property", "HNSW", "IVF (+ PQ)"]}
+  rows={[
+    ["Structure", "Multi-layer proximity graph", "Flat clustering + inverted lists"],
+    ["Build step", "Incremental — insert vectors one at a time, no separate training phase", "Requires a training/clustering phase before insertion (learn centroids)"],
+    ["Query complexity", "Roughly logarithmic in corpus size", "Roughly linear in n_probe × average cluster size"],
+    ["Memory footprint", "High — stores full vectors plus graph edges per node", "Low, especially with PQ compression — main reason it's preferred at massive scale"],
+    ["Recall / latency", "Generally higher recall at comparable latency", "More tunable via n_probe, but typically needs more tuning to match HNSW recall"],
+    ["Updates (inserts/deletes)", "Supports incremental insertion reasonably well", "Reassigning clusters after heavy drift may require re-training centroids"],
+  ]}
+/>
+
+In short: HNSW tends to win on the recall/latency frontier and needs no training step, at the cost of memory; IVF (especially with PQ) is far more memory-efficient and scales to bigger corpora on the same hardware, at the cost of a training phase and generally more careful tuning to hit the same recall. Many production systems (including Faiss, Milvus, and others) support both, and some combine them (IVF for coarse routing, small per-cluster HNSW or flat search for the fine pass).
+
+## The Recall–Latency Trade-off
+
+Every ANN index exposes at least one knob that trades recall for latency: `ef`/`efSearch` in HNSW, `n_probe` in IVF. This is fundamental, not incidental — approximate search is a Pareto frontier problem, not a solved problem with one right answer:
+
+- Increasing the search budget (`ef`, `n_probe`) examines more of the graph/more clusters, increasing recall of true top-$k$ neighbors, but adds latency and compute per query.
+- Decreasing it makes queries faster and cheaper but increases the chance of missing a true near neighbor.
+
+There is no universally "correct" setting — it depends on your application's latency budget and how much retrieval-quality loss the downstream LLM (or ranking system) can tolerate before answer quality visibly degrades. Production teams typically tune this empirically against a labeled recall@k benchmark for their specific embedding space and corpus.
+
+## The Vector Database Landscape (as of 2026)
+
+The space has matured into a few recognizable categories rather than one clear winner:
+
+- **Fully managed cloud services** (e.g. Pinecone) prioritize operational simplicity — no infrastructure to run, automatic scaling — at the cost of being closed-source and billed per-usage.
+- **Purpose-built open-source engines** (e.g. Milvus, Qdrant, Weaviate) implement dedicated ANN index structures (commonly HNSW, IVF, or both) with query planners optimized for vector workloads, and are self-hostable or available managed. Qdrant is written in Rust and is frequently benchmarked as one of the faster open-source options; Weaviate is often highlighted for strong native hybrid (vector + keyword) search; Milvus is commonly used at very large (billion-vector) scale.
+- **Extensions to existing databases** (e.g. `pgvector` for PostgreSQL) add ANN indexing (IVFFlat and HNSW index types) directly inside a database you likely already operate — trading some raw ANN performance at extreme scale for the ability to do SQL joins, transactions, and metadata filtering against embeddings in the same system, which is attractive for small-to-mid-size corpora.
+
+No single system is unambiguously "best" — the right choice depends on scale, whether you want managed vs. self-hosted operations, how important native hybrid search is, and whether unifying vectors with your existing relational data outweighs the performance ceiling of a purpose-built engine. See also [Hybrid Search & Reranking](/docs/retrieval-knowledge/rag/hybrid-search-reranking) for how these indexes combine with sparse retrieval, and [Retrieval-Augmented Generation (RAG)](/docs/retrieval-knowledge/rag/retrieval-augmented-generation) for how vector search fits into the broader RAG pipeline.
+
+## Minimal Implementation Sketch
+
+The snippet below sketches the *idea* of HNSW's greedy layered search (not a production-grade implementation — real libraries like `hnswlib` and `faiss` handle edge cases, concurrency, and heuristic edge selection carefully):
+
+```python
+import numpy as np
+import random
+
+class TinyHNSW:
+    """A simplified sketch of HNSW's layered greedy search — not production code."""
+
+    def __init__(self, m: int = 8, m_l: float = 1 / np.log(2)):
+        self.m = m               # max neighbors per node per layer
+        self.m_l = m_l           # layer-assignment decay factor
+        self.layers: list[dict[int, list[int]]] = [{}]  # layers[l][node_id] -> neighbor ids
+        self.vectors: dict[int, np.ndarray] = {}
+        self.entry_point: int | None = None
+
+    def _random_layer(self) -> int:
+        return int(-np.log(random.random()) * self.m_l)
+
+    def _dist(self, a: np.ndarray, b: np.ndarray) -> float:
+        return float(np.linalg.norm(a - b))
+
+    def _greedy_search_layer(self, query: np.ndarray, entry: int, layer: int) -> int:
+        current = entry
+        current_dist = self._dist(query, self.vectors[current])
+        while True:
+            neighbors = self.layers[layer].get(current, [])
+            best = min(
+                neighbors, key=lambda n: self._dist(query, self.vectors[n]), default=None
+            )
+            if best is None or self._dist(query, self.vectors[best]) >= current_dist:
+                return current
+            current, current_dist = best, self._dist(query, self.vectors[best])
+
+    def insert(self, node_id: int, vector: np.ndarray) -> None:
+        self.vectors[node_id] = vector
+        top_layer = self._random_layer()
+        while len(self.layers) <= top_layer:
+            self.layers.append({})
+
+        if self.entry_point is None:
+            self.entry_point = node_id
+            for l in range(top_layer + 1):
+                self.layers[l].setdefault(node_id, [])
+            return
+
+        entry = self.entry_point
+        for l in reversed(range(len(self.layers))):
+            entry = self._greedy_search_layer(vector, entry, l)
+            if l <= top_layer:
+                self.layers[l].setdefault(node_id, []).append(entry)
+                self.layers[l].setdefault(entry, []).append(node_id)
+
+    def search(self, query: np.ndarray, k: int = 5) -> list[int]:
+        entry = self.entry_point
+        for l in reversed(range(1, len(self.layers))):
+            entry = self._greedy_search_layer(query, entry, l)
+        # widen at layer 0 to collect k candidates (simplified: BFS a few hops)
+        frontier = {entry}
+        visited = set(frontier)
+        while len(visited) < k * 4 and frontier:
+            next_frontier = set()
+            for node in frontier:
+                for n in self.layers[0].get(node, []):
+                    if n not in visited:
+                        next_frontier.add(n)
+                        visited.add(n)
+            frontier = next_frontier
+        return sorted(visited, key=lambda n: self._dist(query, self.vectors[n]))[:k]
+```
+
+<KeyTakeaways items={[
+  "Exact nearest-neighbor search doesn't scale past a few thousand-to-million vectors at interactive latency — the curse of dimensionality defeats classical exact-search pruning tricks in high dimensions.",
+  "HNSW builds a multi-layer proximity graph and searches it greedily top-down, giving near-logarithmic query time at the cost of higher memory usage and no training phase required.",
+  "IVF clusters vectors first (via k-means-like training) and restricts search to the nearest clusters' inverted lists, trading some recall/tuning complexity for much lower memory — especially when paired with product quantization.",
+  "Every ANN index exposes a recall/latency knob (ef in HNSW, n_probe in IVF) — there is no universally correct setting, only a Pareto frontier to tune against your application's requirements.",
+  "The vector database landscape has no single 'best' choice — managed services (Pinecone), purpose-built engines (Milvus, Qdrant, Weaviate), and database extensions (pgvector) each optimize for different operational trade-offs.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "ANN indexes make billion-scale semantic search computationally tractable at interactive latencies.",
+    "Recall/latency trade-offs are explicit and tunable (ef, n_probe), not fixed — you can dial in the right operating point for your application.",
+    "Modern vector databases bundle metadata filtering, hybrid search, and horizontal scaling alongside the core ANN index.",
+  ]}
+  cons={[
+    "Treating an ANN index as if it guarantees exact top-k results — it doesn't, and low ef/n_probe settings can silently drop the single most relevant document.",
+    "Choosing HNSW by default without considering memory cost at very large scale, where IVF-PQ's compression can be the difference between fitting in RAM and not.",
+    "Forgetting that IVF requires a representative training sample for its centroids — training on a skewed subset of the corpus produces clusters that don't generalize to the full dataset's distribution.",
+    "Ignoring that recall must be benchmarked against your own embedding space and corpus — published benchmarks on public datasets don't transfer perfectly to a different domain's vector distribution.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does HNSW achieve roughly logarithmic search time instead of linear?",
+    options: [
+      "Because it stores vectors in sorted order by magnitude",
+      "Because it builds a multi-layer graph where sparse upper layers let a query jump across large distances quickly before descending to denser layers for local refinement, mirroring how a skip list beats a linked list",
+      "Because it compresses vectors before comparing them",
+      "Because it only ever searches a single fixed layer",
+    ],
+    answerIndex: 1,
+    explanation: "HNSW's layer structure is directly analogous to a skip list: an exponentially decaying probability of appearing in higher layers means top layers are sparse and allow long jumps, while greedy search descends layer by layer, refining locally — giving near-logarithmic query time without needing to scan the whole graph.",
+  },
+  {
+    question: "What is the key structural difference between IVF and HNSW that leads to IVF's lower memory footprint?",
+    options: [
+      "IVF stores vectors in a flat clustering with inverted lists (often further compressed via product quantization), rather than a graph with explicit per-node edges — no edge lists to store",
+      "IVF doesn't store the actual vectors at all",
+      "HNSW requires training on a labeled dataset while IVF does not",
+      "There is no real difference in memory usage between the two",
+    ],
+    answerIndex: 0,
+    explanation: "HNSW must store, per node, both the vector and a set of graph edges at every layer it appears in, which adds up at scale. IVF stores vectors (or compressed PQ codes) in flat per-cluster inverted lists with no graph edges to maintain, which is why IVF-PQ is the go-to choice when memory is the binding constraint at very large scale.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs", authors: "Malkov, Y. A. & Yashunin, D. A.", venue: "IEEE TPAMI", year: 2016, url: "https://arxiv.org/abs/1603.09320" },
+  { title: "From Local to Global: A Graph RAG Approach to Query-Focused Summarization", authors: "Edge, D. et al.", venue: "arXiv preprint", year: 2024, url: "https://arxiv.org/abs/2404.16130" },
+]} />

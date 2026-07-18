@@ -1,0 +1,185 @@
+---
+title: "AWS for ML (SageMaker, Bedrock)"
+description: "Why AWS splits machine learning into two architecturally distinct product lines — build-your-own infrastructure with SageMaker versus call-a-hosted-model with Bedrock — and how to decide which one a workload actually needs."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["mlops", "cloud", "aws", "sagemaker", "bedrock", "foundation-models"]
+prerequisites: ["Retrieval-Augmented Generation (RAG)", "MLOps fundamentals"]
+---
+
+## Intuition
+
+"AWS for ML" is not one product, it's a spectrum, and the two anchor points on that spectrum — **SageMaker** and **Bedrock** — solve genuinely different problems. Confusing them is the single most common architectural mistake teams make when starting on AWS.
+
+**SageMaker** exists for teams that need to control the model itself: training a custom model from scratch or fine-tuning one on proprietary data, choosing the exact compute, and owning the full training-to-serving lifecycle. **Bedrock** exists for teams that don't want to own any of that — they want to call a frontier foundation model (from Anthropic, Meta, Mistral, Amazon's own Nova family, and others) through one HTTP API and let AWS manage the serving infrastructure entirely.
+
+<Callout type="tip" title="The one-sentence idea">
+  SageMaker is a managed platform for *building and operating your own model infrastructure* (bring code, own the container, own the endpoint); Bedrock is a managed API for *renting inference against someone else's already-trained foundation model* — the architectural decision is whether your differentiation lives in the model weights or in what you build around a model you don't own.
+</Callout>
+
+## Two Architectures, Not One Product
+
+<Mermaid chart={`
+graph TD
+  subgraph SageMaker["SageMaker: build your own model infra"]
+    Data["Your training data"] --> Train["SageMaker Training Job\n(custom container or built-in algo)"]
+    Train --> Registry["Model Registry"]
+    Registry --> Endpoint["SageMaker Endpoint\n(real-time / serverless / batch / async)"]
+    Train -.-> Pipe["SageMaker Pipelines\n(CI/CD for the ML lifecycle)"]
+    Endpoint --> Monitor["Model Monitor\n(drift / bias detection)"]
+  end
+  subgraph Bedrock["Bedrock: call a hosted foundation model"]
+    App["Your application"] --> API["Bedrock InvokeModel API"]
+    API --> FM["Foundation model\n(Anthropic, Meta, Mistral, Amazon Nova, ...)"]
+    App --> KB["Bedrock Knowledge Bases\n(managed RAG)"]
+    App --> Agents["Bedrock Agents / AgentCore\n(tool use, orchestration)"]
+    App --> GR["Bedrock Guardrails\n(safety filtering)"]
+  end
+`} />
+
+The two are not competitors within AWS's own lineup — they're complementary, and mature AWS ML architectures typically use both: SageMaker for a proprietary tabular fraud model, Bedrock for the customer-facing chat layer sitting on top of it.
+
+### SageMaker: own the training-to-serving lifecycle
+
+SageMaker is best understood as *managed infrastructure for the classic ML lifecycle*, not a single tool:
+
+- **Training jobs** run your training script (or a built-in algorithm) on managed compute you select, including **SageMaker HyperPod**, which provisions resilient clusters designed to automatically recover from hardware failures during long, expensive distributed training runs — a real pain point once training jobs span many days across hundreds of GPUs.
+- **Inference** supports multiple serving patterns: real-time endpoints for low-latency synchronous requests, serverless endpoints for spiky/intermittent traffic, batch transform for offline scoring, and asynchronous endpoints for large payloads with relaxed latency needs. An **inference pipeline** chains up to fifteen containers (preprocessing → model → postprocessing) behind a single endpoint.
+- **SageMaker Pipelines** orchestrates the full lifecycle — data prep, training, evaluation, conditional deployment — as a versioned, auditable CI/CD workflow, authorable via SDK, API, or a visual drag-and-drop editor in SageMaker Studio.
+- **Model Monitor** watches deployed endpoints for data drift, concept drift, and bias, closing the loop between "we shipped a model" and "we know when it's degrading."
+
+The unifying theme: every step is a managed AWS service, but you still own the model artifact, the training code, and the decision of what gets deployed. That control is the point — and the cost.
+
+### Bedrock: rent inference on models you don't own
+
+Bedrock's core promise is a **single unified API** in front of foundation models from multiple providers, with no infrastructure to provision and no minimum commitment. As of 2026, the catalog spans text, vision, audio, and code models from Anthropic, Meta, Mistral, Amazon's own Nova family, and several other providers, reflecting a shift from Bedrock's original text-first scope toward a broadly multimodal one.
+
+Around the raw `InvokeModel` call, Bedrock layers managed application-building blocks so teams don't have to hand-roll them:
+
+- **Knowledge Bases** — a managed RAG pipeline: point it at a data source (e.g. S3), and Bedrock handles chunking, embedding, vector storage, and retrieval-augmented prompting, without your team standing up a vector database. See [Retrieval-Augmented Generation (RAG)](/docs/retrieval-knowledge/rag/retrieval-augmented-generation) for the underlying mechanics this replaces.
+- **Agents / AgentCore** — managed orchestration for tool-calling and multi-step agentic workflows against a chosen foundation model.
+- **Guardrails** — configurable content-filtering and hallucination-mitigation policies applied consistently across models and applications.
+- **Custom Model Import / fine-tuning** — for teams that want a foundation model adapted to their domain without owning general-purpose training infrastructure, Bedrock supports importing custom weights or fine-tuning selected models while keeping the same serverless invocation API.
+
+The trade-off for all this convenience is reduced control: you don't choose the underlying training data, you're bound by the provider's rate limits and model versioning cadence, and deep architectural changes to the model itself are simply not available to you.
+
+## Deciding Which One You Need
+
+<ComparisonTable
+  headers={["Question", "Points toward SageMaker", "Points toward Bedrock"]}
+  rows={[
+    ["Where is your competitive edge?", "In proprietary model weights trained on data no one else has", "In the product/workflow built around a capable general-purpose model"],
+    ["Model type", "Classic ML (tabular, forecasting, custom vision/NLP architectures)", "General-purpose text/vision/audio generation and reasoning"],
+    ["Who owns training?", "You do — full control over architecture, data, hyperparameters", "The foundation model provider — you consume, optionally fine-tune"],
+    ["Time to first deployment", "Weeks (data prep, training, tuning, endpoint config)", "Hours to days (an API call away)"],
+    ["Ongoing operational burden", "You own drift monitoring, retraining cadence, endpoint scaling", "Provider owns model quality and infra scaling; you own prompt/RAG quality"],
+    ["Cost model", "Pay for training + hosting compute, whether or not it's fully utilized", "Pay per token/request — scales with usage, no idle infrastructure cost"],
+  ]}
+/>
+
+## A Minimal Example of Each
+
+```python
+# SageMaker: launch a training job and deploy a custom model
+import sagemaker
+from sagemaker.sklearn.estimator import SKLearn
+
+session = sagemaker.Session()
+role = "arn:aws:iam::123456789012:role/SageMakerExecutionRole"
+
+estimator = SKLearn(
+    entry_point="train.py",
+    role=role,
+    instance_type="ml.m5.xlarge",
+    framework_version="1.2-1",
+    hyperparameters={"n_estimators": 200, "max_depth": 8},
+)
+estimator.fit({"train": "s3://my-bucket/training-data/"})
+
+predictor = estimator.deploy(
+    initial_instance_count=1,
+    instance_type="ml.m5.large",
+)
+result = predictor.predict(sample_features)
+```
+
+```python
+# Bedrock: call a hosted foundation model, no infrastructure owned
+import boto3
+import json
+
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+
+response = bedrock.invoke_model(
+    modelId="anthropic.claude-sonnet-4-5-20250929-v1:0",
+    body=json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 512,
+        "messages": [{"role": "user", "content": "Summarize this incident report: ..."}],
+    }),
+)
+output = json.loads(response["body"].read())
+```
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Using Bedrock for generic natural-language tasks avoids months of MLOps engineering that would only replicate what a foundation model already does well.",
+    "Using SageMaker for genuinely proprietary, structured-data problems (fraud scoring, demand forecasting) gives control that no hosted foundation model API can match, since no external model was trained on that specific data.",
+    "Combining both — Bedrock for the conversational layer, SageMaker for a domain-specific scoring model behind it — is a normal, well-supported production pattern, not an anti-pattern.",
+]}
+  cons={[
+    "Standing up SageMaker training/hosting infrastructure for a task a foundation model already solves (e.g. general summarization) burns engineering time for no accuracy gain.",
+    "Treating Bedrock as a substitute for structured-data ML — trying to prompt a foundation model into replicating what a gradient-boosted tree does natively on tabular data — usually underperforms and costs more per prediction.",
+    "Forgetting that Bedrock's model catalog and versions change on the provider's schedule, not yours — production systems need to pin model versions explicitly rather than floating on 'latest'.",
+    "Underestimating SageMaker's operational surface: training jobs, endpoints, pipelines, and monitors are each separately billed and separately configured — it is a platform to operate, not a single button.",
+]}
+/>
+
+<KeyTakeaways items={[
+  "SageMaker and Bedrock answer different questions: 'how do I build and operate my own model?' versus 'how do I call someone else's already-trained model reliably?'",
+  "SageMaker's value is control over the full training-to-serving lifecycle (HyperPod for training, multiple endpoint types for serving, Pipelines for CI/CD, Model Monitor for drift) — at the cost of owning that lifecycle operationally.",
+  "Bedrock's value is a single unified API across foundation models from multiple providers, plus managed RAG (Knowledge Bases), agent orchestration, and safety filtering (Guardrails) — at the cost of not owning the underlying model.",
+  "Production architectures on AWS routinely use both together rather than choosing one exclusively.",
+]} />
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "A team needs to detect fraudulent transactions using ten years of proprietary transaction history with hundreds of engineered features. Which AWS service is architecturally the better fit, and why?",
+    options: [
+      "Bedrock, because foundation models handle all data types including tabular data equally well",
+      "SageMaker, because the value here is in a custom model trained on proprietary structured data that no hosted foundation model has ever seen",
+      "Bedrock, because it requires no infrastructure to manage",
+      "Neither — fraud detection cannot be done in the cloud",
+    ],
+    answerIndex: 1,
+    explanation: "This is a classic structured-data ML problem where the competitive edge is the proprietary feature-engineered dataset, not general language or reasoning ability. SageMaker's training and hosting lifecycle is built exactly for this; a foundation model API has no access to this data and isn't optimized for tabular prediction.",
+  },
+  {
+    question: "What does Amazon Bedrock's 'unified API' architecture primarily let a customer avoid managing?",
+    options: [
+      "Prompt engineering and RAG design",
+      "The underlying serving infrastructure and provider-specific integration code for each foundation model",
+      "Any form of cost, since Bedrock is free",
+      "The need to choose which foundation model to use",
+    ],
+    answerIndex: 1,
+    explanation: "Bedrock's core value proposition is that customers call one consistent API to reach foundation models from multiple providers, with AWS managing the serving infrastructure behind each — customers still design prompts, RAG pipelines, and pay per request, but they don't provision or operate GPU serving infrastructure per model.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Amazon SageMaker AI — the center for data, analytics, and AI", venue: "AWS Documentation", year: 2026, url: "https://aws.amazon.com/sagemaker/" },
+  { title: "Workflows for Machine Learning — Amazon SageMaker Pipelines", venue: "AWS Documentation", year: 2026, url: "https://aws.amazon.com/sagemaker/ai/pipelines/" },
+  { title: "Inference pipelines in Amazon SageMaker AI", venue: "AWS Documentation", year: 2026, url: "https://docs.aws.amazon.com/sagemaker/latest/dg/inference-pipelines.html" },
+  { title: "Amazon Bedrock — Build genAI applications and agents at production scale", venue: "AWS Documentation", year: 2026, url: "https://aws.amazon.com/bedrock/" },
+  { title: "Amazon Bedrock Knowledge Bases", venue: "AWS Documentation", year: 2026, url: "https://aws.amazon.com/bedrock/knowledge-bases/" },
+  { title: "Amazon Bedrock Guardrails", venue: "AWS Documentation", year: 2026, url: "https://aws.amazon.com/bedrock/guardrails/" },
+  { title: "Amazon Bedrock Model Choice", venue: "AWS Documentation", year: 2026, url: "https://aws.amazon.com/bedrock/model-choice/" },
+]} />

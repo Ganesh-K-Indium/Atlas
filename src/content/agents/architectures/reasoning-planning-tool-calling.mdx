@@ -1,0 +1,150 @@
+---
+title: "Reasoning, Planning & Tool Calling"
+description: "How an LLM agent decides what to do next — interleaved reasoning-and-acting versus upfront planning, and the mechanics that let a model actually touch the outside world."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["agents", "reasoning", "planning", "tool-calling", "react"]
+prerequisites: ["Prompting fundamentals", "Function/tool calling basics", "Chain-of-thought prompting"]
+---
+
+## Intuition
+
+A language model that only produces text is a very capable autocomplete. An *agent* is that same model wired into a loop where it can also act — query a database, call an API, run code — observe what happened, and decide what to do next. The interesting design question isn't "can the model call a tool," it's **how the model's reasoning and its actions are sequenced**: does it think through the whole plan up front, or does it think a little, act a little, and let real observations steer the next thought?
+
+<Callout type="tip" title="The one-sentence idea">
+  ReAct interleaves reasoning and acting one step at a time so each action is informed by the latest observation; plan-and-execute frameworks commit to a multi-step plan first and only revise it when execution reveals a problem. Both ultimately rely on the same underlying mechanism — structured tool calling — to actually touch the world.
+</Callout>
+
+## The ReAct Pattern
+
+ReAct ("**Rea**soning + **Act**ing"), introduced by Yao et al. (2022), prompts the model to produce an explicit interleaved trace: a **Thought** (free-text reasoning about what to do next), an **Action** (a tool call, formatted so the host can parse and execute it), an **Observation** (the tool's result, inserted back into context), and then another Thought — repeating until the model emits a final answer.
+
+$$
+\text{Thought}_1 \to \text{Action}_1 \to \text{Observation}_1 \to \text{Thought}_2 \to \text{Action}_2 \to \text{Observation}_2 \to \cdots \to \text{Answer}
+$$
+
+The key property is that reasoning and acting are **mutually grounding**: the reasoning trace helps the model decide which action makes sense, and the observation from each action gives the next reasoning step something real to condition on — rather than the model hallucinating what a tool's result "probably" would be. This tends to reduce compounding errors compared to chain-of-thought alone, because the model can't drift far off course without a real observation checking it at every step.
+
+```python
+# Minimal from-scratch ReAct loop sketch (illustrative, not a specific framework's API)
+def react_loop(llm, tools: dict, question: str, max_steps: int = 6) -> str:
+    scratchpad = f"Question: {question}\n"
+    for _ in range(max_steps):
+        response = llm.generate(
+            prompt=REACT_PROMPT_TEMPLATE.format(scratchpad=scratchpad),
+            stop=["Observation:"],
+        )
+        scratchpad += response  # appends "Thought: ...\nAction: tool_name[args]"
+
+        if "Final Answer:" in response:
+            return response.split("Final Answer:")[-1].strip()
+
+        tool_name, args = parse_action(response)
+        observation = tools[tool_name](args)
+        scratchpad += f"Observation: {observation}\n"
+
+    return "Max steps reached without a final answer."
+```
+
+## Plan-and-Execute: Committing to a Plan Upfront
+
+An alternative architecture separates planning from execution into two distinct phases. A **planner** call (often a stronger or more carefully prompted model) first decomposes the task into an explicit multi-step plan — "1. Look up X, 2. Compute Y from X, 3. Compare Y to Z" — before any tool has been touched. An **executor** then works through the plan step by step, optionally re-planning if a step's result invalidates a later one.
+
+<Mermaid chart={`
+graph TD
+  subgraph ReAct["ReAct: interleaved"]
+    T1["Thought"] --> A1["Action"] --> O1["Observation"] --> T2["Thought"] --> A2["Action"] --> O2["Observation"] --> F1["Answer"]
+  end
+  subgraph PlanExec["Plan-and-Execute: upfront plan"]
+    P["Planner: full multi-step plan"] --> E1["Execute step 1"] --> E2["Execute step 2"] --> E3["Execute step 3"] --> F2["Answer"]
+    E2 -.->|"result invalidates plan"| P
+  end
+`} />
+
+Plan-and-execute trades away ReAct's step-by-step responsiveness for a plan the developer (and the model) can inspect, critique, or edit before any side-effecting action runs — valuable when actions are expensive, irreversible, or need a human sign-off before execution. It also lets the executor be a cheaper/faster model than the planner, since executing an already-decided step needs less reasoning than deciding what to do next from scratch.
+
+<ComparisonTable
+  headers={["Dimension", "ReAct (interleaved)", "Plan-and-Execute (upfront)"]}
+  rows={[
+    ["When the plan is fixed", "Never fully fixed — reconsidered after every observation", "Fixed before execution begins, optionally revised on failure"],
+    ["Responsiveness to surprises", "High — each step reacts to the latest real observation", "Lower — a bad early assumption can propagate until re-planning triggers"],
+    ["Inspectability / human review", "Harder to review before acting — actions happen as reasoning unfolds", "Easier — the full plan can be shown to a human or validator before execution"],
+    ["Cost pattern", "One model call per step, same model throughout typically", "Can split cheap execution from an expensive planning call"],
+    ["Best fit", "Exploratory tasks (search, debugging) where each step depends on the last", "Tasks with expensive/irreversible actions, or where a reviewable plan matters"],
+  ]}
+/>
+
+## Tool-Calling Mechanics
+
+Both patterns above rely on the same underlying capability: the model needs a reliable way to invoke a function and receive its result back into context. Modern tool calling works like this:
+
+1. **Schema declaration**: the host describes each available tool with a name, natural-language description, and a typed argument schema (usually JSON Schema) — this is passed to the model alongside the conversation, not baked into the prompt as free text.
+2. **Structured emission**: instead of writing prose, the model emits a structured call (e.g. a JSON object naming the tool and its arguments) when it decides a tool is needed. Providers typically train models specifically to emit this format reliably and to know when *not* to call a tool.
+3. **Host-side execution**: the *host application*, not the model, actually executes the call — running the code, hitting the API, querying the database. The model never directly touches the outside world; it only ever emits an intent to act.
+4. **Result injection**: the tool's return value is serialized and inserted back into the conversation as an observation, and generation continues from there.
+
+This separation of "model decides/describes" from "host executes" is what makes tool calling safe to gate: a host can validate arguments, ask for human confirmation on risky calls, or simply refuse to run a requested tool, all without the model having any lower-level access itself. It's also the same execution boundary that protocols like [MCP](/docs/agents/protocols-frameworks/model-context-protocol) standardize at scale — MCP doesn't change this basic mechanic, it standardizes how the tool schemas are discovered and where the host sends the call.
+
+<KeyTakeaways items={[
+  "ReAct interleaves Thought → Action → Observation at each step, letting real tool results steer subsequent reasoning rather than committing to a plan in advance.",
+  "Plan-and-execute architectures generate a full multi-step plan upfront and then execute it, trading step-by-step responsiveness for an inspectable, reviewable plan.",
+  "Tool calling has four parts: schema declaration, structured emission by the model, host-side execution, and result injection back into context — the model never executes anything directly.",
+  "Neither pattern is strictly superior: ReAct suits exploratory tasks where each step depends on the last; plan-and-execute suits tasks with expensive or irreversible actions that benefit from review before execution.",
+]} />
+
+## Common Mistakes
+
+- **Treating the reasoning trace as free**: every Thought is still tokens the model generates and the host pays for and re-sends each turn; unbounded reasoning traces blow up context and latency.
+- **No loop termination guarantee**: a ReAct loop with no max-step cap or explicit "give up" condition can spin indefinitely if the model never emits a final answer — always cap steps and handle the failure path.
+- **Assuming plan-and-execute plans are static**: real-world tasks often invalidate step 3 of a plan by the time step 1 finishes; a plan-and-execute system with no re-planning trigger will happily execute a stale plan.
+- **Conflating "the model called a tool" with "the tool ran safely"**: without host-side argument validation and, for risky actions, human confirmation, structured tool calling is just as capable of causing damage as any other code path — the structure doesn't imply safety.
+
+<ProsCons
+  pros={[
+    "ReAct grounds each reasoning step in a real observation, reducing hallucinated intermediate 'facts.'",
+    "Plan-and-execute produces an artifact (the plan) that can be reviewed, logged, or gated before any action runs.",
+    "Standardized tool-calling schemas let the same reasoning loop work across many different tools without custom parsing per tool.",
+  ]}
+  cons={[
+    "ReAct traces can be verbose and costly at scale, and provide no natural checkpoint for human review before acting.",
+    "Plan-and-execute is vulnerable to early planning mistakes propagating silently until a re-planning step catches them.",
+    "Both approaches are bounded by the model's tool-selection judgment — a well-specified schema doesn't guarantee the model picks the right tool or the right arguments.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What is the core structural difference between ReAct and a plan-and-execute agent?",
+    options: [
+      "ReAct never uses tools, while plan-and-execute always does",
+      "ReAct interleaves one reasoning-and-action step at a time, reacting to each observation before deciding the next step; plan-and-execute generates a full multi-step plan before executing any of it",
+      "Plan-and-execute is only usable with smaller models",
+      "There is no meaningful difference — they describe the same architecture",
+    ],
+    answerIndex: 1,
+    explanation: "ReAct's Thought → Action → Observation loop means each step is decided with the latest real-world observation in hand. Plan-and-execute separates planning (decide the whole sequence of steps) from execution (carry it out), only revisiting the plan if something invalidates it.",
+  },
+  {
+    question: "In modern tool-calling mechanics, who actually executes the requested function?",
+    options: [
+      "The model itself, via an internal sandboxed interpreter",
+      "The host application, after the model emits a structured call describing the intended tool and arguments",
+      "A separate fine-tuned 'executor model' that is always required",
+      "Execution happens automatically inside the tool's JSON schema definition",
+    ],
+    answerIndex: 1,
+    explanation: "The model only ever emits a structured description of the call it wants made — a JSON object naming the tool and arguments. The host application is responsible for validating and actually executing that call, then feeding the result back into context as an observation.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "ReAct: Synergizing Reasoning and Acting in Language Models", authors: "Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., Cao, Y.", venue: "arXiv", year: 2022, url: "https://arxiv.org/abs/2210.03629" },
+  { title: "Plan-and-Solve Prompting: Improving Zero-Shot Chain-of-Thought Reasoning by Large Language Models", authors: "Wang, L., et al.", venue: "arXiv", year: 2023, url: "https://arxiv.org/abs/2305.04091" },
+  { title: "Function calling and other API updates", venue: "OpenAI", year: 2023, url: "https://openai.com/index/function-calling-and-other-api-updates/" },
+  { title: "Tool use with Claude", venue: "Anthropic Documentation", url: "https://docs.claude.com/en/docs/agents-and-tools/tool-use/overview" },
+]} />

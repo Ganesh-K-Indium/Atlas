@@ -1,0 +1,154 @@
+---
+title: "Experiment Tracking (MLflow, W&B)"
+description: "Why a single accuracy number is worthless without the hyperparameters, data version, code commit, and environment that produced it — and how tracking systems make experiments reproducible."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["mlops", "experiment-tracking", "mlflow", "reproducibility"]
+prerequisites: ["Basic model training loop", "Git basics", "Command-line familiarity"]
+---
+
+<Prerequisites items={["Basic model training loop", "Git basics", "Command-line familiarity"]} />
+
+## Intuition
+
+Imagine a spreadsheet with one column: "run 47, accuracy 0.891." Six weeks later, someone asks you to reproduce that result, or to explain why run 52 is worse despite "the same" model. Without knowing what hyperparameters were used, what data the run trained on, what preprocessing code ran, and what library versions were installed, that accuracy number is nearly meaningless — it cannot be reproduced, audited, or safely compared against anything else.
+
+<Callout type="tip" title="A concrete failure mode this prevents">
+  A team trains dozens of model variants over a month, informally tracking results in a shared spreadsheet with columns for "model," "accuracy," and "notes." Three weeks later, the best-performing run (0.94 F1) is selected for production, but the notebook that produced it has since been edited for a different experiment, the training data file was overwritten by a subsequent data refresh, and the "notes" column just says "tuned dropout." Nobody can reproduce the exact model, explain why it outperformed the runner-up, or verify whether the good result was even real versus a fluke of a particular random seed. Weeks are spent trying to recreate a result that already existed once, because the run itself — not just its final metric — was never actually captured.
+</Callout>
+
+## The Core Problem: A Metric Alone Is Not an Experiment
+
+Reproducing or comparing an ML experiment fully requires reconstructing everything that determined its outcome, which decomposes into at least four categories:
+
+1. **Hyperparameters and configuration** — learning rate, batch size, model architecture, regularization strength, random seed, feature set used.
+2. **Metrics** — not just the final validation metric, but the full training curve (loss/accuracy per epoch or step), since a single endpoint number hides overfitting trajectories, instability, or early stopping behavior.
+3. **Artifacts** — the trained model weights themselves, along with any plots, confusion matrices, or serialized preprocessing objects (e.g., a fitted `StandardScaler`) needed to actually run the model again.
+4. **Code and data versions** — the exact git commit of the training code, and the exact version/snapshot of the training data (a hash, a data-versioning tag, or a feature-store point-in-time reference).
+
+An **experiment tracking system** exists specifically to log all four of these together, atomically, per run — not to log metrics in isolation. The reproducibility guarantee only holds if the tuple (code version, data version, config, resulting artifact, resulting metrics) is captured as a unit; missing any one element breaks the chain. This is why "just log the accuracy to a spreadsheet" fails: it captures one of four required dimensions.
+
+<Mermaid chart={`graph TD
+  A[Training script run] --> B[Log hyperparameters/config]
+  A --> C[Log metrics per step/epoch]
+  A --> D[Log artifacts: model, plots, scaler]
+  A --> E[Log code version - git commit hash]
+  A --> F[Log data version - hash or data-versioning ref]
+  B --> G[Tracking server / run record]
+  C --> G
+  D --> G
+  E --> G
+  F --> G
+  G --> H[Compare runs, select best, promote to registry]
+  H --> I[Model registry - staging to production]
+`} />
+
+## What These Systems Actually Log
+
+<Callout type="note" title="Verified current capabilities">
+  **MLflow** is organized around a Tracking component (logging parameters, metrics, and artifacts per run, with a UI/API for comparing runs), a Model Registry (versioning trained models with stage transitions such as staging/production/archived, plus tags, comments, and lineage back to the run that produced them), and a Projects/Models packaging format for reproducible execution and deployment. It's open-source and can run self-hosted or via managed offerings (e.g., Databricks-hosted MLflow). **Weights & Biases (W&B)** covers similar ground — run tracking, hyperparameter logging, and a model registry — but adds a strong emphasis on hosted collaboration: rich comparison dashboards across large numbers of runs, built-in hyperparameter sweep orchestration, and dataset/model "Artifacts" versioning as first-class, hosted objects. In practice, MLflow is more commonly self-hosted and open-source-first, while W&B is more commonly used as a hosted SaaS product with a more polished collaborative UI — though both now offer overlapping tracking, registry, and artifact-versioning capabilities.
+</Callout>
+
+## Example: Logging a Complete, Reproducible Run
+
+```python
+import mlflow
+import mlflow.sklearn
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import f1_score
+import subprocess
+
+mlflow.set_experiment("customer-churn-prediction")
+
+with mlflow.start_run(run_name="rf-baseline"):
+    # 1. Log hyperparameters
+    params = {"n_estimators": 300, "max_depth": 8, "random_state": 42}
+    mlflow.log_params(params)
+
+    # 2. Log code and data version for reproducibility
+    git_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"]
+    ).decode().strip()
+    mlflow.set_tag("git_commit", git_commit)
+    mlflow.set_tag("training_data_version", "churn_features_v2026_07_15")
+
+    model = RandomForestClassifier(**params)
+    model.fit(X_train, y_train)
+
+    # 3. Log metrics — full picture, not just final number
+    for epoch_metric_name, value in {
+        "train_f1": f1_score(y_train, model.predict(X_train)),
+        "val_f1": f1_score(y_val, model.predict(X_val)),
+    }.items():
+        mlflow.log_metric(epoch_metric_name, value)
+
+    # 4. Log the artifact itself — the trained model
+    mlflow.sklearn.log_model(model, artifact_path="model")
+
+    # Register the run's model into the versioned registry
+    mlflow.register_model(
+        model_uri=f"runs:/{mlflow.active_run().info.run_id}/model",
+        name="churn-classifier",
+    )
+```
+
+Every one of the four required dimensions — config, metrics, artifact, code/data version — is captured in this single run context, so a later "reproduce run `abc123`" request has everything needed, not just the headline `val_f1` number.
+
+<ComparisonTable
+  headers={["Capability", "MLflow", "Weights & Biases"]}
+  rows={[
+    ["Deployment model", "Open-source; self-hosted or managed (e.g. via Databricks)", "Primarily hosted SaaS, with self-hosted enterprise options"],
+    ["Run/metric tracking", "Yes — params, metrics, artifacts per run", "Yes — richer built-in dashboards for large-scale run comparison"],
+    ["Model registry", "Yes — stage transitions, tags, lineage to source run", "Yes — model versioning and lineage, integrated with Artifacts"],
+    ["Hyperparameter sweeps", "Via integration with external tuning libraries", "Built-in Sweeps feature, natively orchestrated"],
+    ["Dataset/artifact versioning", "Artifact logging per run; less first-class dataset versioning", "Artifacts is a first-class, hosted dataset/model versioning system"],
+    ["Best fit", "Teams wanting open-source control and self-hosting", "Teams prioritizing collaborative dashboards and managed infrastructure"],
+  ]}
+/>
+
+## Common Mistakes
+
+- **Logging only the final metric, not the full curve.** A single validation number hides whether the model overfit late in training or was unstable — always log per-epoch/per-step metrics, not just the endpoint.
+- **Not tagging the data version.** If the underlying training data changes (a refreshed extract, a fixed bug in a feature pipeline) but the tracking system doesn't record which data snapshot a run used, "reproducing" the run later silently trains on different data.
+- **Treating the tracking system as optional overhead for "real" runs only.** Skipping tracking during quick iteration is exactly when the eventually-best run gets lost — the run that wins is rarely known in advance.
+- **Confusing "logged" with "reproducible."** Logging hyperparameters without pinning library versions (e.g., via a lockfile or container image referenced in the run) means the same hyperparameters on a different library version can silently produce a different model.
+- **Not promoting through a registry with a clear stage lifecycle.** Ad hoc "the latest run is the model we deploy" workflows lose the distinction between "best offline metric" and "validated and approved for production," which is exactly what a model registry's staging/production stages are meant to enforce.
+
+<KeyTakeaways items={[
+  "An experiment tracking system logs hyperparameters, metrics (the full curve, not just the endpoint), artifacts, and code/data versions together per run — reproducibility requires all four, not just the final metric.",
+  "A model registry sits on top of tracking, versioning models and managing stage transitions (e.g. staging to production) with traceable lineage back to the exact run that produced each version.",
+  "MLflow is the dominant open-source, self-hostable option; Weights & Biases is a widely used hosted SaaS platform with strong built-in dashboards and sweep orchestration — both now offer overlapping tracking and registry capabilities.",
+  "Skipping tracking during 'quick' iteration is the most common way the eventual best-performing run becomes unreproducible.",
+]} />
+
+<Quiz questions={[
+  {
+    question: "Why is logging only the final validation accuracy insufficient for reproducibility, even if the hyperparameters are also recorded?",
+    options: [
+      "Accuracy is never a valid metric to track",
+      "Reproducibility requires the artifact, code version, and data version together with the config and full metric history — a final accuracy number alone can't be traced back to the exact model, code, and data that produced it",
+      "Final accuracy is always inflated and should never be trusted",
+      "Hyperparameters change the metric calculation itself",
+    ],
+    answerIndex: 1,
+    explanation: "A run is only reproducible if you can reconstruct the code, data, configuration, and resulting artifact together — logging just an accuracy number (even alongside hyperparameters) still leaves out the code/data version and the trained artifact, any of which could differ on a later 'reproduction' attempt.",
+  },
+  {
+    question: "What is the primary role of a model registry, as distinct from experiment tracking itself?",
+    options: [
+      "It replaces the need to log metrics",
+      "It versions trained models and manages their promotion through stages (e.g. staging, production) with lineage back to the source run, decoupling 'best offline run' from 'approved for deployment'",
+      "It automatically retrains models on a schedule",
+      "It is only used for storing raw training data",
+    ],
+    answerIndex: 1,
+    explanation: "Experiment tracking captures what happened during training runs. A model registry builds on that by giving trained models a versioned lifecycle — staging, production, archived — with governance over promotion, which is a distinct concern from simply recording experiment results.",
+  },
+]} />
+
+<ReferenceList items={[
+  { title: "Hidden Technical Debt in Machine Learning Systems", authors: "Sculley, D. et al.", venue: "NeurIPS", year: 2015, url: "https://papers.nips.cc/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf" },
+  { title: "MLflow Tracking — Official Documentation", authors: "MLflow / Linux Foundation", venue: "Official documentation", year: 2026, url: "https://mlflow.org/docs/latest/ml/tracking/" },
+  { title: "MLflow Model Registry — Official Documentation", authors: "MLflow / Linux Foundation", venue: "Official documentation", year: 2026, url: "https://mlflow.org/docs/latest/ml/model-registry/" },
+]} />

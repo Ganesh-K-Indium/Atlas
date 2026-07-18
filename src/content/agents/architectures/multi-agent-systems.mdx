@@ -1,0 +1,135 @@
+---
+title: "Multi-Agent Systems"
+description: "Why splitting a task across several specialized agents can outperform one generalist agent — and the real orchestration, error-propagation, and communication-protocol costs that decomposition introduces."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["agents", "multi-agent", "orchestration", "coordination"]
+prerequisites: ["Reasoning, Planning & Tool Calling", "Model Context Protocol (MCP)"]
+---
+
+## Intuition
+
+A single agent with every tool and instruction crammed into one system prompt tends to degrade the same way an overloaded team of one does: context gets noisy, the model has to hold too many concerns in mind at once, and failures are hard to localize. A multi-agent system splits that responsibility across several narrower agents — each with a smaller, clearer job — coordinated by some higher-level structure.
+
+<Callout type="tip" title="The one-sentence idea">
+  Multi-agent decomposition trades a single generalist agent's simplicity for role specialization and parallelism, at the cost of real coordination overhead: orchestration logic, error propagation across agent boundaries, and the need for an explicit communication protocol between agents.
+</Callout>
+
+## Why Decompose at All
+
+**Role specialization.** A "researcher" agent with a tightly scoped prompt, a narrow tool set (search, fetch), and a single responsibility ("find relevant sources") is easier to prompt reliably than one giant agent that also has to write code, format output, and manage a multi-step plan. Smaller responsibilities mean smaller, more testable, more debuggable prompts — the same reason a large codebase gets split into modules rather than one file.
+
+**Parallelism.** Independent sub-tasks — summarize document A, summarize document B, cross-check a claim against a third source — can genuinely run concurrently across separate agent instances, rather than serially inside one agent's reasoning loop. This is a real latency win when sub-tasks don't depend on each other's output.
+
+**Reliability through narrower scope.** A model asked to do one well-specified thing tends to fail less often than one asked to juggle many things in a single pass, simply because there's less surface area for it to go wrong on any given call — the same intuition behind decomposing a large, error-prone function into smaller, individually-testable ones.
+
+<Mermaid chart={`
+graph TD
+  O["Orchestrator agent"] --> R["Researcher agent"]
+  O --> W["Writer agent"]
+  O --> C["Critic / reviewer agent"]
+  R -->|"findings"| O
+  W -->|"draft"| O
+  C -->|"feedback"| O
+  O --> F["Final output"]
+`} />
+
+## The Real Coordination Costs
+
+Decomposition isn't free — it introduces failure modes a single-agent system doesn't have.
+
+**Orchestration overhead.** Something has to decide which agent runs when, pass the right context between them, and assemble the final result — that's itself non-trivial logic (and often another LLM call), adding latency and a new component that can itself misroute a task.
+
+**Error propagation across agents.** If the researcher agent hallucinates a source, the writer agent has no independent way to know that — it inherits the error and builds on it, and the mistake can compound rather than being caught, unless there's an explicit verification step (like a critic agent) designed to catch it. Debugging *which* agent introduced a fault in a long multi-agent trace is materially harder than debugging one agent's single reasoning trace.
+
+**The need for a communication/handoff protocol.** Agents need an agreed structure for what gets passed between them — not just "some text," but a well-defined interface (task description, expected output schema, status) so that a receiving agent can reliably parse what it's been handed. Ad hoc, free-text handoffs between agents are a common source of silent failures: the receiving agent misinterprets an implicit assumption the sending agent never made explicit.
+
+<ComparisonTable
+  headers={["Concern", "Single generalist agent", "Multi-agent system"]}
+  rows={[
+    ["Prompt complexity", "One large prompt covering every responsibility", "Several smaller, focused prompts — easier to iterate on individually"],
+    ["Latency for independent sub-tasks", "Serial — one reasoning loop handles everything in sequence", "Can parallelize genuinely independent sub-tasks across agents"],
+    ["Failure localization", "Harder to isolate which part of a long reasoning trace went wrong", "Easier to attribute a failure to a specific agent's output — but errors can silently propagate downstream if unchecked"],
+    ["New coordination surface", "None — no inter-agent communication to design", "Requires an explicit orchestration strategy and a communication/handoff protocol between agents"],
+  ]}
+/>
+
+## The Protocol Layer Underneath
+
+Coordination costs are exactly why standardized protocols matter for multi-agent systems, at two different layers:
+
+- **Agent-to-tool**: individual agents in a multi-agent system still need to call external tools and data sources reliably — this is what [MCP](/docs/agents/protocols-frameworks/model-context-protocol) standardizes, regardless of how many agents are involved.
+- **Agent-to-agent**: when the "tool" one agent needs is actually *another autonomous agent* — potentially built by a different team or vendor, with its own internal reasoning loop — that handoff needs its own standard for capability discovery, task delegation, and result exchange. This is the problem [Agent2Agent Protocol (A2A)](/docs/agents/protocols-frameworks/agent2agent-protocol) targets: a shared way for independent agents to discover what each other can do and exchange tasks/artifacts, rather than every multi-agent framework inventing its own bespoke inter-agent wire format.
+
+A multi-agent system built entirely within one framework (e.g. all agents defined in the same CrewAI crew or LangGraph graph) can get away with an in-process, framework-specific handoff convention. A system where agents are independently built, deployed, and potentially owned by different organizations needs something closer to A2A's agent-to-agent standardization to interoperate at all — see [CrewAI & AutoGen](/docs/agents/protocols-frameworks/crewai-autogen) and [LangChain & LangGraph](/docs/agents/protocols-frameworks/langchain-langgraph) for how specific frameworks implement in-process multi-agent coordination today.
+
+```python
+# Sketch: a minimal orchestrator dispatching to specialized agents with a
+# structured handoff contract (not tied to a specific framework)
+def orchestrate(task: str, agents: dict, llm) -> str:
+    plan = llm.route(task, available_agents=list(agents.keys()))
+    # plan: [{"agent": "researcher", "input": {...}}, {"agent": "writer", "input": {...}}, ...]
+
+    context = {}
+    for step in plan:
+        agent = agents[step["agent"]]
+        handoff = {
+            "task": step["input"],
+            "context_so_far": context,          # explicit, not implicit, shared state
+            "expected_output_schema": step.get("output_schema"),
+        }
+        result = agent.run(handoff)
+        context[step["agent"]] = result          # each agent's output is attributable
+
+    return llm.synthesize_final(context)
+```
+
+<KeyTakeaways items={[
+  "Decomposing a task across specialized agents can improve reliability and enable parallelism, because each agent carries a narrower, more testable responsibility than one generalist agent juggling everything.",
+  "The cost of decomposition is real: orchestration logic to route between agents, error propagation across agent boundaries when a mistake isn't caught, and the need for an explicit communication/handoff protocol.",
+  "MCP standardizes the agent-to-tool layer within a multi-agent system; A2A standardizes the agent-to-agent layer when independently-built agents need to discover and delegate tasks to each other.",
+  "In-process, single-framework multi-agent systems can use framework-specific handoff conventions; cross-organization multi-agent systems need something closer to a shared protocol like A2A to interoperate.",
+]} />
+
+## Common Mistakes
+
+- **Adding agents without a clear division of responsibility**: splitting a task into agents that all touch the same context in overlapping ways recreates the original agent's complexity, just spread across more LLM calls (and more latency/cost) without the specialization benefit.
+- **No verification step between agents**: without something checking a sub-agent's output before it's built on further (a critic agent, a schema validator, a human checkpoint), one hallucinated fact from an early agent silently becomes the foundation the rest of the pipeline builds on.
+- **Implicit, free-text handoffs**: passing "just the text output" between agents without an agreed schema for what that output means invites silent misinterpretation — the receiving agent has no way to know what it wasn't told.
+- **Ignoring orchestration cost in latency/cost budgets**: every routing decision, hand-off, and cross-agent context assembly is itself an LLM call (or several) — a multi-agent system can end up slower and more expensive than a single well-scoped agent for tasks that didn't actually need decomposition.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What is the primary reliability argument for decomposing a task across multiple specialized agents rather than one generalist agent?",
+    options: [
+      "Multiple agents always run faster regardless of task structure",
+      "A narrower, well-scoped responsibility per agent tends to reduce the surface area for any single agent to fail on a given call, similar to why smaller, testable functions are more reliable than one large function",
+      "Multi-agent systems eliminate the need for tool calling",
+      "Specialized agents never need to communicate with each other",
+    ],
+    answerIndex: 1,
+    explanation: "The core argument is scope: a smaller, well-defined responsibility per agent (e.g. 'find sources' vs. 'find sources, write the report, and format the output') is easier to prompt and verify reliably, mirroring the software-engineering intuition that smaller, focused units of work fail less often than large, multi-concern ones.",
+  },
+  {
+    question: "How do MCP and A2A relate to the coordination challenges in a multi-agent system?",
+    options: [
+      "They are competing, redundant standards for the same problem",
+      "MCP standardizes agent-to-tool communication (each agent talking to external tools/data), while A2A standardizes agent-to-agent communication (independent agents discovering and delegating tasks to each other) — both matter to multi-agent coordination, at different layers",
+      "MCP is only relevant to single-agent systems, never multi-agent ones",
+      "A2A replaces the need for any orchestration logic within a multi-agent system",
+    ],
+    answerIndex: 1,
+    explanation: "MCP and A2A address adjacent but distinct layers: individual agents in a multi-agent system still need MCP (or similar) to reliably call external tools, while A2A addresses the separate problem of how independently-built agents discover each other's capabilities and hand off tasks — both are relevant, neither replaces orchestration logic entirely.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Generative Agents: Interactive Simulacra of Human Behavior", authors: "Park, J. S., et al.", venue: "arXiv (UIST 2023)", year: 2023, url: "https://arxiv.org/abs/2304.03442" },
+  { title: "CAMEL: Communicative Agents for 'Mind' Exploration of Large Language Model Society", authors: "Li, G., et al.", venue: "arXiv", year: 2023, url: "https://arxiv.org/abs/2303.17760" },
+  { title: "AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation", authors: "Wu, Q., et al.", venue: "arXiv", year: 2023, url: "https://arxiv.org/abs/2308.08155" },
+]} />

@@ -1,0 +1,171 @@
+---
+title: "CrewAI & AutoGen"
+description: "Two contrasting takes on multi-agent orchestration — CrewAI's role-based collaborating 'crew' versus AutoGen's conversational agent-to-agent turns — plus what actually happened to the AutoGen project itself."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["agents", "crewai", "autogen", "multi-agent", "frameworks"]
+prerequisites: ["Multi-Agent Systems", "Reasoning, Planning & Tool Calling"]
+---
+
+## Intuition
+
+If LangGraph's pitch is "model your agent's control flow as an explicit graph," CrewAI and AutoGen each start from a different mental model for *multi-agent* systems specifically. CrewAI's is organizational: define agents with roles, goals, and tools, like staffing a team. AutoGen's is conversational: agents are participants in a structured multi-turn conversation, and the conversation pattern itself (who talks to whom, in what order) is the main thing you configure.
+
+<Callout type="tip" title="The one-sentence idea">
+  CrewAI structures multi-agent collaboration around explicit roles (a "Researcher," a "Writer," a "Reviewer," each with a goal and tools) working together as a crew; AutoGen structures it as configurable multi-turn conversations between agents. Neither is strictly better — they encode different intuitions about what a "team" of agents should look like.
+</Callout>
+
+## CrewAI: Role-Based Collaboration
+
+In CrewAI, you define each agent with a role, a goal, an optional backstory (used to steer the model's persona/behavior), and a set of tools — then group agents into a **Crew** that works through a shared task list, with CrewAI managing hand-offs between them. CrewAI also has **Flows**, a separate event-driven layer for precise, deterministic workflow control (single LLM calls, explicit branching) that can incorporate a Crew as one step rather than relying purely on agent-to-agent autonomy for the whole pipeline.
+
+```python
+# CrewAI-style role-based crew (illustrative)
+from crewai import Agent, Task, Crew
+
+researcher = Agent(
+    role="Senior Researcher",
+    goal="Find and summarize the most recent developments in a given topic",
+    backstory="An analyst who values primary sources over secondhand summaries.",
+    tools=[web_search_tool],
+)
+
+writer = Agent(
+    role="Technical Writer",
+    goal="Turn research findings into a clear, well-structured brief",
+    backstory="A writer who prioritizes precision over flourish.",
+)
+
+research_task = Task(
+    description="Research recent developments in {topic} and list key findings with sources.",
+    agent=researcher,
+    expected_output="A bulleted list of findings, each with a source.",
+)
+
+writing_task = Task(
+    description="Write a one-page brief based on the research findings.",
+    agent=writer,
+    expected_output="A one-page markdown brief.",
+    context=[research_task],
+)
+
+crew = Crew(agents=[researcher, writer], tasks=[research_task, writing_task])
+result = crew.kickoff(inputs={"topic": "agent interoperability protocols"})
+```
+
+The role/goal/backstory framing is meant to make each agent's scope legible at a glance — closer to writing a job description than configuring a state machine — which tends to make CrewAI approachable for teams composing "a team of specialists" without wanting to design an explicit graph by hand.
+
+## AutoGen: Conversational Multi-Agent Turns
+
+AutoGen's abstraction is a structured conversation: agents (an "assistant" agent, a "user proxy" agent that can execute code or represent a human, additional specialized agents) exchange messages according to a configurable conversation pattern — two-agent chat, group chat with a manager deciding speaking order, or nested conversations. The conversation *is* the orchestration mechanism: an agent's turn ends when it produces a message, and the pattern determines who speaks next.
+
+```python
+# AutoGen-style conversational multi-agent pattern (illustrative)
+from autogen import AssistantAgent, UserProxyAgent
+
+assistant = AssistantAgent(
+    name="assistant",
+    llm_config={"model": "gpt-4o"},
+)
+
+user_proxy = UserProxyAgent(
+    name="user_proxy",
+    code_execution_config={"work_dir": "coding"},
+    human_input_mode="NEVER",
+)
+
+user_proxy.initiate_chat(
+    assistant,
+    message="Write and run a script that fetches the top 5 posts from a given subreddit.",
+)
+# The two agents exchange turns: assistant proposes code, user_proxy executes it
+# and returns output/errors, assistant revises, until the task is done.
+```
+
+<Callout type="warning" title="What 'AutoGen' means today has changed">
+  As of this page's last-verified date, the AutoGen project has split into three distinct paths, and simply saying "AutoGen" is ambiguous without specifying which:
+  <br /><br />
+  1. **Original AutoGen** is reported to be in maintenance mode — community-managed, no significant new features, still usable for research/prototyping on its existing (v0.4+) async actor-model architecture.
+  <br /><br />
+  2. **AG2** (at `ag2ai/ag2` on GitHub) is a community-led fork by AutoGen's original paper authors, positioned as an independently-governed continuation under an open-source license, with its own newer API surface under active development.
+  <br /><br />
+  3. **Microsoft Agent Framework** is Microsoft's own successor, released as 1.0 in April 2026, explicitly described by Microsoft as combining Semantic Kernel's enterprise plumbing with AutoGen's multi-agent conversation patterns — positioned as the production path forward from both predecessor projects.
+  <br /><br />
+  New projects should evaluate AG2 or Microsoft Agent Framework rather than building fresh on the original AutoGen — check each project's current documentation before committing, since this landscape has shifted more than once in a short period.
+</Callout>
+
+## Positioning
+
+<ComparisonTable
+  headers={["", "CrewAI", "AutoGen / AG2 / Microsoft Agent Framework"]}
+  rows={[
+    ["Core abstraction", "Role-based agents (role, goal, tools) collaborating as a Crew, plus event-driven Flows for deterministic control", "Agents as conversation participants; orchestration emerges from a configurable conversation pattern (two-agent, group chat, nested)"],
+    ["Mental model", "Staffing a team of specialists with defined responsibilities", "Structuring a multi-turn dialogue between agents (and optionally a human/code-execution proxy)"],
+    ["Determinism / control", "Flows offer explicit, deterministic step control when needed alongside autonomous Crew collaboration", "Conversation pattern configuration (e.g. group chat manager) governs turn-taking, but is inherently more emergent than a fixed graph"],
+    ["Project status (as of mid-2026)", "Actively developed, fast-growing adoption, with an enterprise AMP suite for production deployment", "Fragmented: original AutoGen in maintenance mode; AG2 as community fork; Microsoft Agent Framework as Microsoft's production successor"],
+    ["Best fit", "Teams wanting an approachable, role-oriented mental model for a bounded set of collaborating agents", "Teams already invested in Microsoft's ecosystem (favor Agent Framework) or wanting a community-governed conversational multi-agent framework (AG2)"],
+  ]}
+/>
+
+<Mermaid chart={`
+graph TD
+  subgraph CrewAI["CrewAI: role-based crew"]
+    Res["Researcher agent"] -->|"findings"| Wri["Writer agent"] -->|"draft"| Rev["Reviewer agent"]
+  end
+  subgraph AutoGenFamily["AutoGen-family: conversational turns"]
+    UP["User proxy agent"] <-->|"turn"| Asst["Assistant agent"]
+    Asst <-->|"turn"| Asst2["Specialist agent"]
+  end
+`} />
+
+<KeyTakeaways items={[
+  "CrewAI organizes multi-agent collaboration around explicit roles, goals, and tools per agent, plus a separate Flows layer for deterministic, event-driven control.",
+  "AutoGen's abstraction is conversational: agents exchange turns according to a configurable conversation pattern, with orchestration emerging from that pattern rather than a fixed graph.",
+  "'AutoGen' now refers to a fragmented landscape: the original project (maintenance mode), AG2 (community fork), and Microsoft Agent Framework (Microsoft's production successor) — verify which one a resource or team is actually referring to.",
+  "Neither CrewAI nor the AutoGen family is universally 'better' — the real choice is which mental model (staffed team vs. structured conversation) fits the coordination pattern your task actually needs, plus which project's current governance and roadmap you're comfortable depending on.",
+]} />
+
+## Common Mistakes
+
+- **Assuming "AutoGen" still means one thing**: given the maintenance-mode/AG2/Microsoft Agent Framework split, code, tutorials, or job postings referencing "AutoGen" may target any of three different, diverging projects — confirm which before reusing a pattern.
+- **Over-relying on emergent conversation patterns for tasks needing determinism**: a group-chat-style pattern that lets a manager agent decide turn order can produce inconsistent execution paths across runs; tasks needing predictable, auditable execution often fit better with an explicit graph (LangGraph) or a deterministic Flow (CrewAI) than a fully emergent conversation.
+- **Treating role/goal/backstory prompts as a substitute for tool/schema design**: a well-written role description doesn't compensate for poorly specified tools or ambiguous task boundaries between agents — the same tool-calling and hand-off discipline from [Multi-Agent Systems](/docs/agents/architectures/multi-agent-systems) still applies.
+- **Picking a framework by popularity alone**: framework adoption and positioning are moving targets in this space; validate against the current project docs and your own coordination needs (deterministic vs. conversational, in-house vs. cross-organization) rather than defaulting to whichever is trending.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What is the core structural difference between CrewAI's and AutoGen's approach to multi-agent orchestration?",
+    options: [
+      "CrewAI cannot use tools; AutoGen can only use tools",
+      "CrewAI organizes agents around explicit roles/goals collaborating as a crew (with Flows for deterministic control), while AutoGen structures orchestration as a configurable multi-turn conversation between agents",
+      "AutoGen only supports a single agent at a time",
+      "They are functionally identical frameworks with different names",
+    ],
+    answerIndex: 1,
+    explanation: "CrewAI's mental model is organizational — agents with roles, goals, and tools collaborating on tasks, plus an event-driven Flows layer for deterministic control. AutoGen's mental model is conversational — orchestration emerges from a configured conversation pattern (e.g. group chat) governing which agent speaks next.",
+  },
+  {
+    question: "As of mid-2026, why is simply saying 'we use AutoGen' potentially ambiguous?",
+    options: [
+      "AutoGen was never a real project",
+      "The original AutoGen project split into three diverging paths: the original project now in maintenance mode, AG2 as an independently-governed community fork, and Microsoft Agent Framework as Microsoft's production successor combining AutoGen and Semantic Kernel",
+      "AutoGen was renamed to CrewAI",
+      "AutoGen merged directly into LangGraph",
+    ],
+    answerIndex: 1,
+    explanation: "The AutoGen lineage fragmented: the original project is reported to be community-managed with no major new features, AG2 is a separate community-led fork by the original paper's authors with its own active development, and Microsoft released Agent Framework 1.0 as its own successor combining AutoGen's multi-agent patterns with Semantic Kernel's enterprise features — three different things now share (or descend from) the AutoGen name.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation", authors: "Wu, Q., et al.", venue: "arXiv", year: 2023, url: "https://arxiv.org/abs/2308.08155" },
+  { title: "CrewAI", venue: "crewai.com", url: "https://crewai.com/" },
+  { title: "crewAIInc/crewAI", venue: "GitHub", url: "https://github.com/crewaiinc/crewai" },
+  { title: "Microsoft Agent Framework Overview", venue: "Microsoft Learn", year: 2026, url: "https://learn.microsoft.com/en-us/agent-framework/overview/" },
+  { title: "AutoGen to Microsoft Agent Framework Migration Guide", venue: "Microsoft Learn", year: 2026, url: "https://learn.microsoft.com/en-us/agent-framework/migration-guide/from-autogen/" },
+]} />

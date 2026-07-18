@@ -1,0 +1,169 @@
+---
+title: "Monitoring & Observability"
+description: "Why a model can pass every offline validation check and still fail silently in production — and the precise statistical difference between data drift and concept drift."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["mlops", "monitoring", "drift-detection", "observability", "production-ml"]
+prerequisites: ["Model evaluation metrics", "Basic probability distributions", "Model serving & deployment"]
+---
+
+<Prerequisites items={["Model evaluation metrics", "Basic probability distributions", "Model serving & deployment"]} />
+
+## Intuition
+
+A model's offline validation metric is a snapshot: it measures performance on one fixed dataset, at one point in time. Once deployed, the model keeps making predictions on new data indefinitely — and the world that data describes keeps changing. Offline validation cannot detect a failure mode that only exists in the gap between "the data the model was validated on" and "the data the model is actually seeing right now, in production, continuously." Monitoring exists to close exactly that gap.
+
+<Callout type="tip" title="A concrete failure mode this prevents">
+  An upstream team refactors an ETL job and, as a side effect, changes how a currency field is encoded — from dollars to cents — for one particular event type that feeds into a fraud model's `transaction_amount` feature. The model's code doesn't change. Its offline validation metric, computed the day before the refactor, is untouched. But every prediction from that point forward is fed a feature value 100 times larger than what the model was trained on for that event type, and because tree-based models silently extrapolate rather than erroring on out-of-range inputs, the model keeps producing confident, wrong predictions with no exception thrown, no dashboard turning red, and no offline metric to catch it until someone happens to notice the fraud catch rate has quietly dropped. Distribution monitoring on that one feature — flagging that its live values had shifted dramatically from the training reference distribution — would have caught this within hours instead of weeks.
+</Callout>
+
+## Data Drift vs. Concept Drift: Two Distinct Failure Modes
+
+These terms are often used interchangeably, but they describe mechanically different problems, and conflating them leads to monitoring the wrong thing.
+
+**Data drift** (also called covariate shift) is a change in the distribution of the model's *input features*, $P(X)$, independent of whether the relationship between features and target has changed at all:
+
+$$
+P_{\text{train}}(X) \neq P_{\text{prod}}(X)
+$$
+
+A retailer's customer base shifting toward a younger demographic after a marketing campaign is data drift — the inputs the model sees have changed, even if "younger customers with these same feature values still churn at the same rate" remains true.
+
+**Concept drift** is a change in the relationship between features and target, $P(Y \mid X)$, which can occur even with the input distribution completely unchanged:
+
+$$
+P_{\text{train}}(Y \mid X) \neq P_{\text{prod}}(Y \mid X)
+$$
+
+The same customer profile that predicted low churn risk a year ago might now predict high churn risk, because a competitor entered the market — the *inputs* look identical, but what they *mean* for the outcome has changed. This is the more dangerous and harder-to-detect of the two, because feature-distribution monitoring alone won't catch it: the features can look perfectly normal while the model's learned mapping from those features to the outcome has become stale.
+
+<ComparisonTable
+  headers={["", "Data drift (covariate shift)", "Concept drift"]}
+  rows={[
+    ["What changes", "Distribution of input features, P(X)", "Relationship between features and target, P(Y | X)"],
+    ["Detectable via feature monitoring alone?", "Yes — compare live feature distributions to a reference", "No — features can look identical while the true relationship shifts"],
+    ["Typical cause", "Upstream data changes, population shifts, seasonality", "Real-world behavior change (competitor action, regulation, user adaptation to the model itself)"],
+    ["Detection approach", "Statistical distance between reference and current feature distributions (PSI, KL divergence)", "Requires ground-truth labels arriving with some delay, then comparing live accuracy/calibration to the training-time baseline"],
+  ]}
+/>
+
+## A Concrete Drift-Detection Mechanism: PSI and KL Divergence
+
+The **Population Stability Index (PSI)** is a standard statistic for quantifying how much a feature's distribution has shifted between a reference period (typically the training distribution) and a current period (production data), by binning the feature and comparing bin proportions:
+
+$$
+\text{PSI} = \sum_{i=1}^{k} (p_i - q_i) \ln\!\left(\frac{p_i}{q_i}\right)
+$$
+
+where $p_i$ and $q_i$ are the proportion of observations falling into bin $i$ for the reference and current distributions, respectively. This has the same functional form as a symmetrized KL divergence between the two binned distributions — see [KL Divergence & Mutual Information](/docs/foundations/information-theory/kl-divergence-mutual-information) for the underlying information-theoretic quantity PSI is built from. In practice, industry convention treats $\text{PSI} < 0.1$ as negligible drift, $0.1$–$0.25$ as moderate drift worth investigating, and $\text{PSI} > 0.25$ as significant drift warranting action — though these thresholds are conventions to calibrate per feature and per business context, not universal statistical cutoffs.
+
+Monitoring every feature's PSI (or KL divergence) against its training-time reference distribution on a rolling basis is what catches data drift — including the currency-encoding failure mode above, where the shifted feature's distribution would show a large, sudden jump in PSI the moment the upstream change landed.
+
+<Mermaid chart={`graph TD
+  A[Training-time reference distribution per feature] --> B[Rolling window of live production features]
+  B --> C[Compute PSI / KL divergence per feature vs. reference]
+  C --> D{Drift above threshold?}
+  D -->|yes| E[Alert - investigate upstream data / retrain]
+  D -->|no| F[Continue serving]
+  G[Delayed ground-truth labels arrive] --> H[Compute live accuracy/calibration vs. training baseline]
+  H --> I{Concept drift - performance degraded despite stable features?}
+  I -->|yes| E
+  I -->|no| F
+`} />
+
+## Why Offline Validation Metrics Alone Don't Catch Production-Only Failures
+
+Offline evaluation checks "does this model perform well on this fixed holdout set." It fundamentally cannot observe:
+
+- **Upstream data pipeline changes** that occur *after* the model is validated and deployed — a schema change, a unit change, a null-handling change in a source system the model has no visibility into.
+- **Feedback loops**, where the model's own predictions influence the future data it will be trained or evaluated on. A recommendation model that suppresses certain items from being shown will, over time, see less training data reflecting user interest in those items — not because interest genuinely dropped, but because the model itself reduced their exposure. The model's own success or failure becomes entangled with the data used to measure it, something a static offline holdout set can never surface.
+- **Rare/tail-segment degradation** that a single aggregate offline metric averages away — a model can maintain a stable overall accuracy while silently failing on a small but important segment, invisible unless that segment is monitored explicitly.
+- **Serving-path bugs** unrelated to the model itself (a stale cache, a feature-store materialization delay) that only manifest once the model is actually integrated into a live system with its full dependency chain.
+
+This is precisely why production monitoring is a distinct discipline from offline evaluation, not a redundant extra step: it observes the system in the state offline evaluation structurally cannot — after deployment, over time, under real and changing conditions.
+
+## Example: Drift Monitoring in Practice
+
+```python
+import numpy as np
+
+def population_stability_index(reference: np.ndarray, current: np.ndarray, bins: int = 10) -> float:
+    """Compute PSI between a reference (training) and current (production) feature distribution."""
+    breakpoints = np.quantile(reference, np.linspace(0, 1, bins + 1))
+    breakpoints[0], breakpoints[-1] = -np.inf, np.inf
+
+    ref_counts, _ = np.histogram(reference, bins=breakpoints)
+    cur_counts, _ = np.histogram(current, bins=breakpoints)
+
+    ref_pct = np.clip(ref_counts / len(reference), 1e-6, None)
+    cur_pct = np.clip(cur_counts / len(current), 1e-6, None)
+
+    return float(np.sum((cur_pct - ref_pct) * np.log(cur_pct / ref_pct)))
+
+# Nightly monitoring job: flag any feature whose live distribution has drifted
+for feature_name in monitored_features:
+    psi = population_stability_index(
+        reference=training_reference_distributions[feature_name],
+        current=production_logs[feature_name].values,
+    )
+    if psi > 0.25:
+        alert(f"Significant drift on '{feature_name}': PSI={psi:.3f}")
+    elif psi > 0.10:
+        log_warning(f"Moderate drift on '{feature_name}': PSI={psi:.3f}")
+```
+
+<ComparisonTable
+  headers={["Monitoring signal", "Catches", "Requires ground truth?", "Detection lag"]}
+  rows={[
+    ["Feature distribution drift (PSI/KL)", "Data drift — upstream changes, population shifts", "No", "Near real-time (as soon as feature values arrive)"],
+    ["Prediction distribution monitoring", "Model behavior changes, some serving-path bugs", "No", "Near real-time"],
+    ["Live accuracy/calibration vs. baseline", "Concept drift, silent model staleness", "Yes — needs delayed labels", "Delayed by however long labels take to arrive"],
+    ["Segment-level metric breakdown", "Tail-segment degradation hidden by aggregate metrics", "Yes, for that segment", "Same as overall accuracy monitoring"],
+  ]}
+/>
+
+## Common Mistakes
+
+- **Only monitoring the model's own output, never its inputs.** Prediction-distribution monitoring alone can hint that something changed, but only feature-level drift monitoring tells you *which* feature and *why* — critical for actually diagnosing the root cause.
+- **Assuming stable features mean the model is fine.** This is exactly what concept drift defeats — features can be perfectly stable while the true relationship to the target has moved on, so accuracy/calibration monitoring against delayed ground truth is not optional, just slower to signal.
+- **No reference distribution versioning.** If the "reference" distribution used for drift comparison isn't tied to the specific model version's training data, PSI comparisons become meaningless after a retrain quietly changes what "normal" means.
+- **Treating PSI thresholds as universal constants.** A threshold appropriate for a slow-moving demographic feature is not necessarily appropriate for a naturally volatile feature like transaction amount, which may show high PSI under entirely benign seasonal patterns.
+- **Ignoring feedback loops as a monitoring blind spot.** If a model's predictions shape the data it will later be evaluated or retrained on, monitoring that only looks at "current model vs. current data" can miss a slow, self-reinforcing degradation that no single snapshot comparison reveals.
+
+<KeyTakeaways items={[
+  "Data drift is a shift in the input feature distribution P(X); concept drift is a shift in the relationship between features and target P(Y|X) — the latter can occur with features that look completely stable.",
+  "PSI (and KL divergence, which it's mathematically related to) quantifies feature distribution drift against a training-time reference and is a standard, well-understood first line of defense — with conventional thresholds around 0.1 and 0.25, calibrated per feature.",
+  "Concept drift detection requires ground-truth labels and is inherently delayed by however long labels take to arrive, unlike near-real-time feature drift monitoring.",
+  "Offline validation metrics cannot observe upstream pipeline changes, feedback loops, or tail-segment failures that only manifest after deployment — production monitoring is a structurally distinct discipline, not a redundant check.",
+]} />
+
+<Quiz questions={[
+  {
+    question: "A model's input feature distributions remain statistically identical to training, but its live accuracy (measured against delayed ground-truth labels) has degraded significantly. What does this indicate?",
+    options: [
+      "Data drift, since something about the inputs must have changed",
+      "Concept drift — the relationship between features and target has shifted even though the input distribution P(X) has not, which feature-distribution monitoring alone cannot detect",
+      "A bug in the PSI calculation",
+      "This scenario is impossible — accuracy cannot degrade if features are stable",
+    ],
+    answerIndex: 1,
+    explanation: "This is the defining signature of concept drift: P(X) is unchanged but P(Y|X) has shifted, so the model's learned mapping is now stale relative to the real-world relationship. Because the features themselves look normal, this can only be caught by monitoring actual outcome accuracy against delayed labels, not by feature-distribution monitoring.",
+  },
+  {
+    question: "Why can't offline validation metrics alone catch a feedback-loop failure mode, where a model's own predictions influence the future data used to evaluate or retrain it?",
+    options: [
+      "Offline validation always uses infinite data so this isn't an issue",
+      "Offline validation is a fixed, static snapshot evaluated once before deployment — it cannot observe how the model's deployed behavior reshapes the data distribution it will later be judged or retrained on, which only unfolds over time in production",
+      "Feedback loops only affect unsupervised models",
+      "This is purely a data engineering problem unrelated to model evaluation",
+    ],
+    answerIndex: 1,
+    explanation: "Offline evaluation happens once, on a fixed dataset, before deployment. A feedback loop is a dynamic process where the model's live predictions alter future data (e.g., suppressing exposure to certain items changes future interaction data) — this can only be observed through ongoing production monitoring over time, not a one-time offline check.",
+  },
+]} />
+
+<ReferenceList items={[
+  { title: "Hidden Technical Debt in Machine Learning Systems", authors: "Sculley, D. et al.", venue: "NeurIPS", year: 2015, url: "https://papers.nips.cc/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf" },
+  { title: "Measuring Data Drift with the Population Stability Index (PSI)", authors: "Fiddler AI", venue: "Industry technical blog", year: 2026, url: "https://www.fiddler.ai/blog/measuring-data-drift-population-stability-index" },
+]} />

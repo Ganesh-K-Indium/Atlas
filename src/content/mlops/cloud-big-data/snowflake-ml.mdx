@@ -1,0 +1,156 @@
+---
+title: "Snowflake for ML Workloads"
+description: "Why Snowflake's ML strategy is to bring compute and models to where the data already lives, instead of exporting data out to a separate ML platform — and where that philosophy genuinely wins or loses."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["mlops", "cloud", "snowflake", "snowpark", "cortex", "data-warehouse"]
+prerequisites: ["MLOps fundamentals", "Databricks & Spark"]
+---
+
+## Intuition
+
+The traditional ML workflow exports data out of a warehouse into a separate environment — a notebook, a training cluster, a feature store — runs models there, and pushes results back. Every export is a governance risk (data leaves its access-controlled home), a latency cost (moving large tables across systems), and a source of drift between "the data as the warehouse understands it" and "the data as the ML pipeline copied it."
+
+Snowflake's core architectural bet is the opposite: **bring the compute to the data**, running Python, ML training, and now LLM inference *inside* the same governed environment where the data already lives, rather than moving data out to wherever the compute happens to run.
+
+<Callout type="tip" title="The one-sentence idea">
+  Snowflake for ML isn't a separate platform bolted onto a warehouse — it's an argument that if your data's system of record is already a governed warehouse, the cheapest and safest place to run models is inside that same trust boundary, not in a second platform you have to keep in sync with it.
+</Callout>
+
+## Two Layers: Snowpark and Cortex
+
+<Mermaid chart={`
+graph TD
+  subgraph Warehouse["Data stays inside Snowflake's governed boundary"]
+    Tables["Governed tables\n(role-based access control)"]
+  end
+  Tables --> Snowpark["Snowpark\n(Python/Scala/Java UDFs and ML training\nrun as warehouse compute, no data export)"]
+  Snowpark --> Registry["Snowflake Model Registry\n(feature store, model versioning)"]
+  Registry --> ServedModel["Custom model served\nas a Snowflake function"]
+  Tables --> Cortex["Cortex AI\n(hosted LLM + ML functions, called via SQL or Python)"]
+  Cortex --> LLMFn["LLM functions:\ncompletion, summarization,\ntranslation, embeddings"]
+  Cortex --> MLFn["ML functions:\nforecasting, anomaly detection,\nclassification"]
+`} />
+
+**Snowpark** is the layer for custom ML: it lets data scientists write Python (or Scala/Java) that executes as warehouse compute, directly against warehouse tables, instead of exporting data to an external notebook or cluster. **Snowflake ML** builds on Snowpark with framework connectors for popular ML libraries, plus MLOps primitives — a feature store, a model registry, and immutable data snapshots for reproducibility — so a custom model's entire lifecycle (features, training, versioning, serving) can stay inside the same governed boundary as the data it was trained on.
+
+**Cortex AI** is the layer for consuming AI capabilities without training anything yourself: **LLM functions** (completion/prompting, translation, summarization, sentiment analysis, embeddings) provide access to foundation models from providers including OpenAI, Anthropic, Meta, Mistral, and others — callable directly from SQL or Python — while **ML functions** target predictive analytics use cases like forecasting, anomaly detection, and customer segmentation with far less setup than building the equivalent custom model. As of 2026, Snowflake has continued to expand Cortex toward agentic use cases (Snowflake Intelligence, Cortex Code, and an AI Function Studio for automating prompt engineering and model selection), positioning Cortex as the control plane for AI work that happens directly against warehouse data rather than a separate system.
+
+The distinction between the two layers mirrors the SageMaker/Bedrock split covered in [AWS for ML](/docs/mlops/cloud-big-data/aws-for-ml): Snowpark ML is "bring your own model, but keep it next to the data," Cortex is "call a hosted model without owning any of the infrastructure" — except both live inside the same warehouse trust boundary rather than in a separate cloud ML product.
+
+## The "Compute to Data" Trade-off
+
+<ComparisonTable
+  headers={["Approach", "Where data lives during ML work", "Governance", "Flexibility"]}
+  rows={[
+    ["Traditional: export to separate ML platform", "Copied out to notebooks, training clusters, or a lake", "Must be re-implemented/re-audited in the destination system", "Full access to any ML framework, any compute shape"],
+    ["Snowflake-native (Snowpark + Cortex)", "Stays inside Snowflake's governed tables throughout", "Inherits the warehouse's existing role-based access control automatically", "Bounded by what Snowpark's runtime and Cortex's hosted functions support"],
+]}
+/>
+
+This is a genuine trade-off, not a strictly dominant strategy. Keeping data inside Snowflake removes an entire category of export/governance risk and often removes serialization/network latency for warehouse-scale tabular workloads. But it also means custom ML work is bounded by what Snowpark's execution environment and available libraries support — a research team pushing the frontier of a novel deep learning architecture, or needing GPU-heavy distributed training at large scale, will typically still reach for a dedicated ML platform (SageMaker, Vertex AI, Databricks) rather than Snowpark.
+
+## A Minimal Example of Each Layer
+
+```python
+# Snowpark ML: train a model as warehouse compute, without exporting data
+from snowflake.ml.modeling.ensemble import GradientBoostingClassifier
+from snowflake.ml.registry import Registry
+from snowflake.snowpark import Session
+
+session = Session.builder.configs(connection_params).create()
+
+train_df = session.table("SALES_DB.ML.CUSTOMER_FEATURES")
+
+model = GradientBoostingClassifier(
+    input_cols=["recency", "frequency", "monetary_value"],
+    label_cols=["churned"],
+    n_estimators=200,
+)
+model.fit(train_df)
+
+registry = Registry(session=session)
+registry.log_model(model, model_name="churn_classifier", version_name="v1")
+```
+
+```sql
+-- Cortex: call a hosted LLM and a forecasting function directly in SQL
+SELECT
+    ticket_id,
+    SNOWFLAKE.CORTEX.COMPLETE(
+        'claude-sonnet-4-5',
+        'Classify the urgency of this support ticket as low/medium/high: ' || ticket_text
+    ) AS urgency
+FROM support_tickets
+WHERE created_at >= DATEADD(day, -1, CURRENT_DATE());
+
+-- Time-series forecasting without training a custom model
+SELECT * FROM TABLE(
+    SNOWFLAKE.ML.FORECAST(
+        model_name => 'daily_revenue_forecast',
+        input_data => TABLE(revenue_by_day),
+        timestamp_colname => 'day',
+        target_colname => 'revenue'
+    )
+);
+```
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Running ML directly against governed warehouse tables inherits existing role-based access control automatically, instead of requiring a separate governance layer to be rebuilt in an external ML platform.",
+    "Cortex's SQL-callable LLM and ML functions let analytics-oriented teams add AI capabilities (summarization, classification, forecasting) without standing up separate model-serving infrastructure.",
+    "Snowpark ML's feature store and model registry keep the full custom-model lifecycle inside the same platform as the data, reducing training/serving skew from data copies drifting out of sync.",
+]}
+  cons={[
+    "Treating Snowpark as a full substitute for a dedicated ML platform on frontier deep-learning or large-scale distributed-training workloads — it's built for the mainstream case, not the research frontier.",
+    "Calling Cortex LLM functions row-by-row over very large tables without considering cost — per-row hosted-model calls at warehouse scale can get expensive quickly compared to batched processing.",
+    "Assuming keeping data 'inside Snowflake' automatically means compliance and governance are solved — role-based access control still has to be configured correctly; the platform provides the mechanism, not the policy.",
+    "Ignoring that Cortex's hosted model catalog and versions evolve on Snowflake's schedule — production SQL calling a named model should pin versions explicitly rather than assume long-term stability of a default.",
+]}
+/>
+
+<KeyTakeaways items={[
+  "Snowflake's ML strategy is architecturally distinct from a separate ML platform: it runs compute and models inside the same governed boundary as the data, instead of exporting data to a second system.",
+  "Snowpark ML is the 'bring your own custom model' layer — Python/Scala/Java training and inference as warehouse compute, plus a feature store and model registry.",
+  "Cortex AI is the 'call a hosted model' layer — LLM functions (completion, summarization, embeddings) and ML functions (forecasting, anomaly detection), callable from SQL or Python with minimal setup.",
+  "The trade-off is real: staying inside Snowflake reduces governance/export risk but bounds you to what Snowpark's runtime and Cortex's hosted functions support — frontier or large-scale custom deep learning still typically needs a dedicated ML platform.",
+]} />
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What is the core architectural argument behind running ML workloads inside Snowflake (Snowpark/Cortex) rather than exporting data to a separate ML platform?",
+    options: [
+      "Snowflake's compute is always faster than any dedicated ML platform for every workload",
+      "Keeping compute inside the same governed boundary as the data avoids the governance risk, latency, and drift that come from exporting data to a second system that must be kept in sync",
+      "Separate ML platforms cannot process structured data at all",
+      "Snowflake requires no configuration of access control, unlike external ML platforms",
+    ],
+    answerIndex: 1,
+    explanation: "The 'bring compute to the data' philosophy avoids a whole category of problems that come from moving data out of its governed home: re-implementing access control elsewhere, network/serialization latency, and the risk of the exported copy drifting out of sync with the source of truth. It is not a claim that Snowflake compute is universally faster.",
+  },
+  {
+    question: "A research team needs to train a large custom deep-learning architecture with heavy distributed GPU requirements. Why might Snowpark ML not be the right fit for this specific workload?",
+    options: [
+      "Snowpark ML cannot run any Python code",
+      "Snowpark ML is built for mainstream custom-model workloads inside the warehouse's compute model; frontier-scale distributed deep learning typically needs a dedicated ML platform with more flexible compute shapes",
+      "Snowflake does not support Python at all",
+      "This workload is impossible on any cloud platform",
+    ],
+    answerIndex: 1,
+    explanation: "Snowpark ML's strength is keeping typical custom-model workloads (feature engineering, classical ML, moderate-scale training) inside the governed warehouse boundary. It is bounded by Snowpark's execution environment, so workloads requiring specialized large-scale distributed GPU training are still better served by a dedicated ML platform such as SageMaker, Vertex AI, or Databricks.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Snowflake AI and ML overview", venue: "Snowflake Documentation", year: 2026, url: "https://docs.snowflake.com/en/guides-overview-ai-features" },
+  { title: "Snowflake Cortex AI Functions", venue: "Snowflake Documentation", year: 2026, url: "https://docs.snowflake.com/en/user-guide/snowflake-cortex/aisql" },
+  { title: "Snowflake Cortex AI", venue: "Snowflake", year: 2026, url: "https://www.snowflake.com/en/product/features/cortex/" },
+  { title: "Snowflake for AI", venue: "Snowflake", year: 2026, url: "https://www.snowflake.com/en/product/ai/" },
+]} />

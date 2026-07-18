@@ -1,0 +1,151 @@
+---
+title: "LangChain & LangGraph"
+description: "LangChain's composable building blocks for LLM applications versus LangGraph's explicit graph-based control flow for agents that need cycles, branching, and human-in-the-loop interrupts."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["agents", "langchain", "langgraph", "frameworks"]
+prerequisites: ["Reasoning, Planning & Tool Calling", "Tool/function calling basics"]
+---
+
+## Intuition
+
+LangChain started as a toolkit of composable pieces for building LLM applications — prompt templates, model wrappers, output parsers, retrievers — that you chain together. That composition model works cleanly for linear pipelines, but agent behavior is rarely linear: an agent might loop back to re-try a step, branch depending on a tool's result, or need to pause entirely and wait for a human to approve something before continuing. LangGraph exists specifically to represent *that* kind of control flow explicitly, as a graph rather than a straight-line chain.
+
+<Callout type="tip" title="The one-sentence idea">
+  LangChain gives you the composable components an LLM application is built from (prompts, models, parsers, retrievers); LangGraph gives you a lower-level orchestration layer that models an agent's control flow as an explicit graph — nodes and edges — so cycles, conditional branches, and human-in-the-loop interrupts can be expressed directly instead of hacked around a linear chain.
+</Callout>
+
+## LangChain: Composable Building Blocks
+
+LangChain's core abstraction is the **chain** (and, increasingly, LangChain Expression Language / composable "runnables"): small, typed components — a prompt template, a chat model wrapper, an output parser, a retriever, a tool — that pipe into each other. A chain is essentially: format a prompt, call a model, parse the output, optionally retrieve context beforehand. This composability is genuinely useful for the large share of LLM application logic that *is* linear: retrieve documents, stuff them into a prompt, call the model, parse the structured result.
+
+```python
+# LangChain-style composable chain (illustrative)
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_openai import ChatOpenAI
+
+prompt = ChatPromptTemplate.from_template(
+    "Summarize the following support ticket in one sentence:\n\n{ticket_text}"
+)
+model = ChatOpenAI(model="gpt-4o-mini")
+chain = prompt | model | StrOutputParser()
+
+summary = chain.invoke({"ticket_text": "Customer reports login fails after password reset..."})
+```
+
+Where this abstraction strains is control flow that isn't a straight line: "if the model says it needs more information, loop back and ask a clarifying tool"; "if a step fails validation, retry with feedback"; "pause here until a human approves the next action." Expressing that with chained pipes alone means bolting on ad hoc conditionals and loops that the abstraction wasn't designed to represent cleanly.
+
+## LangGraph: Explicit Graph-Based Control Flow
+
+LangGraph represents an agent's control flow as an explicit graph: each **node** is a unit of work (often an LLM call or a tool call), each **edge** defines what runs next, and edges can be conditional — routed based on the current state. Because the graph can contain cycles, an agent can loop (re-plan, retry, keep calling tools) as long as needed, something a linear chain has no clean way to express. LangGraph also adds **built-in state management** (a typed state object threaded through every node, with reducers defining how each node's output merges into it) and **checkpointing** (persisting graph state at each step so a long-running or interrupted agent can resume rather than restart).
+
+<Mermaid chart={`
+graph TD
+  Start["Start"] --> Agent["Agent node: reason + decide action"]
+  Agent -->|"needs tool"| Tool["Tool node: execute"]
+  Tool --> Agent
+  Agent -->|"needs human approval"| Interrupt["Human-in-the-loop interrupt"]
+  Interrupt -->|"approved"| Agent
+  Interrupt -->|"rejected"| End1["End: rejected"]
+  Agent -->|"done"| End2["End: final answer"]
+`} />
+
+The **human-in-the-loop interrupt** is a distinct capability worth calling out: LangGraph can pause graph execution at a designated node, persist state via its checkpointing mechanism, and resume later once a human has reviewed or edited the state — a pattern that's awkward to bolt onto a chain designed around a single synchronous call sequence, but falls out naturally from a graph with persisted state at every node.
+
+```python
+# LangGraph-style state graph sketch (illustrative)
+from langgraph.graph import StateGraph, END
+from typing import TypedDict
+
+class AgentState(TypedDict):
+    messages: list
+    pending_action: dict | None
+
+def agent_node(state: AgentState) -> AgentState:
+    response = llm_with_tools.invoke(state["messages"])
+    return {"messages": state["messages"] + [response], "pending_action": response.tool_calls}
+
+def tool_node(state: AgentState) -> AgentState:
+    results = [execute_tool(call) for call in state["pending_action"]]
+    return {"messages": state["messages"] + results, "pending_action": None}
+
+def route(state: AgentState) -> str:
+    return "tools" if state["pending_action"] else END
+
+graph = StateGraph(AgentState)
+graph.add_node("agent", agent_node)
+graph.add_node("tools", tool_node)
+graph.add_conditional_edges("agent", route, {"tools": "tools", END: END})
+graph.add_edge("tools", "agent")  # the cycle: tool result feeds back into reasoning
+graph.set_entry_point("agent")
+
+app = graph.compile(checkpointer=my_checkpointer)  # enables persistence + interrupts
+```
+
+## Positioning
+
+<ComparisonTable
+  headers={["", "LangChain", "LangGraph"]}
+  rows={[
+    ["Core abstraction", "Composable chains/runnables: prompts, models, parsers, retrievers piped together", "A stateful graph: nodes, conditional edges, cycles"],
+    ["Best fit", "Linear or mostly-linear LLM application logic (RAG pipelines, simple prompt-in/parsed-output-out flows)", "Agent control flow needing loops, branching decisions, multi-agent coordination, or human-in-the-loop pauses"],
+    ["Cycles", "Not natively representable — would need manual looping code around chains", "Native — an edge can point back to an earlier node"],
+    ["Persistence / resumability", "Not built in to the chain abstraction itself", "Built-in checkpointing of graph state, enabling resume-after-interrupt and failure recovery"],
+    ["Relationship", "LangGraph is commonly built using LangChain's components as node implementations", "Sits at a lower level of control-flow granularity than a linear chain"],
+  ]}
+/>
+
+<Callout type="note" title="Verify before building">
+  LangChain reports that a majority of production agents built on their tooling now use some form of graph structure (DAG or state machine) rather than a simple linear chain, per LangChain's own 2026 state-of-the-industry reporting. Specific adoption figures, API surface, and package boundaries between LangChain and LangGraph continue to evolve — check <a href="https://docs.langchain.com" target="_blank" rel="noreferrer">docs.langchain.com</a> for the current API before building against it.
+</Callout>
+
+<KeyTakeaways items={[
+  "LangChain's core abstraction is composable chains of prompts, models, parsers, and retrievers — well suited to linear LLM application logic.",
+  "LangGraph represents agent control flow explicitly as a graph of nodes and conditional edges, natively supporting cycles that a linear chain can't express cleanly.",
+  "LangGraph adds built-in typed state management and checkpointing, which is what makes human-in-the-loop interrupts (pause, persist, resume later) practical.",
+  "The two are complementary in practice: LangGraph nodes are commonly implemented using LangChain's components rather than the two being mutually exclusive choices.",
+]} />
+
+## Common Mistakes
+
+- **Forcing agent loops into a linear chain**: bolting retry/loop logic onto chained runnables with manual Python control flow works for simple cases but loses the explicit state and checkpointing that make longer-running agent loops debuggable and resumable.
+- **Assuming LangGraph replaces LangChain**: LangGraph is commonly built *on top of* LangChain's components — the choice is about control-flow shape (linear vs. graph), not about swapping out prompts/models/parsers entirely.
+- **Skipping checkpointing when human-in-the-loop matters**: without a configured checkpointer, an "interrupt" has nothing durable to resume from if the process restarts between the pause and the human's response.
+- **Treating framework specifics as permanently stable**: both projects iterate quickly on APIs and positioning; a pattern that was idiomatic a year ago may be superseded — check current docs rather than relying on cached tutorials.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What can LangGraph express natively that a purely linear LangChain chain cannot?",
+    options: [
+      "Calling an LLM at all",
+      "Cycles and conditional branching in the agent's control flow, plus persisted state that enables pausing for human-in-the-loop review and resuming later",
+      "Prompt templating",
+      "Using more than one tool",
+    ],
+    answerIndex: 1,
+    explanation: "A linear chain executes a fixed sequence of steps once. LangGraph represents control flow as a graph, so an edge can loop back to an earlier node (a cycle) or branch conditionally based on state — and because that state is checkpointed, execution can be paused at a node and resumed later, which is what makes human-in-the-loop interrupts practical.",
+  },
+  {
+    question: "How do LangChain and LangGraph typically relate to each other in a real application?",
+    options: [
+      "They are mutually exclusive — you must choose one and never use the other",
+      "LangGraph commonly uses LangChain's composable components (prompts, models, parsers) as the implementation inside its graph nodes, while providing the graph-based control-flow layer on top",
+      "LangChain is deprecated in favor of LangGraph",
+      "LangGraph only works with non-LangChain model wrappers",
+    ],
+    answerIndex: 1,
+    explanation: "The two operate at different levels: LangChain provides the composable building blocks an LLM application is made of, and LangGraph provides a graph-based orchestration layer for control flow — a LangGraph node frequently is a LangChain chain or component under the hood.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "LangGraph overview", venue: "LangChain Documentation", url: "https://docs.langchain.com/oss/python/langgraph/overview" },
+  { title: "LangGraph — Agent Orchestration Framework", venue: "LangChain", url: "https://www.langchain.com/langgraph" },
+  { title: "langchain-ai/langgraph", venue: "GitHub", url: "https://github.com/langchain-ai/langgraph" },
+]} />

@@ -1,0 +1,196 @@
+---
+title: "Azure & GCP ML Platforms"
+description: "How Microsoft splits AI application-building from classic ML training across two named platforms, while Google bets on owning silicon, models, and cloud as one integrated stack — and what each philosophy costs you architecturally."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["mlops", "cloud", "azure", "gcp", "vertex-ai", "azure-ai-foundry"]
+prerequisites: ["AWS for ML (SageMaker, Bedrock)", "Retrieval-Augmented Generation (RAG)"]
+---
+
+## Intuition
+
+Every major cloud provider has converged on offering both "train your own model" infrastructure and "call a hosted foundation model" access — but they've drawn the boundary between the two in different places, and that boundary shapes how you architect around each platform. [AWS for ML](/docs/mlops/cloud-big-data/aws-for-ml) draws it as two separately branded products, SageMaker and Bedrock. Azure and Google Cloud draw it differently, and each choice has real consequences for how a team structures its ML organization and toolchain.
+
+<Callout type="tip" title="The one-sentence idea">
+  Azure separates *application building on top of foundation models* (Azure AI Foundry) from *training custom models from scratch* (Azure Machine Learning) as two distinct platforms with different target users; Google Cloud instead unifies both under one platform (Vertex AI, now being folded into the broader "Gemini Enterprise" branding) on the argument that owning the full stack — custom silicon, frontier models, and cloud infrastructure — makes a single integrated surface the right design.
+</Callout>
+
+## Azure: Two Platforms for Two Different Jobs
+
+<Mermaid chart={`
+graph TD
+  subgraph Foundry["Azure AI Foundry: build AI applications"]
+    Cat["Model catalog\n(OpenAI, Meta, Mistral, and more)"] --> Proj["Foundry project"]
+    Proj --> Agents["Agent orchestration / tool use"]
+    Proj --> Eval["Evaluation & observability"]
+    Proj --> Deploy1["Deployed endpoint"]
+  end
+  subgraph AML["Azure Machine Learning: train custom models"]
+    Data["Your training data"] --> Compute["AML compute cluster"]
+    Compute --> Job["Training job / AutoML"]
+    Job --> Reg["Model registry"]
+    Reg --> Deploy2["Managed online endpoint"]
+    Job -.-> Pipe["AML Pipelines\n(orchestration)"]
+  end
+`} />
+
+**Azure AI Foundry** consolidates what used to be separate Azure AI Studio and Azure OpenAI Studio experiences into one workspace for building AI applications and agents — chatbots, document-processing pipelines, RAG assistants — primarily on top of pre-trained or fine-tuned large language models accessed through a shared model catalog spanning OpenAI, Meta, Mistral, and other providers.
+
+**Azure Machine Learning (Studio)** remains the platform for the classic ML lifecycle: training predictive models on tabular data, custom computer vision, time-series forecasting, and any workflow where the model is trained from scratch on your own architecture rather than adapted from someone else's foundation model. It provides managed compute clusters, experiment tracking, AutoML, pipelines, and managed online/batch endpoints — conceptually parallel to SageMaker's role on AWS.
+
+The architectural implication: on Azure, "which product do I use" maps directly onto the same build-vs-consume question as AWS's SageMaker/Bedrock split, just with different names and a slightly different center of gravity — Foundry leans further into agent orchestration and application-layer concerns (evaluation, tracing, governance for LLM apps) than Bedrock's narrower model-invocation focus.
+
+## Google Cloud: One Platform, Vertically Integrated
+
+<Mermaid chart={`
+graph TD
+  Garden["Model Garden\n(200+ models: Gemini, Gemma, partner + OSS models)"] --> Choice{"Use as-is via API,\nor customize?"}
+  Choice -->|"Use as-is"| Endpoint1["Managed endpoint"]
+  Choice -->|"Customize"| Tune["Fine-tuning / custom training"]
+  Tune --> Registry["Vertex AI Model Registry"]
+  Registry --> Endpoint2["Vertex AI Endpoint"]
+  Data["Your training data"] --> Custom["Vertex AI Custom Training"]
+  Custom --> Registry
+  Endpoint1 --> Agents["Agent Builder / orchestration"]
+  Endpoint2 --> Agents
+`} />
+
+**Vertex AI** has historically been Google's single unified platform spanning both ends of the spectrum in one product: **Model Garden** gives access to 200+ models (Google's own Gemini and Gemma families alongside third-party and open-source models, including Anthropic's Claude) for teams that just want to call a hosted model, while **Vertex AI Custom Training** and the **Model Registry** give full control to teams training bespoke models on their own data and deploying them to Vertex AI Endpoints — both paths converge on the same registry, endpoint, and pipeline tooling rather than living in separately branded products.
+
+Google's strategic argument for this integration is that it owns every layer of the stack — custom TPU silicon, frontier Gemini models, the cloud platform itself, and a large enterprise distribution channel through Workspace — so a single platform surface is both possible and preferable to splitting concerns the way Azure and AWS do.
+
+<Callout type="note" title="A moving target">
+  As of mid-2026, Google has been repositioning Vertex AI's branding and roadmap under a broader "Gemini Enterprise" agent-platform umbrella, reflecting the industry-wide shift toward agentic workflows as the primary application pattern. The underlying architectural building blocks described above — Model Garden, custom training, model registry, endpoints — continue to function essentially as before; treat product naming as more volatile than the architecture itself, and verify current naming against Google Cloud's official documentation before committing to it in a design doc.
+</Callout>
+
+## Comparing the Three Major Clouds' ML Philosophy
+
+<ComparisonTable
+  headers={["Cloud", "How build-vs-consume is split", "Where custom training happens", "Where hosted foundation models live"]}
+  rows={[
+    ["AWS", "Two separately branded products", "SageMaker (training jobs, HyperPod, Pipelines)", "Bedrock (unified InvokeModel API, Knowledge Bases, Agents)"],
+    ["Azure", "Two separately branded products, application-vs-training oriented", "Azure Machine Learning (compute clusters, AutoML, pipelines)", "Azure AI Foundry (model catalog, agent orchestration, evaluation)"],
+    ["Google Cloud", "One unified platform covering both", "Vertex AI Custom Training + Model Registry", "Vertex AI Model Garden (same platform, same registry/endpoint tooling)"],
+  ]}
+/>
+
+No split is objectively superior — each reflects a different bet about how teams are organized. Separate products (AWS, Azure) let specialized teams (classic ML engineers vs. application/LLM engineers) work in tools scoped to their concerns without wading through irrelevant surface area. A unified platform (Google) reduces the friction of a workload that needs both a custom-trained component and a foundation-model component, since they already share tooling, IAM, and monitoring.
+
+## A Minimal Example of Each
+
+```python
+# Azure AI Foundry: call a hosted foundation model from the catalog
+from azure.ai.projects import AIProjectClient
+from azure.identity import DefaultAzureCredential
+
+project = AIProjectClient.from_connection_string(
+    credential=DefaultAzureCredential(),
+    conn_str="<foundry-project-connection-string>",
+)
+client = project.inference.get_chat_completions_client()
+response = client.complete(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Summarize this support ticket: ..."}],
+)
+```
+
+```python
+# Azure Machine Learning: submit a custom training job
+from azure.ai.ml import MLClient, command
+from azure.identity import DefaultAzureCredential
+
+ml_client = MLClient.from_config(credential=DefaultAzureCredential())
+
+job = command(
+    code="./src",
+    command="python train.py --n_estimators 200 --data ${{inputs.data}}",
+    inputs={"data": "azureml://datastores/workspaceblobstore/paths/training-data/"},
+    environment="azureml://registries/azureml/environments/sklearn-1.5/versions/1",
+    compute="cpu-cluster",
+)
+ml_client.jobs.create_or_update(job)
+```
+
+```python
+# Vertex AI: one platform for both a hosted model call and custom training
+from google.cloud import aiplatform
+
+aiplatform.init(project="my-project", location="us-central1")
+
+# Call a hosted foundation model from Model Garden
+model = aiplatform.gapic.PredictionServiceClient()
+
+# ...or launch custom training on the same platform
+job = aiplatform.CustomTrainingJob(
+    display_name="fraud-model-training",
+    script_path="train.py",
+    container_uri="us-docker.pkg.dev/vertex-ai/training/scikit-learn-cpu.1-0:latest",
+)
+model = job.run(
+    replica_count=1,
+    machine_type="n1-standard-4",
+    dataset=my_dataset,
+)
+endpoint = model.deploy(machine_type="n1-standard-4")
+```
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Azure's split lets a classic-ML data science team (Azure ML) and an application/LLM engineering team (Foundry) operate independently without one team's tooling churn affecting the other.",
+    "Vertex AI's unification means a workload mixing a custom-trained component and a foundation-model component shares IAM, logging, and monitoring by default, with less integration glue to write.",
+    "All three clouds now support importing/fine-tuning custom weights alongside pure hosted-model consumption, so no cloud forces an all-or-nothing choice.",
+]}
+  cons={[
+    "Assuming Azure ML and Azure AI Foundry are interchangeable causes teams to build LLM application logic in the wrong tool, missing Foundry's evaluation/tracing/agent features that Azure ML doesn't provide.",
+    "Assuming Vertex AI's single-platform design means less to learn — Model Garden, custom training, and the agent-building layer are each still substantial subsystems with their own configuration surface.",
+    "Treating any cloud's current product branding as fixed — Google's 2026 repositioning of Vertex AI branding is a reminder that architecture (registries, endpoints, training jobs) is more stable than product names, which shift as vendors compete on the agentic-AI narrative.",
+    "Picking a cloud's ML platform based on brand-name familiarity rather than which build-vs-consume split matches how your own ML and application teams are actually organized.",
+]}
+/>
+
+<KeyTakeaways items={[
+  "Azure AI Foundry targets building applications on top of pre-trained/fine-tuned foundation models; Azure Machine Learning targets training custom models from scratch — a philosophically similar split to AWS's Bedrock/SageMaker, with different branding and a stronger application/agent-tooling emphasis in Foundry.",
+  "Vertex AI has historically unified both build-your-own and consume-a-hosted-model paths on one platform (Model Garden, Custom Training, shared Model Registry and Endpoints), reflecting Google's full-stack integration strategy across silicon, models, and cloud.",
+  "None of the three splits (AWS's two products, Azure's two products, Google's one platform) is objectively better — the right fit depends on how specialized your own ML and application engineering teams are.",
+  "Cloud AI product branding is changing faster than the underlying architecture; validate current product names against official docs before finalizing a design.",
+]} />
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "A team wants to build a customer-support chatbot on top of an existing foundation model, with evaluation, tracing, and agent orchestration built in. On Azure, which platform is the better architectural fit?",
+    options: [
+      "Azure Machine Learning, since it handles all AI workloads",
+      "Azure AI Foundry, since it is purpose-built for building applications on top of pre-trained/fine-tuned foundation models, including agent orchestration and evaluation tooling",
+      "Neither — Azure has no equivalent to this workload",
+      "Azure Databricks, since it is Microsoft's primary AI platform",
+    ],
+    answerIndex: 1,
+    explanation: "Azure AI Foundry consolidates the model catalog, agent orchestration, and evaluation/observability tooling specifically for building applications on top of existing foundation models — exactly this workload. Azure Machine Learning is oriented toward training custom models from scratch, which isn't the requirement here.",
+  },
+  {
+    question: "What is the main architectural difference between how Google Cloud (Vertex AI) and AWS (SageMaker/Bedrock) have historically structured build-your-own-model vs. consume-a-hosted-model workflows?",
+    options: [
+      "Google Cloud does not support custom model training at all",
+      "AWS splits the two concerns into separately branded products, while Vertex AI has historically unified both under one platform sharing the same model registry and endpoint tooling",
+      "AWS unifies both under one product while Google Cloud splits them",
+      "There is no meaningful difference between the two approaches",
+    ],
+    answerIndex: 1,
+    explanation: "AWS uses two distinct products (SageMaker for custom training, Bedrock for hosted foundation models) with separate tooling and APIs. Vertex AI has historically kept both paths — Model Garden for hosted models and Custom Training for bespoke models — on one platform sharing the same registry and endpoint infrastructure, reflecting Google's full-stack integration strategy.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "What is Microsoft Foundry?", venue: "Microsoft Learn", year: 2026, url: "https://learn.microsoft.com/en-us/azure/foundry/what-is-foundry" },
+  { title: "Microsoft Foundry", venue: "Microsoft Azure", year: 2026, url: "https://azure.microsoft.com/en-us/products/ai-foundry/" },
+  { title: "Azure Machine Learning documentation", venue: "Microsoft Learn", year: 2026, url: "https://learn.microsoft.com/en-us/azure/machine-learning/" },
+  { title: "Vertex AI release notes", venue: "Google Cloud Documentation", year: 2026, url: "https://docs.cloud.google.com/vertex-ai/docs/core-release-notes" },
+  { title: "Vertex AI Model Garden", venue: "Google Cloud", year: 2026, url: "https://cloud.google.com/model-garden" },
+]} />

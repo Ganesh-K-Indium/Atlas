@@ -1,0 +1,123 @@
+---
+title: "Agent Memory Systems"
+description: "Why an agent's context window is not enough on its own, and the concrete mechanisms — short-term working memory, long-term persisted memory, and compaction strategies — that let it act coherently across a long or multi-session task."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["agents", "memory", "context-management", "vector-databases"]
+prerequisites: ["Context windows / attention basics", "Embeddings", "Retrieval-augmented generation"]
+---
+
+## Intuition
+
+An LLM has no memory in the conventional sense — every call is stateless, and everything the model "knows" about the current interaction is whatever text sits in its context window at that moment. Agent memory is the engineering layer built on top of that stateless model to create the *appearance* of continuity: remembering what happened five steps ago in this task, and remembering facts from a session that ended last week.
+
+<Callout type="tip" title="The one-sentence idea">
+  Short-term (working) memory is just the current context window — everything the model can literally see right now. Long-term memory is anything persisted outside that window and deliberately retrieved back into it later, typically via semantic search over a vector store.
+</Callout>
+
+## Short-Term (Working) Memory
+
+Working memory is the agent's context window during a single task or session: the system prompt, the conversation so far, tool call/observation pairs, and any scratchpad reasoning. It's fast (no retrieval step — it's just already there) and precise (nothing is lost to a lossy retrieval process), but it is fundamentally **bounded**. A long-running agent loop that keeps appending every Thought/Action/Observation will eventually hit the context window's token limit, and even before that limit, very long contexts tend to degrade a model's ability to attend to the most relevant parts ("lost in the middle" effects).
+
+This bound is the entire reason long-term memory and context-management strategies exist: working memory alone cannot support a task that runs longer than one context window's worth of tokens, or that needs to recall something from a previous, closed session.
+
+## Long-Term Memory
+
+Long-term memory is information deliberately persisted *outside* the model's context and *retrieved back in* only when relevant. The dominant pattern is a **vector store**: text (facts, past conversation summaries, documents) is embedded into vectors, stored, and later retrieved via approximate nearest-neighbor search over a new query's embedding — the same semantic-retrieval mechanism used in RAG. See [Vector Databases](/docs/retrieval-knowledge/rag/vector-databases) (roadmap) for the storage/retrieval mechanics themselves.
+
+Long-term memory in an agent context typically falls into a few categories:
+
+<ComparisonTable
+  headers={["Memory type", "What it stores", "Typical mechanism"]}
+  rows={[
+    ["Episodic", "Records of past interactions or task episodes ('last time this user asked X, we did Y')", "Vector store of summarized past sessions, retrieved by semantic similarity to the current query"],
+    ["Semantic / factual", "Discrete facts about the user, domain, or world ('the user's preferred output format is CSV')", "Structured key-value or document store, sometimes still embedding-indexed for fuzzy lookup"],
+    ["Procedural", "Learned strategies or successful action sequences for recurring task types", "Prompt/tool-selection heuristics distilled from past successful trajectories, injected into the system prompt"],
+  ]}
+/>
+
+<Mermaid chart={`
+graph TD
+  A["Current turn"] --> B{"Need info beyond\nthis context window?"}
+  B -->|"No"| C["Answer from working memory\n(context window contents)"]
+  B -->|"Yes"| D["Embed query"] --> E["Semantic search over\nvector store (long-term memory)"]
+  E --> F["Retrieve top-k relevant memories"] --> G["Inject into context"] --> C
+`} />
+
+## Memory Management Strategies
+
+Because working memory is bounded, a long-running agent needs an explicit strategy for what to do as the context fills up, rather than just letting a call fail once the limit is hit.
+
+**Summarization / compaction.** Periodically (or when approaching a token budget), older turns of the conversation or scratchpad are collapsed into a shorter summary that preserves the gist while discarding verbatim detail — trading precision for headroom. This is lossy by construction: a compacted summary of a debugging session might keep "tried X, failed because of Y, moved to Z" but drop the exact stack traces. Well-designed compaction keeps *decisions and their reasons*, since those matter more to future steps than raw tool output.
+
+**Structured memory extraction.** Rather than compressing everything uniformly, an explicit extraction step asks the model (or a cheaper auxiliary model) to pull out specific, well-typed facts from a conversation — "user's timezone," "the API key format required," "the file path being edited" — and write them to a structured store (not necessarily a vector store; a simple key-value record is often more precise for facts with one canonical value). This avoids the lossy blending that summarization risks, at the cost of only capturing what the extraction step was designed to look for.
+
+```python
+# Simplified sketch: compaction + structured extraction combined
+def manage_context(messages: list[dict], token_budget: int, llm) -> list[dict]:
+    if count_tokens(messages) < token_budget:
+        return messages
+
+    old, recent = messages[:-K], messages[-K:]  # keep last K turns verbatim
+
+    # Structured extraction: pull durable facts before they're lost to compaction
+    facts = llm.extract_structured(
+        old, schema={"user_preferences": list, "key_decisions": list, "open_todos": list}
+    )
+    memory_store.upsert(facts)  # persisted long-term, independent of this context
+
+    # Compaction: collapse the rest into a short narrative summary
+    summary = llm.summarize(old, focus="decisions and their reasons, not raw output")
+
+    return [{"role": "system", "content": f"Earlier context summary: {summary}"}] + recent
+```
+
+<KeyTakeaways items={[
+  "Short-term memory is simply the current context window — bounded, fast, and lossless while it lasts, but incapable of surviving a context limit or a new session on its own.",
+  "Long-term memory persists information outside the context window and retrieves it back in on demand, most commonly via semantic search over a vector store.",
+  "Compaction (summarization) trades precision for headroom by collapsing old turns; structured extraction avoids that lossiness for specific facts by writing them to a typed store as they occur.",
+  "A production agent typically combines both: recent turns kept verbatim, older turns compacted, and durable facts extracted into long-term memory before they're lost to compaction.",
+]} />
+
+## Common Mistakes
+
+- **Treating the context window as infinite memory**: appending every tool call and observation forever eventually exhausts the token budget, and long before that, degrades retrieval quality within the context itself.
+- **Summarizing indiscriminately**: naive summarization that compresses everything uniformly tends to lose the specific facts (exact values, IDs, file paths) that matter most for correctness, while keeping generic narrative that matters less.
+- **Retrieving too much or too little from long-term memory**: dumping every semantically-similar past memory into context re-creates the context-bloat problem one layer up; retrieving nothing defeats the point of having long-term memory at all. Retrieval needs its own relevance/ranking discipline, same as RAG.
+- **No memory write discipline**: writing every raw interaction to long-term storage without deduplication or staleness handling leads to a vector store full of near-duplicate or outdated memories that degrade retrieval precision over time.
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What fundamentally distinguishes an agent's short-term memory from its long-term memory?",
+    options: [
+      "Short-term memory is stored in a vector database; long-term memory is not",
+      "Short-term memory is the current context window the model can directly see; long-term memory is anything persisted outside that window and deliberately retrieved back in when relevant",
+      "Long-term memory only exists for fine-tuned models",
+      "There is no real distinction — both terms describe the same mechanism",
+    ],
+    answerIndex: 1,
+    explanation: "Short-term/working memory is simply whatever text is currently in the context window. Long-term memory lives outside the model's context entirely (e.g. in a vector store) and has to be explicitly retrieved and re-injected into context to be used again.",
+  },
+  {
+    question: "What is the key trade-off between summarization/compaction and structured memory extraction as context-management strategies?",
+    options: [
+      "Summarization is always more accurate than extraction",
+      "Extraction requires no LLM calls at all, while summarization always does",
+      "Summarization trades precision for headroom by lossily collapsing content into a narrative gist, while structured extraction preserves specific typed facts precisely but only captures what it was designed to look for",
+      "They are functionally identical strategies with different names",
+    ],
+    answerIndex: 2,
+    explanation: "Compaction/summarization is a general-purpose but lossy compression of older context. Structured extraction targets specific fact types (e.g. user preferences, key decisions) and writes them precisely to a typed store, avoiding summarization's blending loss, but only for the fact types it's designed to extract.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Lost in the Middle: How Language Models Use Long Contexts", authors: "Liu, N. F., et al.", venue: "arXiv / TACL", year: 2023, url: "https://arxiv.org/abs/2307.03172" },
+  { title: "MemGPT: Towards LLMs as Operating Systems", authors: "Packer, C., et al.", venue: "arXiv", year: 2023, url: "https://arxiv.org/abs/2310.08560" },
+  { title: "Generative Agents: Interactive Simulacra of Human Behavior", authors: "Park, J. S., et al.", venue: "arXiv (UIST 2023)", year: 2023, url: "https://arxiv.org/abs/2304.03442" },
+]} />

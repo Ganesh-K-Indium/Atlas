@@ -1,0 +1,153 @@
+---
+title: "ML Pipelines & Orchestration"
+description: "Why a chain of notebook cells run in order is not a pipeline, and how DAG-based orchestration turns brittle manual re-runs into scheduled, retryable, lineage-tracked workflows."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["mlops", "orchestration", "airflow", "kubeflow", "pipelines"]
+prerequisites: ["Basic ML training workflow", "Command-line and scripting basics", "Familiarity with cron-style scheduling"]
+---
+
+<Prerequisites items={["Basic ML training workflow", "Command-line and scripting basics", "Familiarity with cron-style scheduling"]} />
+
+## Intuition
+
+A notebook that pulls data, cleans it, trains a model, and evaluates it "works" — as long as a human runs every cell, in order, every time, and remembers which cells to skip when only the last step needs to change. That works for one person on one afternoon. It does not work when the same workflow needs to run automatically every night on fresh data, be retried when a step fails, be audited for what data and code version produced a given model, or be handed to a teammate who wasn't in the room when it was written.
+
+<Callout type="tip" title="A concrete failure mode this prevents">
+  A team's model retraining process is "open the notebook, run all cells, if the data-loading cell errors because the previous day's file didn't land yet, just re-run it in five minutes." One night, the upstream data landed late *and* the file schema had changed slightly. The person on call wasn't watching, so nobody re-ran the load cell — but the notebook had already executed the training cell against a stale, partially-loaded dataframe left over from the last successful run, silently retraining the "daily" model on three-day-old data with a mismatched feature column. The deployed model looked fine in the dashboard (a training job "succeeded"), but was actually trained on the wrong data, and nothing about the process would have caught this because there was no explicit dependency graph enforcing that training could only run after a *validated* fresh load.
+</Callout>
+
+## The Core Problem: Implicit Order vs. Explicit Dependencies
+
+A notebook encodes step order implicitly, through cell position and human habit. A **DAG (directed acyclic graph)** orchestration system encodes it explicitly: each unit of work is a **task node**, and edges represent hard dependencies — "task B cannot start until task A has *successfully* completed." This explicitness is what enables everything else:
+
+- **Retries with backoff** — if a task fails (a transient network error hitting a source database, say), the orchestrator can retry just that task a bounded number of times without re-running everything upstream of it.
+- **Scheduling** — a DAG can be triggered on a cron schedule, or triggered by an event (new data landing), running unattended.
+- **Partial re-runs** — if only the evaluation step needs to change, only that node and its downstream dependents need to re-execute, not the whole pipeline.
+- **Lineage tracking** — because each node's inputs and outputs are explicit, the orchestrator can record exactly which data version and code version produced a given model artifact, which is what makes debugging a bad model in production tractable weeks later.
+- **Parallelism** — independent branches of the DAG (e.g., computing two unrelated feature groups) can run concurrently, since the graph structure makes independence explicit rather than assumed.
+
+<Mermaid chart={`graph TD
+  A[Ingest raw data] --> B[Validate data schema/quality]
+  B --> C[Compute features]
+  C --> D[Train model]
+  C --> E[Compute evaluation baseline]
+  D --> F[Evaluate model on holdout]
+  E --> F
+  F --> G{Meets quality gate?}
+  G -->|yes| H[Register model version]
+  G -->|no| I[Alert - halt promotion]
+  H --> J[Deploy to staging]
+`} />
+
+Notice the explicit branch/merge structure (C feeding both D and E, both converging at F) and the conditional gate (G) — none of this is naturally expressible as "run these cells top to bottom."
+
+## Airflow vs. Kubeflow Pipelines: Different Layers of the Same Problem
+
+<Callout type="note" title="Verified positioning">
+  **Apache Airflow** is a general-purpose task orchestrator: DAGs are defined directly in Python, it does not require Kubernetes to run (though it can run tasks on Kubernetes via an operator), and it has no ML-specific opinions built in — you get generic scheduling, retries, and dependency management, and you bring your own ML-specific conventions. Its broad adoption outside ML also means broad tooling, integrations, and hiring pools. **Kubeflow Pipelines** is Kubernetes-native by design: pipelines are authored in Python via its SDK, which compiles them down to a Kubernetes-native workflow spec, and it bakes in ML-specific conventions — each pipeline step runs in its own container, parameters and artifacts are passed between steps with typed metadata, and it integrates with Kubeflow's broader ecosystem (experiment tracking, hyperparameter tuning, model serving). The practical trade-off: Airflow is more flexible and widely adopted for general orchestration and easier to reason about for simple linear/branching DAGs in pure Python, while Kubeflow Pipelines gives more out-of-the-box ML lineage and containerized reproducibility at the cost of requiring a Kubernetes cluster and a steeper authoring model.
+</Callout>
+
+## Example: A Retraining DAG
+
+```python
+# airflow-style DAG definition for scheduled retraining
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from datetime import datetime, timedelta
+
+default_args = {
+    "retries": 3,
+    "retry_delay": timedelta(minutes=5),
+    "email_on_failure": True,
+}
+
+with DAG(
+    dag_id="daily_churn_model_retrain",
+    schedule_interval="0 3 * * *",  # 3 AM daily
+    start_date=datetime(2026, 1, 1),
+    catchup=False,
+    default_args=default_args,
+) as dag:
+
+    def validate_data(**context):
+        # Fails loudly (raises) rather than silently proceeding on bad data
+        from data_quality import assert_schema_and_freshness
+        assert_schema_and_freshness(table="churn_features", max_staleness_hours=26)
+
+    def train_model(**context):
+        from training import train_and_log_to_mlflow
+        run_id = train_and_log_to_mlflow(data_table="churn_features")
+        context["ti"].xcom_push(key="run_id", value=run_id)
+
+    def evaluate_and_gate(**context):
+        run_id = context["ti"].xcom_pull(key="run_id")
+        from evaluation import evaluate_against_production_baseline
+        passed = evaluate_against_production_baseline(run_id, min_f1_delta=-0.01)
+        if not passed:
+            raise ValueError("New model underperforms production baseline — halting promotion")
+
+    ingest = PythonOperator(task_id="validate_data", python_callable=validate_data)
+    train = PythonOperator(task_id="train_model", python_callable=train_model)
+    evaluate = PythonOperator(task_id="evaluate_and_gate", python_callable=evaluate_and_gate)
+
+    ingest >> train >> evaluate
+```
+
+The `raise` in `validate_data` and `evaluate_and_gate` is the mechanism, not an afterthought: it is precisely what converts "the training cell ran against stale data without anyone noticing" into "the DAG run is marked failed and nothing downstream executes."
+
+<ComparisonTable
+  headers={["Approach", "Retry/scheduling", "ML-specific lineage", "Infra requirement", "Best fit"]}
+  rows={[
+    ["Manual notebook re-run", "None — human-driven", "None — implicit in memory/notebook history", "None", "Exploration and one-off analysis"],
+    ["Apache Airflow", "Built-in retries, cron and sensor-based scheduling", "Generic (build your own conventions)", "Runs standalone or on Kubernetes", "General-purpose orchestration; teams without a Kubernetes mandate"],
+    ["Kubeflow Pipelines", "Built-in retries, scheduling via Kubernetes-native primitives", "Native — typed artifacts, containerized steps, ML metadata tracking", "Requires a Kubernetes cluster", "Kubernetes-native ML platforms wanting built-in lineage/reproducibility"],
+  ]}
+/>
+
+## Common Mistakes
+
+- **Treating a script that "runs top to bottom" as a pipeline.** Without explicit task boundaries and dependency edges, there is no retry granularity, no partial re-run, and no lineage — just a monolithic script that either fully succeeds or fully fails.
+- **Silent failure instead of hard gates.** A pipeline that logs a warning and continues on a data-quality failure (rather than raising and halting) defeats the purpose of orchestration — the whole point of an explicit DAG is to make "should downstream steps run" an enforced decision, not an assumption.
+- **No idempotency.** Tasks that aren't safe to re-run (e.g., a training step that appends to a table rather than overwriting a versioned partition) turn "just retry the failed task" into a data-corruption risk.
+- **Overloading a single task node.** Cramming ingestion, feature computation, and training into one giant task node reintroduces the "all-or-nothing" notebook problem inside a single DAG node — granularity matters as much as having a DAG at all.
+- **No connection between orchestration and experiment tracking / registry.** A pipeline that "runs successfully" but doesn't log its run to a tracking system or gate promotion through a registry has lineage in name only — the DAG's own logs aren't a substitute for a queryable record of what model version came from what run.
+
+<KeyTakeaways items={[
+  "DAG-based orchestration makes task dependencies explicit rather than implicit in notebook cell order, which is what enables retries, scheduling, partial re-runs, and lineage tracking.",
+  "Airflow is a general-purpose orchestrator usable without Kubernetes; Kubeflow Pipelines is Kubernetes-native and bakes in ML-specific conventions like typed artifact passing and containerized steps.",
+  "A pipeline's quality gates (e.g. 'does the new model beat the production baseline') should be hard failures that halt downstream execution, not warnings that get silently ignored.",
+  "Idempotent, appropriately granular task nodes are what make retries and partial re-runs safe — a DAG with one giant task node doesn't actually solve the all-or-nothing problem.",
+]} />
+
+<Quiz questions={[
+  {
+    question: "What is the key structural difference between a notebook run top-to-bottom and a DAG-based orchestrated pipeline?",
+    options: [
+      "DAGs are always faster to execute",
+      "A DAG makes task dependencies and success/failure conditions explicit, enabling retries of individual failed steps, partial re-runs, and lineage tracking — a notebook's ordering is implicit and enforced only by habit",
+      "Notebooks cannot contain Python code",
+      "DAGs eliminate the need for data validation",
+    ],
+    answerIndex: 1,
+    explanation: "The defining feature of DAG orchestration is explicit, machine-enforced dependency edges between tasks, each with defined success/failure semantics — this is what allows retrying just a failed node, re-running only downstream-affected work, and recording exactly what produced a given output, none of which a notebook's implicit cell ordering provides.",
+  },
+  {
+    question: "Why is a 'quality gate' step that logs a warning but continues on failure worse than one that raises an exception and halts the pipeline?",
+    options: [
+      "Logging warnings is always slower than raising exceptions",
+      "A warning-only gate lets downstream steps (e.g. model promotion) execute even when the precondition (e.g. fresh, valid data) wasn't met, silently defeating the purpose of having an explicit dependency graph in the first place",
+      "Exceptions are required by Python syntax",
+      "There is no meaningful difference as long as the warning is visible in logs",
+    ],
+    answerIndex: 1,
+    explanation: "The value of an explicit DAG dependency is that a failed precondition should stop downstream work from running at all. A warning that doesn't halt execution means the 'dependency' is cosmetic — the training or promotion step runs regardless, exactly the silent failure mode orchestration is meant to prevent.",
+  },
+]} />
+
+<ReferenceList items={[
+  { title: "Hidden Technical Debt in Machine Learning Systems", authors: "Sculley, D. et al.", venue: "NeurIPS", year: 2015, url: "https://papers.nips.cc/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf" },
+  { title: "Apache Airflow — Official Documentation", authors: "Apache Software Foundation", venue: "Official documentation", year: 2026, url: "https://airflow.apache.org/docs/" },
+  { title: "Kubeflow Pipelines — Official Documentation", authors: "Kubeflow project", venue: "Official documentation", year: 2026, url: "https://www.kubeflow.org/docs/components/pipelines/" },
+]} />
