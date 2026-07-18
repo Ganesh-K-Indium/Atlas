@@ -15,7 +15,9 @@ import { extractToc } from "@/lib/toc";
 import { mdxComponents } from "@/components/mdx/mdx-components";
 import { DocPageHeader } from "@/components/layout/doc-page-header";
 import { PlannedPlaceholder } from "@/components/layout/planned-placeholder";
+import { Paywall } from "@/components/layout/paywall";
 import { Toc } from "@/components/layout/toc";
+import { hasActiveSubscription } from "@/lib/subscription";
 
 interface PageProps {
   params: Promise<{ group: string; section: string; item: string }>;
@@ -54,7 +56,8 @@ export default async function DocPage({ params }: PageProps) {
     );
   }
 
-  const toc = extractToc(source.content);
+  const isGated = nav.item.tier === "pro" && !(await hasActiveSubscription());
+  const toc = isGated ? [] : extractToc(source.content);
 
   return (
     <div className="flex gap-10">
@@ -66,6 +69,9 @@ export default async function DocPage({ params }: PageProps) {
           readingTime={source.readingTime}
           breadcrumb={breadcrumb}
         />
+        {isGated ? (
+          <Paywall title={source.frontmatter.title ?? nav.item.title} />
+        ) : (
         <div className="max-w-none">
           <MDXRemote
             source={source.content}
@@ -92,6 +98,7 @@ export default async function DocPage({ params }: PageProps) {
             }}
           />
         </div>
+        )}
       </article>
       <aside className="sticky top-20 hidden h-fit w-56 shrink-0 xl:block">
         <Toc entries={toc} />

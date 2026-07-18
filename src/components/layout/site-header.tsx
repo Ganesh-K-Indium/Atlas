@@ -53,12 +53,18 @@ export function SiteHeader() {
           <Button variant="ghost" size="sm" asChild>
             <Link href="/roadmap">Roadmap</Link>
           </Button>
+          <Button variant="ghost" size="sm" asChild>
+            <Link href="/pricing">Pricing</Link>
+          </Button>
         </nav>
 
         <div className="ml-auto flex items-center gap-2">
           <div className="hidden sm:block">
             <CommandMenu />
           </div>
+          <Button variant="outline" size="sm" asChild className="hidden sm:inline-flex">
+            <Link href="/login">Sign in</Link>
+          </Button>
           <ThemeToggle />
         </div>
       </div>

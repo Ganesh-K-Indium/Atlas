@@ -2,12 +2,16 @@ export type ContentStatus = "published" | "draft" | "planned";
 
 export type Difficulty = "beginner" | "intermediate" | "advanced" | "expert";
 
+export type ContentTier = "free" | "pro";
+
 export interface NavItem {
   title: string;
   slug: string;
   status: ContentStatus;
   difficulty?: Difficulty;
   description?: string;
+  /** Defaults to "free" when omitted — set "pro" to gate behind a subscription. */
+  tier?: ContentTier;
 }
 
 export interface NavSection {
