@@ -1,0 +1,154 @@
+---
+title: "The Transformer Architecture"
+description: "How 'Attention Is All You Need' replaced recurrence with self-attention, and why that single change unlocked the scaling that produced modern LLMs."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "transformers", "attention", "nlp"]
+prerequisites: ["Linear algebra basics", "Softmax", "RNNs (for contrast)"]
+---
+
+## Intuition
+
+Before 2017, sequence models (RNNs, LSTMs) processed tokens one at a time, carrying information forward through a hidden state. That's inherently sequential — you can't process token 10 before token 9 — which caps parallelism and makes long-range dependencies hard to learn (information has to survive many sequential updates).
+
+The Transformer's core bet: **throw away recurrence entirely** and let every token attend directly to every other token in the sequence, in parallel, via an explicit "which other tokens are relevant to me" mechanism — self-attention. This makes long-range dependencies a single computational hop instead of a chain of sequential updates, and makes the whole sequence parallelizable on a GPU.
+
+<Callout type="tip" title="The one-sentence idea">
+  Self-attention computes, for every token, a weighted average of every other token's representation — where the weights are learned relevance scores between token pairs. It's a fully-connected, content-based routing mechanism, in place of the fixed, position-based routing of convolution or recurrence.
+</Callout>
+
+## Scaled Dot-Product Attention — The Core Operation
+
+Every token's representation is projected into three vectors: a **Query** ("what am I looking for"), a **Key** ("what do I contain"), and a **Value** ("what do I actually offer if selected"). For a full sequence, stack these as matrices $Q, K, V \in \mathbb{R}^{n \times d_k}$:
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\!\left( \frac{QK^\top}{\sqrt{d_k}} \right) V
+$$
+
+Step by step:
+
+1. $QK^\top$ computes a raw relevance score between every pair of tokens — token $i$'s query dotted with token $j$'s key — giving an $n \times n$ score matrix.
+2. Dividing by $\sqrt{d_k}$ (the **scaling** in "scaled dot-product") prevents the dot products from growing large in magnitude as $d_k$ increases, which would push softmax into regions with vanishing gradients. This single detail is why the mechanism trains stably at scale.
+3. `softmax` (applied per row) turns raw scores into a probability distribution over "which tokens to attend to."
+4. Multiplying by $V$ produces, for each token, a weighted average of every other token's value vector — weighted exactly by how relevant that other token was judged to be.
+
+## Multi-Head Attention
+
+A single attention computation forces all relevance information through one $d_k$-dimensional bottleneck. Multi-head attention runs $h$ independent attention computations in parallel, each with its own learned projections, then concatenates and mixes the results:
+
+$$
+\text{MultiHead}(Q, K, V) = \text{Concat}(\text{head}_1, \ldots, \text{head}_h) \, W^O
+$$
+$$
+\text{head}_i = \text{Attention}(Q W_i^Q,\ K W_i^K,\ V W_i^V)
+$$
+
+Each head can specialize — empirically, different heads in trained Transformers learn to track different relationships (e.g., one head tracks syntactic dependencies, another tracks coreference). This is analogous to how multiple convolutional filters each learn different feature detectors.
+
+## Full Encoder Block
+
+<Mermaid chart={`
+graph TD
+  X["Input embeddings + positional encoding"] --> MHA["Multi-Head Self-Attention"]
+  X --> Add1["Add (residual)"]
+  MHA --> Add1
+  Add1 --> LN1["LayerNorm"]
+  LN1 --> FFN["Position-wise Feed-Forward (2 linear layers + nonlinearity)"]
+  LN1 --> Add2["Add (residual)"]
+  FFN --> Add2
+  Add2 --> LN2["LayerNorm"]
+  LN2 --> Out["Output — same shape as input"]
+`} />
+
+Two design details matter enormously in practice:
+
+- **Residual connections** (the `Add` steps) let gradients flow directly through the network via the identity path, which is what makes stacking dozens of Transformer blocks trainable at all — without them, deep stacks suffer the same vanishing-gradient problems as deep MLPs (see [Backpropagation Derivation](/docs/foundations/calculus-optimization/backpropagation-derivation)).
+- **Layer normalization** stabilizes the distribution of activations at each layer, independent of batch statistics (unlike batch norm), which matters for variable-length sequences and small batch sizes.
+
+The feed-forward block applies the *same* two-layer MLP independently to every token position — it doesn't mix information across positions (only attention does that). Conceptually: attention moves information *between* tokens; the feed-forward layer processes information *within* each token.
+
+## Positional Encoding
+
+Self-attention itself is **permutation-invariant** — shuffle the input tokens and $QK^\top$ gives the same set of pairwise scores, just reindexed. Without an explicit position signal, "the cat sat on the mat" and "mat the sat cat on the" would look identical. The original paper injects sinusoidal positional encodings additively into the input embeddings:
+
+$$
+PE_{(pos, 2i)} = \sin\!\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right), \qquad PE_{(pos, 2i+1)} = \cos\!\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)
+$$
+
+Modern LLMs mostly replace this with **RoPE** (Rotary Position Embedding), which encodes position by rotating query/key vectors rather than adding a fixed vector — see [Positional Encoding & RoPE](/docs/llms/tokenization-representations/positional-encoding-rope) for the full derivation and why it generalizes better to long contexts.
+
+## Encoder-Decoder vs. Decoder-Only
+
+The original Transformer was an encoder-decoder (for machine translation): the encoder processes the source sequence bidirectionally, the decoder generates the target sequence autoregressively while cross-attending to the encoder's output. Modern LLMs (the GPT family) are **decoder-only**: a single stack where every token can only attend to earlier tokens (enforced via a **causal mask** — setting future positions' attention scores to $-\infty$ before softmax), trained to predict the next token.
+
+<ComparisonTable
+  headers={["Architecture", "Attention pattern", "Examples", "Best for"]}
+  rows={[
+    ["Encoder-only", "Bidirectional — every token attends to every other token", "BERT, RoBERTa", "Understanding tasks: classification, embeddings, NER"],
+    ["Decoder-only", "Causal — each token attends only to itself and earlier tokens", "GPT family, Llama, DeepSeek, Qwen", "Open-ended generation, the dominant architecture for modern LLMs"],
+    ["Encoder-decoder", "Encoder bidirectional; decoder causal + cross-attends to encoder output", "T5, original Transformer, BART", "Sequence-to-sequence tasks: translation, summarization"],
+  ]}
+/>
+
+## Complexity — The Central Bottleneck
+
+Self-attention's defining cost is computing the full $n \times n$ score matrix:
+
+| Operation | Time | Memory |
+| --- | --- | --- |
+| Self-attention (full) | $O(n^2 \cdot d)$ | $O(n^2)$ for the attention matrix |
+| Recurrent layer (RNN/LSTM) | $O(n \cdot d^2)$ | $O(d)$, but $O(n)$ *sequential* steps — not parallelizable |
+| Feed-forward layer | $O(n \cdot d^2)$ | $O(n \cdot d)$ |
+
+The quadratic-in-sequence-length cost of attention is precisely why long-context serving needs techniques like [FlashAttention](/docs/llms/inference-serving/flash-attention) (roadmap, avoids materializing the full $n \times n$ matrix) and why sub-quadratic architectures like [State Space Models](/docs/deep-learning/modern-architectures/state-space-models) (roadmap, e.g. Mamba) exist as alternatives for very long sequences.
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Fully parallelizable across the sequence dimension during training — unlike RNNs, every position's attention can be computed simultaneously.",
+    "Constant path length between any two tokens (one attention hop), versus O(n) for RNNs — this is why Transformers handle long-range dependencies so much better.",
+    "Highly general: the same block works for text, images (ViT), audio, and multimodal sequences with only tokenization changes.",
+  ]}
+  cons={[
+    "Quadratic compute and memory in sequence length — this is the primary scaling bottleneck for long-context models.",
+    "No inductive bias for locality or order (unlike CNNs/RNNs) — must learn positional relationships entirely from data plus positional encoding.",
+    "Autoregressive decoding is inherently sequential at inference time (one token at a time), even though training is parallel — this is the core motivation for KV caching and speculative decoding.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is the dot product in attention divided by √d_k?",
+    options: [
+      "To normalize the output to sum to 1",
+      "To counteract the growth in dot-product magnitude as dimensionality increases, which would otherwise push softmax into saturated, low-gradient regions",
+      "It's a historical convention with no mathematical justification",
+      "To make the attention weights sparse",
+    ],
+    answerIndex: 1,
+    explanation: "For random vectors with unit variance components, the dot product's variance grows linearly with d_k. Without scaling, large-magnitude scores saturate softmax, causing near-zero gradients almost everywhere — the scaling keeps the pre-softmax values in a well-conditioned range.",
+  },
+  {
+    question: "What does the causal mask in a decoder-only Transformer actually do mechanically?",
+    options: [
+      "It removes the positional encoding for future tokens",
+      "It sets attention scores for future positions to negative infinity before the softmax, so they receive zero attention weight after normalization",
+      "It deletes future tokens from the input entirely",
+      "It only applies during training, not inference",
+    ],
+    answerIndex: 1,
+    explanation: "The mask is added to the raw QKᵀ/√d_k scores before softmax. Adding -∞ (in practice, a very large negative number) to disallowed positions makes their post-softmax probability exactly 0, without changing the computation's shape or requiring the sequence to be physically shortened.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Attention Is All You Need", authors: "Vaswani, A. et al.", venue: "NeurIPS", year: 2017, url: "https://arxiv.org/abs/1706.03762" },
+  { title: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding", authors: "Devlin, J. et al.", venue: "NAACL", year: 2019, url: "https://arxiv.org/abs/1810.04805" },
+  { title: "Language Models are Few-Shot Learners (GPT-3)", authors: "Brown, T. et al.", venue: "NeurIPS", year: 2020, url: "https://arxiv.org/abs/2005.14165" },
+]} />

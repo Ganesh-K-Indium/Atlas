@@ -1,0 +1,163 @@
+---
+title: "Retrieval-Augmented Generation (RAG)"
+description: "How grounding an LLM's generation in retrieved documents reduces hallucination and lets a model answer questions about knowledge it was never trained on."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "rag", "retrieval", "vector-databases"]
+prerequisites: ["Embeddings", "The Transformer Architecture"]
+---
+
+## Intuition
+
+An LLM's knowledge is frozen at training time and compressed into its weights — it can't know about your company's internal documents, yesterday's news, or anything too rare to have been memorized precisely. Retraining the model every time information changes is prohibitively expensive.
+
+**Retrieval-Augmented Generation** sidesteps this: instead of relying purely on parametric memory (what's baked into the weights), it retrieves relevant text from an external knowledge source at query time and inserts it directly into the model's context, so generation is *grounded* in explicit, inspectable, updatable evidence rather than the model's possibly-outdated or hallucinated recollection.
+
+<Callout type="tip" title="The one-sentence idea">
+  RAG = retrieve relevant documents for the query, then generate an answer conditioned on both the query and the retrieved documents — turning "hope the model remembers this correctly" into "show the model the source and ask it to read."
+</Callout>
+
+## Architecture
+
+<Mermaid chart={`
+graph LR
+  Q["User query"] --> E["Embed query"]
+  E --> R["Retrieve top-k chunks from vector index"]
+  Docs["Document corpus"] -.->|"offline: chunk + embed + index"| VDB[("Vector database")]
+  VDB --> R
+  R --> Rerank["Optional: rerank by relevance"]
+  Rerank --> Ctx["Assemble context: query + retrieved chunks"]
+  Ctx --> LLM["LLM generates grounded answer"]
+`} />
+
+**Indexing (offline, done once per corpus update):**
+1. Split source documents into chunks (paragraphs, fixed token windows, or semantically-aware splits).
+2. Embed each chunk into a dense vector using an embedding model.
+3. Store vectors in a vector database, indexed for fast approximate nearest-neighbor search.
+
+**Query time (online, per user request):**
+1. Embed the incoming query with the same embedding model.
+2. Retrieve the top-$k$ most similar chunks via vector similarity search (typically cosine similarity or inner product).
+3. Optionally **rerank** the retrieved candidates with a more expensive cross-encoder model that jointly scores (query, chunk) pairs — retrieval favors recall and speed; reranking favors precision.
+4. Concatenate the retrieved chunks with the original query into a prompt, and let the LLM generate a response conditioned on both.
+
+## Why Vector Search, and What It's Actually Computing
+
+Chunks are embedded so that semantically similar text ends up close together in vector space — this lets retrieval match on *meaning* rather than exact keyword overlap. Similarity is typically measured with cosine similarity:
+
+$$
+\text{sim}(q, d) = \frac{q \cdot d}{\lVert q \rVert \, \lVert d \rVert}
+$$
+
+Since brute-force comparison against millions of vectors is too slow for real-time queries, production vector databases use **approximate nearest neighbor (ANN)** indexes — most commonly HNSW (Hierarchical Navigable Small World graphs) or IVF (inverted file index with clustering) — trading a small amount of recall for orders-of-magnitude faster lookup.
+
+## Dense vs. Sparse vs. Hybrid Retrieval
+
+<ComparisonTable
+  headers={["Method", "How it matches", "Strength", "Weakness"]}
+  rows={[
+    ["Sparse (BM25 / TF-IDF)", "Exact term overlap, weighted by term frequency and rarity", "Excellent for exact keyword/entity matches (product codes, names, IDs)", "Misses semantic matches with no shared vocabulary"],
+    ["Dense (embeddings)", "Cosine/inner-product similarity in learned vector space", "Captures semantic/paraphrase similarity", "Can miss exact-match cases embeddings weren't trained to prioritize"],
+    ["Hybrid", "Combines both scores (e.g. reciprocal rank fusion)", "Covers both exact-match and semantic-match failure modes", "More moving parts to tune and maintain"],
+  ]}
+/>
+
+Most production RAG systems converge on hybrid search precisely because dense and sparse retrieval fail on different, largely non-overlapping query types.
+
+## Minimal Implementation Sketch
+
+```python
+from openai import OpenAI
+import numpy as np
+
+client = OpenAI()
+
+def embed(texts: list[str]) -> np.ndarray:
+    resp = client.embeddings.create(model="text-embedding-3-large", input=texts)
+    return np.array([d.embedding for d in resp.data])
+
+def retrieve(query: str, chunk_embeddings: np.ndarray, chunks: list[str], k: int = 5):
+    q_emb = embed([query])[0]
+    scores = chunk_embeddings @ q_emb / (
+        np.linalg.norm(chunk_embeddings, axis=1) * np.linalg.norm(q_emb)
+    )
+    top_k = np.argsort(scores)[::-1][:k]
+    return [chunks[i] for i in top_k]
+
+def generate(query: str, retrieved_chunks: list[str]) -> str:
+    context = "\n\n".join(retrieved_chunks)
+    prompt = f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer using only the context above."
+    resp = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.choices[0].message.content
+```
+
+## Beyond Naive RAG
+
+Naive "embed, retrieve top-k, stuff into prompt" RAG has well-known failure modes, which is why production systems layer on additional techniques:
+
+- **Query rewriting / decomposition:** rephrase or split complex queries before retrieval (e.g., "compare X and Y" becomes two separate retrieval queries).
+- **Reranking:** apply a cross-encoder to precisely re-score the top-$N$ candidates from the initial (cheaper) retrieval pass.
+- **Chunking strategy:** overly small chunks lose context; overly large chunks dilute relevance signal and waste context window — chunk size and overlap are genuine tuning parameters.
+- **GraphRAG:** builds a knowledge graph over entities and relationships extracted from the corpus, enabling retrieval that follows explicit relational structure (e.g., multi-hop questions) rather than pure semantic similarity — see [GraphRAG & Knowledge Graphs](/docs/retrieval-knowledge/rag/graphrag-knowledge-graphs) (roadmap).
+- **Agentic RAG:** lets the model iteratively decide whether to retrieve again, refine its query, or answer — instead of a single fixed retrieve-then-generate pass.
+
+<KeyTakeaways items={[
+  "RAG separates a model's reasoning ability from its knowledge storage — knowledge lives in an updatable external index, not frozen in weights.",
+  "Retrieval quality is usually the dominant lever on end-to-end RAG quality, not generation quality — most production RAG debugging time goes into the retrieval and chunking pipeline.",
+  "Hybrid (dense + sparse) retrieval consistently outperforms either alone in production systems, because they fail on different query types.",
+  "RAG reduces, but does not eliminate, hallucination — a model can still misread or ungroundedly extrapolate beyond retrieved context.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Knowledge updates by re-indexing documents, not retraining the model — dramatically cheaper and faster than fine-tuning for factual updates.",
+    "Answers can cite their sources, since retrieved chunks are explicit and inspectable — improving auditability over pure parametric recall.",
+    "Reduces (though doesn't eliminate) hallucination by grounding generation in retrieved text.",
+  ]}
+  cons={[
+    "Retrieval failures are silent — if the right chunk isn't retrieved, the model will often still generate a confident-sounding but ungrounded answer rather than admitting it doesn't know.",
+    "Chunking can sever context needed to answer a question correctly (e.g., a table split across two chunks).",
+    "Naive RAG struggles with multi-hop questions requiring synthesis across many documents — a single top-k retrieval pass often can't surface all needed evidence.",
+    "Adds real latency and infrastructure (embedding calls, vector DB, optional reranker) versus a single LLM call.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does hybrid search (dense + sparse) typically outperform dense retrieval alone in production systems?",
+    options: [
+      "Dense retrieval is strictly worse and should never be used alone",
+      "Sparse methods like BM25 excel at exact-match cases (product codes, rare proper nouns) that dense embeddings, optimized for semantic similarity, can under-weight",
+      "Hybrid search is always faster than dense-only search",
+      "Sparse retrieval requires no indexing, making it a free addition",
+    ],
+    answerIndex: 1,
+    explanation: "Dense embeddings are trained to capture semantic/paraphrase similarity, which can under-prioritize exact rare-token matches (IDs, specific names) that carry the whole signal for certain queries. BM25 handles exactly this case well, so combining both covers a wider range of query types than either alone.",
+  },
+  {
+    question: "What's the main reason naive top-k RAG struggles with multi-hop questions (e.g., 'What company did the founder of X later join?')?",
+    options: [
+      "Multi-hop questions are always too long for the embedding model",
+      "A single retrieval pass over one query embedding may not surface all the distinct pieces of evidence needed, since each 'hop' may require information that isn't semantically close to the original query itself",
+      "Vector databases cannot store more than one relevant document",
+      "This isn't actually a real limitation of naive RAG",
+    ],
+    answerIndex: 1,
+    explanation: "Multi-hop reasoning requires chaining facts (e.g., first identify X's founder, then find what company that person joined) — but a single embedding of the original query may not be semantically close to the second-hop fact at all, since that fact only becomes relevant after resolving the first hop. This motivates query decomposition and agentic/iterative retrieval approaches.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks", authors: "Lewis, P. et al.", venue: "NeurIPS", year: 2020, url: "https://arxiv.org/abs/2005.11401" },
+  { title: "Dense Passage Retrieval for Open-Domain Question Answering", authors: "Karpukhin, V. et al.", venue: "EMNLP", year: 2020, url: "https://arxiv.org/abs/2004.04906" },
+]} />

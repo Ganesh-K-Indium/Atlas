@@ -1,0 +1,160 @@
+---
+title: "PEFT: LoRA & QLoRA"
+description: "How freezing the pretrained weights and learning a tiny low-rank update makes fine-tuning billion-parameter models tractable on a single GPU."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "fine-tuning", "peft"]
+prerequisites: ["Matrix rank", "Gradient descent", "Quantization basics"]
+---
+
+## Intuition
+
+Full fine-tuning updates every parameter in a pretrained model — for a modern LLM, that's billions of weights, each needing its own optimizer state (Adam alone stores two extra values per parameter), which is why full fine-tuning a 70B model needs hundreds of gigabytes of GPU memory.
+
+**LoRA (Low-Rank Adaptation)** starts from an empirical observation: the *update* a model needs during task-specific fine-tuning tends to have low "intrinsic rank" — the change in behavior can be captured by a much lower-dimensional transformation than the full weight matrix. So instead of learning a full-rank update $\Delta W$, LoRA learns a **low-rank decomposition** of it, and freezes everything else.
+
+<Callout type="tip" title="The one-sentence idea">
+  Freeze the pretrained weight matrix $W$ entirely, and learn only a low-rank correction $\Delta W = BA$ where $B$ and $A$ are much smaller matrices — reducing trainable parameters by orders of magnitude while leaving the original model's knowledge untouched.
+</Callout>
+
+## Formal Construction
+
+For a pretrained weight matrix $W_0 \in \mathbb{R}^{d \times k}$, LoRA reparameterizes the fine-tuned weight as:
+
+$$
+W = W_0 + \Delta W = W_0 + BA
+$$
+
+where $B \in \mathbb{R}^{d \times r}$, $A \in \mathbb{R}^{r \times k}$, and the rank $r \ll \min(d, k)$ — commonly $r \in \{4, 8, 16, 64\}$ versus $d, k$ in the thousands. $W_0$ is **frozen** (no gradient computed, no optimizer state stored); only $A$ and $B$ are trained.
+
+The forward pass becomes:
+
+$$
+h = W_0 x + \Delta W x = W_0 x + B(Ax) \cdot \frac{\alpha}{r}
+$$
+
+where $\alpha$ is a scaling hyperparameter (analogous to a learning-rate multiplier for the adapter) that keeps the update's magnitude comparable across different choices of $r$. $A$ is typically initialized with small random values (Gaussian) and $B$ with **zeros**, so that $\Delta W = 0$ at the start of training — the model behaves identically to the pretrained checkpoint before any adapter training happens, guaranteeing a stable starting point.
+
+**Why this reduces trainable parameters so drastically:** for a $4096 \times 4096$ attention projection matrix ($d = k = 4096$), full fine-tuning trains $16.8$M parameters. LoRA with $r=8$ trains $A$ ($8 \times 4096$) and $B$ ($4096 \times 8$) — about $65$K parameters, a **~250× reduction** for that single matrix.
+
+## Which Weights to Adapt
+
+The original paper found that applying LoRA to just the **attention projection matrices** ($W_q, W_k, W_v, W_o$) — leaving the feed-forward layers frozen entirely — captures most of the benefit at a fraction of the parameter cost. Later work generally extends LoRA to feed-forward layers too when maximum quality is needed, trading a modest parameter increase for better task adaptation.
+
+## QLoRA: Quantize the Frozen Weights Too
+
+LoRA already avoids storing optimizer state for the frozen weights, but the frozen weights themselves still sit in GPU memory at full precision (16-bit). **QLoRA** (Dettmers et al., 2023) goes further: it quantizes the frozen base model to **4-bit precision**, then trains LoRA adapters in 16-bit on top — backpropagating gradients *through* the frozen 4-bit weights into the full-precision adapters, without ever fully dequantizing the base model into memory.
+
+QLoRA introduces three specific innovations:
+
+1. **4-bit NormalFloat (NF4):** a quantization data type designed for weights that follow a (roughly) zero-centered normal distribution — the typical shape of pretrained neural network weights. Instead of uniform quantization bins, NF4 places quantization levels at the quantiles of a standard normal distribution, which is information-theoretically optimal for normally-distributed inputs and measurably more accurate than plain 4-bit integer quantization at the same bit width.
+2. **Double quantization:** the quantization *constants themselves* (one scale factor per block of weights) are quantized again, saving roughly an additional 0.4 bits per parameter on average — a small-sounding number that adds up across billions of parameters.
+3. **Paged optimizers:** uses NVIDIA unified memory to automatically page optimizer states to CPU RAM when GPU memory spikes (e.g., from long-sequence gradient checkpointing), preventing out-of-memory crashes rather than reducing average memory use.
+
+<Mermaid chart={`
+graph TD
+  W0["Frozen base weights (4-bit NF4)"] -->|"dequantize per compute"| Fwd["Forward/backward matmul"]
+  X["Input x"] --> Fwd
+  X --> A["Adapter A (16-bit, trainable)"]
+  A --> B["Adapter B (16-bit, trainable)"]
+  Fwd --> Sum["+"]
+  B --> Sum
+  Sum --> Out["Output h"]
+`} />
+
+This combination is what let QLoRA fine-tune a 65B-parameter model on a **single 48GB GPU** while matching full 16-bit fine-tuning quality on benchmark tasks — a workload that would otherwise require well over 780GB of GPU memory for full fine-tuning.
+
+## LoRA vs. QLoRA vs. Full Fine-Tuning
+
+<ComparisonTable
+  headers={["Method", "Trainable params", "Base model precision", "Typical GPU memory (7B model)", "Quality vs. full FT"]}
+  rows={[
+    ["Full fine-tuning", "100%", "16-bit (+ optimizer states)", "~60–80GB", "Baseline"],
+    ["LoRA", "~0.1–1%", "16-bit (frozen)", "~16–20GB", "Comparable on most tasks"],
+    ["QLoRA", "~0.1–1%", "4-bit NF4 (frozen)", "~6–10GB", "Comparable, per the original paper's benchmarks"],
+  ]}
+/>
+
+## Minimal Implementation Sketch
+
+```python
+import torch
+import torch.nn as nn
+
+class LoRALinear(nn.Module):
+    def __init__(self, base: nn.Linear, r: int = 8, alpha: int = 16):
+        super().__init__()
+        self.base = base
+        for p in self.base.parameters():
+            p.requires_grad = False          # freeze the pretrained weight
+
+        d_out, d_in = base.weight.shape
+        self.A = nn.Parameter(torch.randn(r, d_in) * 0.01)
+        self.B = nn.Parameter(torch.zeros(d_out, r))  # zero init -> ΔW = 0 initially
+        self.scale = alpha / r
+
+    def forward(self, x):
+        frozen_out = self.base(x)
+        lora_out = (x @ self.A.T) @ self.B.T
+        return frozen_out + self.scale * lora_out
+```
+
+In production, libraries like Hugging Face `peft` and `bitsandbytes` handle the 4-bit quantization, adapter injection, and merging automatically — but this sketch shows the entire mechanism: freeze, decompose, zero-init, add.
+
+<KeyTakeaways items={[
+  "LoRA exploits the empirical finding that fine-tuning updates have low intrinsic rank, letting a tiny B·A decomposition replace a full-rank weight update.",
+  "Zero-initializing B guarantees the adapted model exactly reproduces the pretrained model before any training occurs.",
+  "QLoRA's core insight is that quantization and training are separable — the frozen weights can be aggressively compressed (4-bit) as long as gradients into the trainable adapters remain full-precision.",
+  "Multiple LoRA adapters can be trained for different tasks and hot-swapped on the same frozen base model, since they don't modify W₀ at all — a major deployment advantage over full fine-tuning.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Dramatically lower memory and storage cost — adapters for a 7B model are typically tens of megabytes, versus tens of gigabytes for a full fine-tuned checkpoint.",
+    "No inference latency penalty if the adapter is merged back into W₀ post-training (W = W₀ + BA is just a matrix add, done once).",
+    "Enables serving many task-specific adapters against one shared frozen base model, which is far cheaper than hosting many fully fine-tuned models.",
+  ]}
+  cons={[
+    "Choosing rank r too low can underfit complex new tasks or domains far from the pretraining distribution.",
+    "If adapters are kept unmerged for multi-adapter serving, there's a small added inference compute cost per adapter application.",
+    "QLoRA's 4-bit base model adds a dequantization step in the forward/backward pass — a real (if usually small relative to overall training time) compute overhead versus a 16-bit frozen base.",
+    "LoRA on attention-only projections may underperform full fine-tuning on tasks requiring substantial changes to the feed-forward layers' learned knowledge.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is B initialized to zero while A is initialized with small random values, rather than both being zero or both being random?",
+    options: [
+      "It's an arbitrary convention with no functional impact",
+      "It guarantees ΔW = BA = 0 at the start of training (since B is zero), so the model starts exactly at the pretrained checkpoint, while still giving A a nonzero gradient to learn from immediately",
+      "Zero-initializing both would cause a division-by-zero error",
+      "Random-initializing both converges faster in every case",
+    ],
+    answerIndex: 1,
+    explanation: "If both were zero, gradients would also be zero everywhere (since ∂L/∂A depends on B, and B=0 kills that gradient) and training could never start. Zero-initializing only B ensures a clean starting point (no change to the base model) while A still receives a nonzero gradient through B's forward pass structure once B starts moving away from zero.",
+  },
+  {
+    question: "Why can QLoRA compress the frozen base model to 4 bits without needing to compress the gradients or adapter weights?",
+    options: [
+      "It can't — the whole point is uniform low precision",
+      "Because only the frozen weights need to be stored; gradients only ever flow into the small trainable adapter matrices (A, B), which remain full precision, so quantization error in the frozen weights doesn't need to be back-propagated through and refined",
+      "GPUs cannot compute gradients on 4-bit numbers under any circumstances",
+      "The adapters are always stored in 4-bit too, contrary to common descriptions",
+    ],
+    answerIndex: 1,
+    explanation: "The frozen base model only participates in the forward pass and in passing gradients through (not into) itself — its own weights never get a gradient update. Since only A and B are learned, keeping them in full precision preserves training stability and expressiveness, while the frozen weights only need enough fidelity to produce a reasonable forward activation, which NF4 is specifically designed to preserve for normally-distributed weights.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "LoRA: Low-Rank Adaptation of Large Language Models", authors: "Hu, E. J. et al.", venue: "ICLR", year: 2022, url: "https://arxiv.org/abs/2106.09685" },
+  { title: "QLoRA: Efficient Finetuning of Quantized LLMs", authors: "Dettmers, T., Pagnoni, A., Holtzman, A., & Zettlemoyer, L.", venue: "NeurIPS", year: 2023, url: "https://arxiv.org/abs/2305.14314" },
+]} />

@@ -1,0 +1,206 @@
+---
+title: "Backpropagation: Full Derivation"
+description: "How the chain rule, applied systematically through a computation graph, lets you compute every gradient in a neural network in a single backward pass."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["deep-learning", "calculus", "optimization"]
+prerequisites: ["Multivariable chain rule", "Matrix calculus basics", "Gradient descent"]
+---
+
+## Intuition
+
+A neural network is a composition of functions: layer after layer of linear maps and nonlinearities. Training means finding how the loss changes as we nudge *every single weight* in that composition. Doing this naively — perturbing one weight, re-running the forward pass, measuring the change — would cost one forward pass *per parameter*, which is intractable for a model with billions of weights.
+
+Backpropagation is just the multivariable chain rule, applied in the right order, so that a *single* forward pass and a *single* backward pass produce the gradient with respect to **every** parameter simultaneously. The trick is reusing intermediate derivatives instead of recomputing them.
+
+<Callout type="tip" title="The one idea that matters">
+  Backprop computes gradients layer-by-layer, from the output back to the input, because each layer's gradient depends only on the gradient of the layer *after* it and quantities already computed in the forward pass. This reuse is what makes it $O(1)$ backward passes instead of $O(\text{parameters})$ forward passes.
+</Callout>
+
+## Setup: A Simple MLP
+
+Consider a network with one hidden layer:
+
+$$
+z^{(1)} = W^{(1)} x + b^{(1)}, \qquad a^{(1)} = \sigma(z^{(1)})
+$$
+$$
+z^{(2)} = W^{(2)} a^{(1)} + b^{(2)}, \qquad \hat{y} = \sigma(z^{(2)})
+$$
+$$
+L = \tfrac{1}{2} (\hat{y} - y)^2
+$$
+
+where $\sigma$ is an elementwise activation function (e.g. sigmoid), $x$ is the input, $y$ is the target, and $L$ is the loss for a single example. We want $\frac{\partial L}{\partial W^{(1)}}, \frac{\partial L}{\partial b^{(1)}}, \frac{\partial L}{\partial W^{(2)}}, \frac{\partial L}{\partial b^{(2)}}$.
+
+## Step 1 — The Output Layer
+
+By the chain rule:
+
+$$
+\frac{\partial L}{\partial z^{(2)}} = \frac{\partial L}{\partial \hat{y}} \cdot \frac{\partial \hat{y}}{\partial z^{(2)}} = (\hat{y} - y) \cdot \sigma'(z^{(2)})
+$$
+
+Define $\delta^{(2)} \equiv \frac{\partial L}{\partial z^{(2)}}$ — the "error signal" at layer 2. Everything downstream reuses this single quantity.
+
+Since $z^{(2)} = W^{(2)} a^{(1)} + b^{(2)}$:
+
+$$
+\frac{\partial L}{\partial W^{(2)}} = \delta^{(2)} \, a^{(1)\top}, \qquad \frac{\partial L}{\partial b^{(2)}} = \delta^{(2)}
+$$
+
+## Step 2 — Propagating the Error Backward
+
+Now we need $\frac{\partial L}{\partial a^{(1)}}$, which requires differentiating through $W^{(2)}$:
+
+$$
+\frac{\partial L}{\partial a^{(1)}} = W^{(2)\top} \delta^{(2)}
+$$
+
+This is the crucial reuse step: **we never recompute $\delta^{(2)}$**, we just multiply it by $W^{(2)\top}$ to "push" the error signal back one layer — hence the name *back*-propagation.
+
+Applying the chain rule again through the activation:
+
+$$
+\delta^{(1)} \equiv \frac{\partial L}{\partial z^{(1)}} = \frac{\partial L}{\partial a^{(1)}} \odot \sigma'(z^{(1)}) = \left( W^{(2)\top} \delta^{(2)} \right) \odot \sigma'(z^{(1)})
+$$
+
+where $\odot$ is the elementwise (Hadamard) product, since $a^{(1)} = \sigma(z^{(1)})$ is an elementwise function.
+
+## Step 3 — The First Layer's Gradients
+
+Exactly as in Step 1, but one layer earlier:
+
+$$
+\frac{\partial L}{\partial W^{(1)}} = \delta^{(1)} x^\top, \qquad \frac{\partial L}{\partial b^{(1)}} = \delta^{(1)}
+$$
+
+## The General Recursion
+
+For an $L$-layer network, the pattern generalizes to a clean recursive rule. Define $\delta^{(l)} = \frac{\partial \mathcal{L}}{\partial z^{(l)}}$ for each layer $l$:
+
+$$
+\delta^{(L)} = \nabla_{\hat{y}} \mathcal{L} \odot \sigma'(z^{(L)}) \qquad \text{(base case, output layer)}
+$$
+
+$$
+\delta^{(l)} = \left( W^{(l+1)\top} \delta^{(l+1)} \right) \odot \sigma'(z^{(l)}) \qquad \text{(recursive step)}
+$$
+
+$$
+\frac{\partial \mathcal{L}}{\partial W^{(l)}} = \delta^{(l)} a^{(l-1)\top}, \qquad \frac{\partial \mathcal{L}}{\partial b^{(l)}} = \delta^{(l)}
+$$
+
+This is exactly **dynamic programming** over the computation graph: each $\delta^{(l)}$ is computed once and reused by the layer before it, instead of being recomputed from scratch for every parameter.
+
+<Mermaid chart={`
+graph LR
+  x["x"] --> z1["z¹ = W¹x + b¹"] --> a1["a¹ = σ(z¹)"] --> z2["z² = W²a¹ + b²"] --> yhat["ŷ = σ(z²)"] --> L["Loss"]
+  L -. "δ² = ∂L/∂z²" .-> z2
+  z2 -. "δ¹ = (W²ᵀδ²) ⊙ σ'(z¹)" .-> z1
+`} />
+
+## Computational Graph View (The General Case)
+
+Modern autodiff frameworks (PyTorch, JAX) don't hardcode this per-architecture — they build a computation graph of primitive operations at runtime (or trace-time), and apply the **generalized chain rule**: for any node $v$ with children $\{u_1, \dots, u_k\}$ that all depend on $v$,
+
+$$
+\frac{\partial L}{\partial v} = \sum_{i=1}^{k} \frac{\partial L}{\partial u_i} \cdot \frac{\partial u_i}{\partial v}
+$$
+
+This is "reverse-mode automatic differentiation": traverse the graph in reverse topological order, and at each node sum the incoming gradients from every path that depends on it. Backprop for neural nets is the special case where the graph happens to be a chain (or a DAG for architectures like ResNets and Transformers with skip connections).
+
+## Minimal NumPy Implementation
+
+```python
+import numpy as np
+
+def sigmoid(z):
+    return 1 / (1 + np.exp(-z))
+
+def sigmoid_grad(z):
+    s = sigmoid(z)
+    return s * (1 - s)
+
+def forward(x, W1, b1, W2, b2):
+    z1 = W1 @ x + b1
+    a1 = sigmoid(z1)
+    z2 = W2 @ a1 + b2
+    y_hat = sigmoid(z2)
+    cache = (x, z1, a1, z2, y_hat)
+    return y_hat, cache
+
+def backward(y, W2, cache):
+    x, z1, a1, z2, y_hat = cache
+
+    delta2 = (y_hat - y) * sigmoid_grad(z2)      # dL/dz2
+    dW2 = np.outer(delta2, a1)
+    db2 = delta2
+
+    delta1 = (W2.T @ delta2) * sigmoid_grad(z1)  # dL/dz1, reusing delta2
+    dW1 = np.outer(delta1, x)
+    db1 = delta1
+
+    return dW1, db1, dW2, db2
+```
+
+Note that `backward` never recomputes an activation or a matmul that `forward` already did — `cache` holds every intermediate value it needs, which is the entire point.
+
+## Complexity
+
+| Approach | Time | Memory |
+| --- | --- | --- |
+| Naive numerical differentiation (finite differences per parameter) | $O(P)$ forward passes for $P$ parameters | Low, but astronomically slow |
+| Backpropagation (reverse-mode autodiff) | $O(1)$ forward + $O(1)$ backward pass, each $\approx$ cost of forward pass | Must cache all activations from the forward pass |
+
+Backprop's memory cost — caching every activation for the backward pass — is exactly why techniques like **gradient checkpointing** (recompute some activations during the backward pass instead of storing them) and **mixed precision** exist in large-scale training.
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Backprop is exact — it's not a numerical approximation, unlike finite differences.",
+    "It's architecture-agnostic: works for CNNs, RNNs, Transformers, or any DAG-structured computation, because it operates on the computation graph, not the specific layer types.",
+  ]}
+  cons={[
+    "Vanishing/exploding gradients: repeatedly multiplying by σ'(z) and Wᵀ across many layers can shrink or blow up δ exponentially — the core motivation for ReLU, residual connections, and normalization layers.",
+    "Requires caching activations, which dominates memory usage for very deep or very wide networks — this is why activation checkpointing exists.",
+    "Assumes a differentiable computation graph — non-differentiable ops (argmax, sampling) need surrogates like the straight-through estimator or the reparameterization trick.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is backpropagation described as 'dynamic programming over a computation graph'?",
+    options: [
+      "Because it uses recursion in its Python implementation",
+      "Because it reuses previously computed error signals (δ) rather than recomputing chain-rule products from scratch for every parameter",
+      "Because it requires a dynamically-sized batch",
+      "It isn't — this is a common but incorrect analogy",
+    ],
+    answerIndex: 1,
+    explanation: "Just like DP caches subproblem solutions, backprop caches each layer's δ so downstream layers can reuse it instead of re-deriving the full chain-rule product from the loss.",
+  },
+  {
+    question: "What causes the vanishing gradient problem in deep networks with sigmoid activations?",
+    options: [
+      "The learning rate is always too small",
+      "sigmoid'(z) is at most 0.25, so multiplying many such terms across layers shrinks the gradient exponentially with depth",
+      "The loss function is non-convex",
+      "Weight matrices are initialized with zero mean",
+    ],
+    answerIndex: 1,
+    explanation: "Each layer's backward pass multiplies by σ'(z) ≤ 0.25 and by Wᵀ. Across many layers this product shrinks toward zero, so early layers receive almost no gradient signal — motivating ReLU (derivative 1 for z>0) and residual connections.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Learning representations by back-propagating errors", authors: "Rumelhart, D. E., Hinton, G. E., & Williams, R. J.", venue: "Nature", year: 1986 },
+  { title: "Deep Learning", authors: "Ian Goodfellow, Yoshua Bengio, Aaron Courville", venue: "MIT Press", year: 2016 },
+  { title: "Automatic Differentiation in Machine Learning: a Survey", authors: "Baydin, A. G. et al.", venue: "JMLR", year: 2018 },
+]} />

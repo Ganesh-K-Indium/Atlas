@@ -1,0 +1,108 @@
+---
+title: "The Frontier Model Landscape"
+description: "A snapshot of the leading proprietary and open-weight LLMs, what each is best at, and how to think about a landscape that changes faster than any static page can track."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "frontier-models", "landscape"]
+prerequisites: ["The Transformer Architecture", "LLM Evaluation Methods & Benchmarks"]
+---
+
+<Callout type="warning" title="This page is a snapshot, not a source of truth">
+  Frontier model rankings shift every few weeks. Everything below reflects publicly reported benchmark standings as of this page's **last-verified date** (see the frontmatter). Treat specific benchmark scores and "current best" claims as illustrative of *how the landscape was shaped* at that time, not as a live leaderboard — check primary sources (each lab's model card, and independent evals) before making a model choice for production.
+</Callout>
+
+## The Big Shift: From "One Best Model" to Specialization
+
+Earlier LLM eras had a fairly clear "best model" at any given time. As of mid-2026, the frontier has fragmented: different labs' flagship models lead on different axes — coding, structured reasoning, abstract/scientific reasoning, multimodal input, or cost-efficiency — and no single model dominates every benchmark simultaneously. Choosing a model is now a genuine trade-off analysis, not a lookup.
+
+## Proprietary Frontier Models
+
+<ComparisonTable
+  headers={["Family", "Notable strength", "Notes"]}
+  rows={[
+    ["Anthropic — Claude (Opus 4.x, Fable 5)", "Coding and real-world software engineering tasks (e.g. resolving actual GitHub issues), nuanced long-form writing", "Fable 5 is Anthropic's newest, most capable model as of mid-2026; Claude Opus remains competitive on code-focused benchmarks"],
+    ["OpenAI — GPT-5.x", "Structured/mathematical reasoning and computer-use agentic tasks", "Reported near-ceiling scores on formal math competition benchmarks (e.g. AIME) and strong OSWorld computer-use results"],
+    ["Google — Gemini 3.x", "Abstract reasoning and scientific QA, native multimodal input", "Reported leading scores on abstract-reasoning (ARC-AGI-2 style) and graduate-level science QA (GPQA) benchmarks"],
+    ["xAI — Grok 4", "Raw software-engineering benchmark performance", "Reported leading SWE-bench-style scores among proprietary models in some evaluations"],
+  ]}
+/>
+
+## Open-Weight Frontier Models
+
+The open-weight tier closed much of its gap with proprietary frontier models faster than most forecasts expected, driven largely by aggressive cost-efficiency plays from Chinese labs.
+
+<ComparisonTable
+  headers={["Family", "Architecture notes", "Positioning"]}
+  rows={[
+    ["DeepSeek V4", "Mixture-of-Experts, long (reported ~1M token) context, MIT-licensed", "Widely reported as landing within real striking distance of top proprietary models on coding/reasoning benchmarks, at a small fraction of the per-token inference cost"],
+    ["Kimi K2.x", "Large-scale (reported ~1T parameter) MoE, agentic-first design", "Positioned around agentic tool-use workflows rather than pure chat"],
+    ["GLM-5", "Large MoE (reported ~745B total / ~44B active parameters)", "Another entrant in the open-weight frontier tier, requiring multi-GPU (H100-class) serving infrastructure"],
+    ["Qwen, Llama, Mistral families", "Ongoing iterative releases across multiple size tiers", "Broad ecosystem support (fine-tuning tooling, quantized variants, on-prem deployment) is often the deciding factor over raw benchmark rank"],
+  ]}
+/>
+
+<Callout type="note" title="Reading MoE parameter counts">
+  For Mixture-of-Experts models, "total parameters" and "active parameters per token" are both meaningful and very different numbers — a 1T-parameter MoE model might only activate ~30–40B parameters for any given token, which is what actually determines per-token inference cost and latency. Always check which number a benchmark or cost comparison is quoting. See [Mixture of Experts](/docs/deep-learning/modern-architectures/mixture-of-experts) (roadmap).
+</Callout>
+
+## How to Actually Choose a Model
+
+Benchmark leaderboards answer "what scores highest," not "what's right for this system." A more durable framework:
+
+<KeyTakeaways items={[
+  "Match the axis to the job: coding-heavy agents should weight SWE-bench-style and real-repo evals heavily; research/analysis tools should weight reasoning and long-context comprehension; customer-facing chat should weight instruction-following and tone.",
+  "Cost-per-token differences between top proprietary and top open-weight models can be an order of magnitude or more — for high-volume workloads, this often outweighs a few benchmark points of quality difference.",
+  "Context window size and effective long-context recall are not the same thing — a model can advertise a huge context window while still degrading in accuracy on information buried in the middle of it ('lost in the middle').",
+  "Licensing matters operationally as much as capability does: MIT/Apache-licensed open-weight models permit self-hosting and fine-tuning in ways closed API-only models don't.",
+  "Benchmarks saturate and get gamed over time (via train-set contamination or benchmark-specific tuning) — cross-check any single benchmark claim against multiple independent evaluations before trusting it.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Competition across many labs has driven both capability gains and dramatic price-per-token reductions, benefiting anyone building on these models.",
+    "Open-weight models reaching genuine frontier-class capability gives teams a real self-hosting alternative for cost, latency, or data-residency reasons.",
+    "Specialization means there's usually a model that's specifically strong at your actual task, rather than one-size-fits-all mediocrity.",
+  ]}
+  cons={[
+    "Treating any single leaderboard snapshot as a permanent ranking — this landscape reshuffles on a timescale of weeks, not years.",
+    "Ignoring that reported benchmark numbers often come from each lab's own evaluation harness, with different prompting and tool-use setups that aren't directly comparable across labs.",
+    "Underestimating serving cost for large open-weight MoE models — 'open-weight' doesn't mean 'cheap to run yourself' once you account for the multi-GPU infrastructure required.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why is it misleading to say an open-weight MoE model 'has 1 trillion parameters' without further qualification when comparing inference cost to a dense model?",
+    options: [
+      "MoE models never actually reach that parameter count in practice",
+      "Only a subset of experts (the 'active parameters') are used per token, so the effective per-token compute cost is determined by active, not total, parameter count",
+      "Parameter count is unrelated to inference cost for any architecture",
+      "Dense models always have fewer total parameters than MoE models",
+    ],
+    answerIndex: 1,
+    explanation: "A Mixture-of-Experts model routes each token to only a small subset of its expert sub-networks. The relevant number for latency and cost comparisons is the active parameter count per token, which can be an order of magnitude smaller than the total parameter count.",
+  },
+  {
+    question: "What's the main risk of choosing a model purely based on a single public leaderboard's top ranking?",
+    options: [
+      "Leaderboards are never a useful signal at all",
+      "Different labs often evaluate on their own harnesses with different prompting/tool setups, and rankings can shift within weeks — a single snapshot doesn't capture task-specific fit or evaluation methodology differences",
+      "Leaderboards only measure image generation quality",
+      "Higher-ranked models are always more expensive, making rank irrelevant",
+    ],
+    answerIndex: 1,
+    explanation: "Benchmark scores can depend heavily on evaluation methodology (prompting strategy, tool access, sampling temperature), rankings reshuffle quickly as labs ship updates, and no single benchmark captures whether a model fits your specific task, cost, and latency constraints.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "LLM Leaderboard", venue: "Vellum AI", url: "https://www.vellum.ai/llm-leaderboard" },
+  { title: "AI Model Benchmarks", venue: "LM Council", url: "https://lmcouncil.ai/benchmarks" },
+]} />

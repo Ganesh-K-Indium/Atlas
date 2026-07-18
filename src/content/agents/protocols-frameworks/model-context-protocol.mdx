@@ -1,0 +1,152 @@
+---
+title: "Model Context Protocol (MCP)"
+description: "The open standard for connecting AI models to external tools and data sources — what problem it solves, how its primitives work, and where it's headed under the Agentic AI Foundation."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["agents", "mcp", "protocols"]
+prerequisites: ["Tool calling / function calling", "JSON-RPC basics"]
+---
+
+## Intuition
+
+Before MCP, connecting an LLM to $N$ different tools and data sources meant building $N$ different bespoke integrations — every agent framework re-implementing its own connector for Slack, Google Drive, a SQL database, GitHub, and so on. That's an $M \times N$ integration problem: $M$ AI applications each needing custom code for $N$ tools.
+
+MCP, introduced by Anthropic in November 2024, standardizes the interface between AI applications and external context providers — turning $M \times N$ custom integrations into $M + N$ implementations of one shared protocol. Any MCP-compatible client can talk to any MCP-compatible server, the same way any web browser can talk to any HTTP server.
+
+<Callout type="tip" title="The one-sentence idea">
+  MCP is a client-server protocol (JSON-RPC 2.0 based) that lets an AI application discover and invoke tools, read resources, and use prompt templates exposed by any MCP server — without the application needing bespoke code for that specific integration.
+</Callout>
+
+## Architecture
+
+<Mermaid chart={`
+graph LR
+  Host["Host application (e.g. Claude, an IDE, a custom agent)"] --> Client["MCP Client"]
+  Client <-->|"JSON-RPC over stdio / HTTP"| Server1["MCP Server: GitHub"]
+  Client <-->|"JSON-RPC over stdio / HTTP"| Server2["MCP Server: Database"]
+  Client <-->|"JSON-RPC over stdio / HTTP"| Server3["MCP Server: Internal API"]
+`} />
+
+- **Host**: the AI application the end user interacts with (a chat client, an IDE, a custom agent runtime).
+- **Client**: lives inside the host, maintains a 1:1 connection to a given MCP server, and handles the protocol handshake.
+- **Server**: a lightweight program that exposes a specific capability — tools, data, or prompt templates — over the standardized protocol, independent of which AI model or host is calling it.
+
+## Core Primitives
+
+<ComparisonTable
+  headers={["Primitive", "Direction", "Purpose", "Analogy"]}
+  rows={[
+    ["Tools", "Server exposes → Client/model invokes", "Executable functions the model can call with arguments (e.g. run a query, create a ticket)", "Function/tool calling"],
+    ["Resources", "Server exposes → Client reads", "Structured or unstructured data the application can attach to context (files, DB rows, API responses)", "GET endpoints"],
+    ["Prompts", "Server exposes → Client/user selects", "Reusable, parameterized prompt templates for common workflows", "Slash commands / macros"],
+    ["Sampling", "Server requests → Client's LLM fulfills", "Lets a server ask the host's LLM to complete a sub-task, without the server needing its own model access", "Callback into the host's model"],
+    ["Elicitation", "Server requests → User responds", "Lets a server ask the end user for additional information mid-workflow", "Interactive form/prompt"],
+  ]}
+/>
+
+Tools, Resources, and Prompts are the original three primitives from MCP's 2024 launch. **Sampling** and **Elicitation** are protocol extensions that let servers be more than passive data providers — a server can ask the host to reason on its behalf (sampling) or pause to collect missing information from the human (elicitation), which matters for building genuinely interactive, agentic tool servers rather than simple stateless APIs.
+
+## A Minimal Server (Python SDK)
+
+```python
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("weather-server")
+
+@mcp.tool()
+def get_forecast(city: str) -> str:
+    """Return a short weather forecast for the given city."""
+    # In production this would call a real weather API.
+    return f"Forecast for {city}: sunny, high of 24°C."
+
+@mcp.resource("config://units")
+def get_units() -> str:
+    """Expose a small config resource the client can read."""
+    return "metric"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+Any MCP-compatible host can now discover `get_forecast` as a callable tool and `config://units` as a readable resource — without the weather server needing to know anything about which model or application is calling it.
+
+## Governance & Where It's Headed
+
+MCP started as an Anthropic-led open-source project. In December 2025, Anthropic donated MCP's governance to the **Agentic AI Foundation (AAIF)**, a directed fund under the Linux Foundation, co-founded by Anthropic, Block, and OpenAI — moving the protocol to neutral, multi-vendor stewardship rather than single-company control. Following that shift, MCP has seen adoption beyond its original ecosystem, including support from OpenAI and Google DeepMind's tooling.
+
+Active protocol development includes an async **Tasks** specification (tracked as SEP-1686) for long-running operations that shouldn't block a single request/response cycle, and planned expansion of supported content types beyond text into images, audio, and video for richer agentic and multimodal tool use.
+
+<Callout type="warning" title="Fast-moving spec">
+  MCP's specification is versioned by date (e.g. the `2025-11-25` revision) and is under active development. Treat specific primitive names, transport details, and governance structure as accurate as of this page's last-verified date, and check <a href="https://modelcontextprotocol.io" target="_blank" rel="noreferrer">modelcontextprotocol.io</a> for the current spec before building against it.
+</Callout>
+
+## MCP vs. Plain Tool Calling vs. A2A
+
+<ComparisonTable
+  headers={["Approach", "What it standardizes", "Scope"]}
+  rows={[
+    ["Plain function/tool calling", "The model's ability to emit a structured call to a function you define", "Per-application — you still write custom glue code per tool per app"],
+    ["MCP", "The interface between an AI application and an external tool/data server", "Cross-application — one server implementation works with any MCP-compatible host"],
+    ["A2A (Agent2Agent Protocol)", "Communication between autonomous agents themselves (task delegation, status, artifacts)", "Agent-to-agent, complementary to MCP's agent-to-tool focus rather than a replacement for it"],
+  ]}
+/>
+
+MCP and A2A solve adjacent but distinct problems: MCP standardizes how an agent talks to *tools and data*; A2A (see [Agent2Agent Protocol](/docs/agents/protocols-frameworks/agent2agent-protocol), roadmap) standardizes how one *agent* talks to another *agent*.
+
+<KeyTakeaways items={[
+  "MCP turns an M×N tool-integration problem into an M+N one by standardizing the client-server interface.",
+  "Tools, Resources, and Prompts are the foundational primitives; Sampling and Elicitation extend servers beyond passive data providers into interactive collaborators.",
+  "Governance moved from a single-vendor project to the Agentic AI Foundation (Linux Foundation) in December 2025, signaling multi-vendor commitment to the standard.",
+  "MCP standardizes agent-to-tool communication; A2A is the complementary protocol for agent-to-agent communication.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Decouples tool/data providers from AI application vendors — a server built once works across any compliant host.",
+    "Explicit capability negotiation (tools/resources/prompts) makes it clear to the host what a server can and can't do, rather than relying on ad hoc conventions.",
+    "Neutral multi-vendor governance (AAIF/Linux Foundation) reduces single-vendor lock-in risk for teams building on the standard.",
+  ]}
+  cons={[
+    "Still an evolving spec — building against unstable or soon-to-change primitives (e.g. early Sampling/Elicitation implementations) carries real migration risk.",
+    "A local stdio-transport MCP server runs with the same privileges as the host process — treating third-party MCP servers as trusted code requires the same scrutiny as installing a dependency.",
+    "Standardization doesn't guarantee good tool design — a poorly-specified tool schema is just as confusing to a model over MCP as it would be with plain function calling.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "What integration problem does MCP solve that plain function/tool calling does not?",
+    options: [
+      "MCP makes models smarter at choosing which tool to call",
+      "MCP standardizes the interface itself, so one server implementation works across many different host applications, instead of every host needing bespoke glue code per tool",
+      "MCP removes the need for a schema describing tool arguments",
+      "There's no meaningful difference between the two",
+    ],
+    answerIndex: 1,
+    explanation: "Function/tool calling describes how a model expresses intent to call a function within one application. MCP standardizes the transport and capability-negotiation layer between that application and an external server, so the same server works unmodified across many different host applications.",
+  },
+  {
+    question: "Why does MCP's Sampling primitive matter for building capable MCP servers?",
+    options: [
+      "It lets a server request additional context length from the client",
+      "It lets a server, which may have no LLM access of its own, ask the host application's LLM to perform a reasoning sub-step on its behalf",
+      "It's used purely for logging and telemetry",
+      "It controls the temperature/sampling parameters of the host's model globally",
+    ],
+    answerIndex: 1,
+    explanation: "Sampling lets a lightweight server delegate a reasoning or generation sub-task back to whatever LLM the host application is already using, without the server needing its own model integration, API keys, or inference infrastructure.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Introducing the Model Context Protocol", venue: "Anthropic", year: 2024, url: "https://www.anthropic.com/news/model-context-protocol" },
+  { title: "Model Context Protocol — Specification", venue: "modelcontextprotocol.io", url: "https://modelcontextprotocol.io/specification/2025-11-25" },
+  { title: "Model Context Protocol — Specification & Documentation Repository", venue: "GitHub", url: "https://github.com/modelcontextprotocol/modelcontextprotocol" },
+]} />

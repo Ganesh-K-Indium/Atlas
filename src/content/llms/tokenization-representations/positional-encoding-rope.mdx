@@ -1,0 +1,164 @@
+---
+title: "Positional Encoding & RoPE"
+description: "Why absolute sinusoidal position encoding gave way to Rotary Position Embedding — and how encoding position as a rotation makes relative position fall out for free."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["llm", "transformers", "positional-encoding"]
+prerequisites: ["The Transformer Architecture", "Complex numbers / 2D rotations", "Dot product"]
+---
+
+## Intuition
+
+Self-attention is permutation-invariant by construction, so a Transformer needs *some* explicit signal about token order. The original Transformer added a fixed sinusoidal vector to each token's embedding — position is baked into the *content* of the vector.
+
+RoPE (Rotary Position Embedding) takes a different approach entirely: instead of adding a position vector, it **rotates** the query and key vectors by an angle proportional to their position, before computing attention scores. The elegant payoff: when you dot-product a rotated query against a rotated key, the *absolute* rotation angles cancel out algebraically, leaving only a term that depends on the **relative** distance between the two tokens. Relative position falls out of an absolute-position mechanism for free.
+
+<Callout type="tip" title="The one-sentence idea">
+  Rotating both Q and K by their absolute position, then taking their dot product, produces a value that depends only on the difference in positions — because rotation matrices compose: rotating by $m$ then measuring against a rotation by $n$ is equivalent to measuring against a rotation by $n - m$.
+</Callout>
+
+## Formal Construction
+
+Split each $d$-dimensional query/key vector into $d/2$ two-dimensional pairs. For pair index $i$, define a rotation frequency:
+
+$$
+\theta_i = 10000^{-2i/d}, \qquad i = 0, 1, \ldots, d/2 - 1
+$$
+
+Lower-index pairs (small $i$) rotate quickly with position; higher-index pairs rotate slowly — this geometric spread of frequencies (borrowed directly from the original sinusoidal encoding) lets the model represent both fine-grained local position and coarse long-range position.
+
+For a token at position $m$, RoPE applies a block-diagonal rotation matrix $R_{\Theta, m}$ built from $2\times2$ rotation blocks:
+
+$$
+R_{\Theta,m}^{(i)} = \begin{pmatrix} \cos(m\theta_i) & -\sin(m\theta_i) \\ \sin(m\theta_i) & \cos(m\theta_i) \end{pmatrix}
+$$
+
+applied to each pair of dimensions $(x_{2i}, x_{2i+1})$ of the query and key vectors:
+
+$$
+q_m = R_{\Theta,m}\, W_q x_m, \qquad k_n = R_{\Theta,n}\, W_k x_n
+$$
+
+## Why the Relative Property Falls Out
+
+Because rotation matrices form a group under composition, $R_{\Theta,m}^\top R_{\Theta,n} = R_{\Theta,n-m}$ — rotating by $m$ and then measuring against a rotation by $n$ is identical to a single rotation by $n - m$. So the attention score:
+
+$$
+q_m^\top k_n = (R_{\Theta,m} W_q x_m)^\top (R_{\Theta,n} W_k x_n) = x_m^\top W_q^\top R_{\Theta,n-m} W_k x_n
+$$
+
+depends on $m$ and $n$ **only through their difference** $n - m$. This is exactly the relative-position property that earlier approaches (like Transformer-XL's relative position embeddings) had to engineer by hand with extra learned parameters — RoPE gets it as a direct algebraic consequence of using rotations, with zero additional parameters.
+
+<Mermaid chart={`
+graph LR
+  A["Token at position m"] --> B["Rotate query by mθ"]
+  C["Token at position n"] --> D["Rotate key by nθ"]
+  B --> E["Dot product q·k"]
+  D --> E
+  E --> F["Result depends only on (n − m) — absolute angles cancel"]
+`} />
+
+## Complex-Number View
+
+The cleanest way to see this: treat each 2D pair $(x_{2i}, x_{2i+1})$ as a single complex number $x_{2i} + i\,x_{2i+1}$. Rotating by angle $m\theta_i$ is just multiplication by $e^{i m \theta_i}$. The query-key dot product for that pair becomes:
+
+$$
+\text{Re}\left[ (q_i \, e^{i m \theta_i}) \cdot \overline{(k_i \, e^{i n \theta_i})} \right] = \text{Re}\left[ q_i \bar{k}_i \, e^{i(m-n)\theta_i} \right]
+$$
+
+The exponentials combine into $e^{i(m-n)\theta_i}$ — a function of $(m - n)$ alone, confirming the same result via complex arithmetic instead of matrices.
+
+## Minimal PyTorch Implementation
+
+```python
+import torch
+
+def rope_frequencies(dim: int, base: float = 10000.0):
+    # θ_i = base^(-2i/dim), one frequency per 2D subspace
+    i = torch.arange(0, dim, 2).float()
+    return 1.0 / (base ** (i / dim))
+
+def apply_rope(x: torch.Tensor, positions: torch.Tensor, freqs: torch.Tensor):
+    # x: [seq_len, dim] — pairs (x[..., 0::2], x[..., 1::2]) form each 2D subspace
+    angles = positions[:, None] * freqs[None, :]        # [seq_len, dim/2]
+    cos, sin = angles.cos(), angles.sin()
+
+    x1, x2 = x[..., 0::2], x[..., 1::2]
+    rotated = torch.stack(
+        [x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1
+    )
+    return rotated.flatten(-2)  # interleave back to [seq_len, dim]
+```
+
+In practice, `q` and `k` are rotated with this function immediately after the linear projection and before the attention dot product — `v` is left unrotated, since RoPE only needs to affect the *scores*, not the values being aggregated.
+
+## Why RoPE Won Over Sinusoidal & Learned Absolute Encodings
+
+<ComparisonTable
+  headers={["Method", "Mechanism", "Extrapolates to longer sequences?", "Used by"]}
+  rows={[
+    ["Learned absolute", "A learned embedding table indexed by position", "No — undefined beyond the trained max length", "Early BERT-style models"],
+    ["Sinusoidal absolute (original Transformer)", "Fixed sin/cos vector added to token embedding", "Poor in practice, despite being defined for any length", "Original 2017 Transformer"],
+    ["RoPE", "Rotates Q/K by position-dependent angle; relative position emerges algebraically", "Better native extrapolation; further improved with scaling tricks (e.g. NTK-aware, YaRN)", "Llama family, GPT-NeoX, Qwen, DeepSeek, Mistral, most modern open-weight LLMs"],
+  ]}
+/>
+
+RoPE's practical advantage isn't just the elegant math — it composes naturally with **relative** position bias (which is what actually matters for language, where "two words apart" matters more than "at absolute position 47"), while adding zero extra parameters and requiring no changes to the attention computation itself beyond the rotation.
+
+<KeyTakeaways items={[
+  "RoPE encodes position via rotation, not addition — this is the mechanism that makes relative position emerge from an absolute-position operation.",
+  "Different dimension-pairs rotate at geometrically spaced frequencies, letting the model resolve both fine-grained and long-range position.",
+  "RoPE adds zero trainable parameters and requires only a pre-processing step on Q and K, not architectural changes.",
+  "Extending context length post-training (position interpolation, NTK-aware scaling, YaRN) works specifically because RoPE's frequency structure is mathematically well-defined and can be rescaled.",
+]} />
+
+## Common Mistakes
+
+<ProsCons
+  pros={[
+    "Parameter-free — no learned position embeddings to store or extrapolate incorrectly.",
+    "Naturally compatible with KV caching, since rotation only depends on absolute position at generation time, not on the full sequence.",
+    "Empirically better length generalization than absolute sinusoidal or learned embeddings.",
+  ]}
+  cons={[
+    "Still degrades on sequences much longer than the training context without explicit scaling interventions (e.g. YaRN, NTK-aware interpolation) — RoPE narrows but doesn't eliminate the extrapolation problem.",
+    "Adds a rotation step to every attention computation, which is cheap but not literally free.",
+    "Choice of base frequency (10000 is the common default) interacts non-trivially with intended context length — this is a real hyperparameter, not an arbitrary constant, and is explicitly retuned (often increased) for long-context models.",
+  ]}
+/>
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "Why does RoPE only need to rotate Q and K, but not V?",
+    options: [
+      "Rotating V would break the residual connection",
+      "The relative-position property comes from the QKᵀ dot product; V is just aggregated according to the attention weights already computed, so rotating it serves no purpose",
+      "V is always zero-initialized",
+      "This is incorrect — RoPE does rotate V in the original formulation",
+    ],
+    answerIndex: 1,
+    explanation: "Position information only needs to influence how much attention token m pays to token n — that's entirely determined by the QKᵀ score. V just supplies the content being averaged once the weights are fixed, so rotating it would add no benefit and would arbitrarily distort content.",
+  },
+  {
+    question: "Why do different 2D subspaces in RoPE use geometrically spaced frequencies (θ_i = base^(-2i/d)) instead of a single shared rotation frequency?",
+    options: [
+      "It's purely a historical convention borrowed without justification",
+      "A single frequency could only resolve one 'scale' of position difference; the geometric spread lets low-index pairs resolve fine local position while high-index pairs resolve coarse long-range position, mirroring how the original sinusoidal encoding was designed",
+      "It reduces the parameter count",
+      "It's required for numerical stability in fp16",
+    ],
+    answerIndex: 1,
+    explanation: "A single frequency would make the rotation periodic at one fixed scale, causing aliasing where distant and nearby positions become indistinguishable. Spreading frequencies geometrically across subspaces lets the combined representation disambiguate position at multiple scales simultaneously.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "RoFormer: Enhanced Transformer with Rotary Position Embedding", authors: "Su, J., Lu, Y., Pan, S., Wen, B., & Liu, Y.", venue: "arXiv:2104.09864 (also published in Neurocomputing, 2024)", year: 2021, url: "https://arxiv.org/abs/2104.09864" },
+  { title: "Attention Is All You Need", authors: "Vaswani, A. et al.", venue: "NeurIPS", year: 2017, url: "https://arxiv.org/abs/1706.03762" },
+  { title: "YaRN: Efficient Context Window Extension of Large Language Models", authors: "Peng, B. et al.", venue: "arXiv:2309.00071", year: 2023, url: "https://arxiv.org/abs/2309.00071" },
+]} />
