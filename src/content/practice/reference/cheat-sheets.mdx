@@ -1,0 +1,144 @@
+---
+title: "Cheat Sheets"
+description: "The formulas, complexity classes, and metric definitions you look up mid-interview or mid-debugging session — one dense reference page instead of five browser tabs."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["reference", "cheat-sheet", "formulas"]
+prerequisites: []
+---
+
+<Callout type="tip" title="How to use this page">
+  This page is built for lookup speed, not narrative reading. Each table below gives the "what" — the formula or fact — and links to a full derivation page for the "why" whenever one exists. Keep this open in a tab during interview prep or while debugging a model that isn't converging.
+</Callout>
+
+## Why a cheat sheet, not another derivation page
+
+Most of this platform is built around deriving *why* an algorithm works. This page is deliberately different: it's a flat, fast-scanning reference for the handful of formulas and complexity facts that come up constantly — in interviews, in code review, in "wait, what's the formula for F1 again" moments — without re-deriving anything. If a fact here surprises you, that's the signal to go read the linked full page.
+
+## Common Loss Functions
+
+<ComparisonTable
+  headers={["Loss", "Formula", "Typical use case"]}
+  rows={[
+    ["Mean Squared Error (MSE)", "(1/n) * sum((y_i - y_hat_i)^2)", "Regression; penalizes large errors quadratically, sensitive to outliers"],
+    ["Mean Absolute Error (MAE)", "(1/n) * sum(|y_i - y_hat_i|)", "Regression; more robust to outliers than MSE, but not differentiable at zero"],
+    ["Huber Loss", "Quadratic for |error| <= delta, linear beyond it", "Regression; combines MSE's smoothness near zero with MAE's outlier robustness"],
+    ["Binary Cross-Entropy", "-(1/n) * sum(y_i*log(p_i) + (1-y_i)*log(1-p_i))", "Binary classification; standard loss paired with a sigmoid output"],
+    ["Categorical Cross-Entropy", "-(1/n) * sum over i,c of y_ic*log(p_ic)", "Multi-class classification; standard loss paired with a softmax output"],
+    ["Hinge Loss", "max(0, 1 - y_i * f(x_i))", "Max-margin classifiers (SVMs); penalizes points inside the margin, not just misclassified points"],
+    ["KL Divergence", "sum(p(x) * log(p(x) / q(x)))", "Measuring how one distribution diverges from a reference; used as a regularizer (e.g. VAEs, RLHF policy constraints)"],
+  ]}
+/>
+
+See [Entropy & Cross-Entropy](/docs/foundations/information-theory/entropy-cross-entropy) and [KL Divergence & Mutual Information](/docs/foundations/information-theory/kl-divergence-mutual-information) for the full derivations behind why cross-entropy and KL divergence take these forms, and [Gradient Descent](/docs/foundations/calculus-optimization/gradient-descent) for how any of these losses actually get minimized.
+
+## Common Probability Distributions
+
+<ComparisonTable
+  headers={["Distribution", "PDF / PMF", "When it shows up"]}
+  rows={[
+    ["Bernoulli", "P(X=1) = p, P(X=0) = 1-p", "A single binary trial (one coin flip, one classification outcome)"],
+    ["Binomial", "P(X=k) = C(n,k) * p^k * (1-p)^(n-k)", "Number of successes across n independent Bernoulli trials"],
+    ["Gaussian (Normal)", "(1 / sqrt(2*pi*sigma^2)) * exp(-(x-mu)^2 / (2*sigma^2))", "Modeling continuous noise/errors; appears everywhere via the Central Limit Theorem"],
+    ["Poisson", "P(X=k) = (lambda^k * e^(-lambda)) / k!", "Counting rare, independent events in a fixed interval (e.g. requests per second)"],
+    ["Exponential", "f(x) = lambda * e^(-lambda*x), x >= 0", "Waiting time between independent events in a Poisson process"],
+    ["Categorical", "P(X=k) = p_k, sum(p_k) = 1", "A single draw over more than two discrete outcomes (the multi-class generalization of Bernoulli)"],
+    ["Beta", "f(x) proportional to x^(a-1) * (1-x)^(b-1)", "A prior/posterior over a probability itself, in Bayesian inference (e.g. conjugate prior for Bernoulli/Binomial)"],
+  ]}
+/>
+
+See [Random Variables & Distributions](/docs/foundations/probability-statistics/random-variables-distributions) and [Bayesian Statistics](/docs/foundations/probability-statistics/bayesian-statistics) for how these get used in inference.
+
+## Evaluation Metric Formulas
+
+<ComparisonTable
+  headers={["Metric", "Formula", "What it answers"]}
+  rows={[
+    ["Accuracy", "(TP + TN) / (TP + TN + FP + FN)", "Of all predictions, what fraction were correct? (Misleading under class imbalance)"],
+    ["Precision", "TP / (TP + FP)", "Of everything predicted positive, what fraction actually was positive?"],
+    ["Recall (Sensitivity)", "TP / (TP + FN)", "Of everything actually positive, what fraction did we correctly catch?"],
+    ["F1 Score", "2 * (Precision * Recall) / (Precision + Recall)", "Harmonic mean of precision and recall; useful single number when both matter and classes are imbalanced"],
+    ["Specificity", "TN / (TN + FP)", "Of everything actually negative, what fraction did we correctly identify as negative?"],
+    ["R-squared", "1 - (SS_residual / SS_total)", "Regression: what fraction of the target's variance does the model explain?"],
+    ["ROC-AUC", "Area under the True-Positive-Rate vs. False-Positive-Rate curve", "Threshold-independent ranking quality of a binary classifier"],
+  ]}
+/>
+
+See [Evaluation Metrics](/docs/machine-learning/evaluation/metrics) for worked examples and guidance on when each metric misleads you, and [Bias-Variance Tradeoff](/docs/machine-learning/evaluation/bias-variance-tradeoff) for why no single metric tells the whole story about model quality.
+
+## Activation Function Formulas
+
+<ComparisonTable
+  headers={["Activation", "Formula", "Notes"]}
+  rows={[
+    ["Sigmoid", "1 / (1 + e^(-x))", "Output in (0,1); saturates for large |x|, causing vanishing gradients — rarely used in hidden layers today"],
+    ["Tanh", "(e^x - e^(-x)) / (e^x + e^(-x))", "Output in (-1,1), zero-centered (an improvement over sigmoid); still saturates at the extremes"],
+    ["ReLU", "max(0, x)", "Cheap, avoids saturation for x > 0, but can produce 'dead' neurons stuck outputting zero"],
+    ["Leaky ReLU", "x if x > 0, else alpha*x (small alpha)", "Fixes the dead-neuron problem by allowing a small gradient when x < 0"],
+    ["GELU", "x * Phi(x), where Phi is the standard normal CDF", "Smooth approximation used in most modern Transformers (BERT, GPT-family)"],
+    ["Softmax", "exp(x_i) / sum_j(exp(x_j))", "Converts a vector of logits into a probability distribution; standard final-layer activation for multi-class classification"],
+  ]}
+/>
+
+See [Activation Functions](/docs/deep-learning/fundamentals/activation-functions) for why saturation causes vanishing gradients and how each function trades off smoothness against compute cost.
+
+## Big-O Complexity of Common ML Operations
+
+<ComparisonTable
+  headers={["Operation", "Time complexity", "Notes"]}
+  rows={[
+    ["k-NN prediction (naive)", "O(n * d)", "n = training points, d = feature dimensions; must scan every training point per query"],
+    ["Training a linear/logistic regression (closed-form)", "O(d^2 * n + d^3)", "Dominated by forming and inverting/solving the (d x d) normal-equations matrix"],
+    ["Decision tree training", "O(n * d * log n)", "Roughly, for a balanced tree with typical split-selection cost per node"],
+    ["k-means clustering (per iteration)", "O(n * k * d)", "n = points, k = clusters, d = dimensions; repeated for a fixed number of iterations"],
+    ["PCA (via SVD)", "O(min(n*d^2, n^2*d))", "Dominated by computing the singular value decomposition of the (n x d) data matrix"],
+    ["Self-attention (one Transformer layer)", "O(L^2 * d)", "L = sequence length, d = model dimension; the quadratic-in-sequence-length term is why long-context inference gets expensive"],
+    ["Autoregressive decoding, per generated token (with KV cache)", "O(L * d)", "Amortized per-token cost given a cached key/value history, versus O(L^2 * d) recomputation without caching"],
+  ]}
+/>
+
+See [Self-Attention & Multi-Head Attention](/docs/deep-learning/attention-transformers/self-attention-multi-head) for why attention is quadratic in sequence length, [KV Cache](/docs/llms/inference-serving/kv-cache) for how caching changes the per-token cost, and [Flash Attention](/docs/llms/inference-serving/flash-attention) for how the quadratic memory cost gets tamed in practice.
+
+## Putting it together
+
+<KeyTakeaways items={[
+  "Loss function choice should follow directly from what you're optimizing for: MSE and MAE differ mainly in outlier sensitivity, and cross-entropy is the near-universal default for classification because it directly implements maximum-likelihood training.",
+  "No single evaluation metric is sufficient under class imbalance — accuracy can look great on a 99%-negative dataset while missing every positive case, which is exactly what precision, recall, and F1 are designed to expose.",
+  "Self-attention's O(L^2 * d) cost in sequence length is the single biggest reason long-context LLM inference is expensive, and is the direct motivation behind KV caching, Flash Attention, and newer sub-quadratic sequence architectures.",
+  "Distribution choice (Bernoulli vs. Poisson vs. Gaussian, etc.) should be driven by what kind of data-generating process you're actually modeling, not by which one you remember the formula for.",
+]} />
+
+## Check yourself
+
+<Quiz questions={[
+  {
+    question: "A classifier on a dataset that is 99% negative examples gets 99% accuracy by always predicting 'negative.' Which metric would immediately expose this as a useless model?",
+    options: [
+      "Accuracy — it would also flag the problem",
+      "Recall (or F1) — because recall for the positive class would be 0%, since the model never predicts positive",
+      "R-squared, since this is a classification problem",
+      "Mean Squared Error, since it's the most general metric",
+    ],
+    answerIndex: 1,
+    explanation: "Accuracy is misleading under class imbalance because always predicting the majority class already yields high accuracy. Recall for the positive class (TP / (TP+FN)) would be 0%, since the model never predicts positive at all — immediately exposing the failure that accuracy hides. R-squared and MSE are regression metrics, not applicable here.",
+  },
+  {
+    question: "Why is self-attention's O(L^2 * d) time complexity (L = sequence length) the main driver of long-context inference cost in Transformers?",
+    options: [
+      "It isn't — attention cost is actually constant in sequence length",
+      "Every token attends to every other token, so the number of pairwise interactions grows quadratically with sequence length, unlike the linear-in-length cost of recurrent architectures",
+      "It only affects training, never inference",
+      "It's due to the softmax function being computationally expensive regardless of sequence length",
+    ],
+    answerIndex: 1,
+    explanation: "Self-attention computes a compatibility score between every pair of positions in the sequence, giving L*L score computations per layer — quadratic in sequence length. This is precisely why techniques like KV caching, Flash Attention, and sub-quadratic architectures (e.g. state space models) exist: to tame this cost for long sequences.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Deep Learning", authors: "Ian Goodfellow, Yoshua Bengio, Aaron Courville", venue: "MIT Press", year: 2016, url: "https://www.deeplearningbook.org/" },
+  { title: "Pattern Recognition and Machine Learning", authors: "Christopher M. Bishop", venue: "Springer", year: 2006 },
+]} />

@@ -1,0 +1,238 @@
+---
+title: "Glossary"
+description: "Precise, one-breath definitions for the ~50 terms you'll hit most often across math, classical ML, deep learning, and LLM engineering — with links to the full derivation when you need more than the definition."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["reference", "glossary", "terminology"]
+prerequisites: []
+---
+
+<Callout type="tip" title="How to use this page">
+  This isn't meant to be read top to bottom. Use your browser's find-in-page (`Cmd/Ctrl+F`) to jump straight to a term, or scan the <strong>Flashcards</strong> deck near the bottom to drill the ~10 terms that show up most often in interviews and casual conversation. Every entry links out to a full derivation page where one exists — treat this glossary as the index, not the destination.
+</Callout>
+
+## Why a glossary earns its place
+
+AI/ML vocabulary is unusually overloaded: "bias" means something different in a linear model, a fairness audit, and a neural network's bias term; "epoch" and "iteration" get swapped casually even though they mean different things; "fine-tuning" covers everything from full-parameter retraining to a single LoRA adapter. A shared, precise vocabulary is what lets two people discussing a model actually mean the same thing. This page exists to remove that ambiguity fast.
+
+## A
+
+**Activation Function**: A nonlinear function applied elementwise to a neuron's weighted input (e.g. ReLU, sigmoid, GELU). Without nonlinear activations, stacking any number of linear layers collapses to a single linear transformation, so activations are what give deep networks their expressive power. See [Activation Functions](/docs/deep-learning/fundamentals/activation-functions).
+
+**Attention**: A mechanism that computes a weighted combination of value vectors, where the weights are derived from a compatibility score between query and key vectors — letting a model dynamically decide which parts of its input to focus on for each output position. It is the core operation inside the Transformer. See [Self-Attention & Multi-Head Attention](/docs/deep-learning/attention-transformers/self-attention-multi-head).
+
+**AUC-ROC**: The area under the Receiver Operating Characteristic curve, which plots true positive rate against false positive rate across classification thresholds. A value of 1.0 is a perfect classifier and 0.5 is no better than random guessing; it's threshold-independent, which makes it useful for comparing classifiers before picking an operating point. See [Evaluation Metrics](/docs/machine-learning/evaluation/metrics).
+
+**Autoencoder**: A neural network trained to reconstruct its own input after passing it through a bottleneck (lower-dimensional) hidden representation, forcing it to learn a compressed encoding of the data's structure. The variational version (VAE) turns this into a generative model. See [Variational Autoencoders](/docs/deep-learning/generative-models/vae).
+
+## B
+
+**Backpropagation**: The algorithm that computes the gradient of a loss function with respect to every parameter in a network by applying the chain rule backward through the computation graph, layer by layer. It's what makes training deep networks computationally tractable. See [Backpropagation: Full Derivation](/docs/foundations/calculus-optimization/backpropagation-derivation).
+
+**Batch Normalization**: A technique that normalizes a layer's activations (to zero mean, unit variance) within each mini-batch during training, then rescales with learnable parameters. It stabilizes and accelerates training by reducing sensitivity to initialization and learning rate. See [Initialization & Normalization](/docs/deep-learning/fundamentals/initialization-normalization).
+
+**Bias-Variance Tradeoff**: The decomposition of a model's expected prediction error into bias (error from overly simplistic assumptions), variance (error from sensitivity to the specific training sample), and irreducible noise. Reducing one term often increases the other, which is why model complexity has a sweet spot rather than a monotonic "more is better" relationship. See [Bias-Variance Tradeoff](/docs/machine-learning/evaluation/bias-variance-tradeoff).
+
+**BERT**: Bidirectional Encoder Representations from Transformers — an encoder-only Transformer pretrained with a masked-language-modeling objective (predict randomly hidden tokens using both left and right context), released by Google in 2018. It established the "pretrain then fine-tune" paradigm for NLP. See [BERT](/docs/deep-learning/attention-transformers/bert).
+
+## C
+
+**Chain-of-Thought (CoT)**: A prompting or training technique where a model produces intermediate reasoning steps before its final answer, which measurably improves performance on multi-step reasoning tasks compared to asking for the answer directly.
+
+**Cross-Entropy**: A loss function that measures the divergence between a predicted probability distribution and the true (target) distribution; it is the standard loss for classification and next-token prediction because minimizing it is equivalent to maximum-likelihood training. See [Entropy & Cross-Entropy](/docs/foundations/information-theory/entropy-cross-entropy).
+
+**Cross-Validation**: A model-evaluation procedure that repeatedly splits data into training and validation folds (most commonly *k*-fold) so that every data point serves as validation data exactly once, giving a more reliable estimate of generalization performance than a single train/test split. See [Cross-Validation](/docs/machine-learning/evaluation/cross-validation).
+
+## D
+
+**Diffusion Model**: A generative model that learns to reverse a gradual noising process — trained to predict and remove noise added to data over many steps — so that starting from pure noise and repeatedly denoising produces a realistic sample. Stable Diffusion and DALL·E 2/3-class systems are built on this idea. See [Diffusion Models](/docs/deep-learning/generative-models/diffusion-models).
+
+**DPO (Direct Preference Optimization)**: A method for aligning a language model to human preferences that optimizes directly on pairs of preferred/dispreferred responses via a closed-form loss, without needing to train a separate reward model or run reinforcement learning, unlike RLHF. See [DPO](/docs/llms/training-alignment/dpo).
+
+**Dropout**: A regularization technique that randomly zeroes out a fraction of neurons during each training step, preventing units from co-adapting too tightly and acting as an implicit ensemble over many thinned sub-networks.
+
+## E
+
+**Embedding**: A learned, typically dense, lower-dimensional vector representation of a discrete object (a word, token, image, or user), chosen so that geometric relationships in the vector space (distance, direction) reflect meaningful semantic relationships in the original data. See [Embeddings](/docs/llms/tokenization-representations/embeddings).
+
+**Ensemble Learning**: Combining predictions from multiple models (via voting, averaging, or stacking) to produce a result that's typically more accurate and more robust than any single constituent model, because uncorrelated errors tend to cancel out. See [Ensemble Learning](/docs/machine-learning/evaluation/ensemble-learning).
+
+**Epoch**: One complete pass through the entire training dataset. This is distinct from an *iteration* (one gradient update, typically over a single mini-batch) — an epoch with a dataset of 10,000 examples and a batch size of 100 comprises 100 iterations.
+
+**Expectation-Maximization (EM)**: An iterative algorithm for maximum-likelihood estimation with latent (unobserved) variables, alternating between computing the expected value of the latent variables given current parameters (E-step) and re-estimating parameters to maximize that expectation (M-step). Used to fit Gaussian Mixture Models, among other things. See [Expectation-Maximization](/docs/foundations/probability-statistics/expectation-maximization).
+
+## F
+
+**Feature Engineering**: The process of transforming raw data into representations (features) that make the underlying patterns easier for a model to learn — scaling, encoding categoricals, creating interaction terms, extracting domain-specific signals. Still essential even in the deep learning era for tabular and structured data. See [Feature Engineering](/docs/mlops/production-ml/feature-engineering).
+
+**Few-shot Learning**: Providing a model with only a handful of labeled examples (typically within the prompt itself, for LLMs) rather than a full training set, and relying on the model's pretrained knowledge to generalize from that small sample.
+
+**Fine-tuning**: Continuing to train a pretrained model's weights on a smaller, task- or domain-specific dataset, so it inherits the general knowledge from pretraining while adapting to the new task. See [Supervised Fine-Tuning](/docs/llms/training-alignment/supervised-fine-tuning).
+
+## G
+
+**GAN (Generative Adversarial Network)**: A generative model architecture consisting of two networks — a generator that produces fake samples and a discriminator that tries to distinguish fake from real — trained adversarially so the generator improves until its outputs are indistinguishable from real data. Introduced by Goodfellow et al. in 2014. See [GANs](/docs/deep-learning/generative-models/gan).
+
+**Gradient Descent**: An iterative optimization algorithm that updates parameters by stepping in the direction of the negative gradient of a loss function, scaled by a learning rate, in order to find a (local) minimum. Virtually all neural network training is some variant of this. See [Gradient Descent](/docs/foundations/calculus-optimization/gradient-descent).
+
+**Gradient Boosting**: An ensemble technique that builds a sequence of typically shallow decision trees, where each new tree is trained to correct the residual errors of the ensemble built so far, combined via gradient descent in function space. XGBoost, LightGBM, and CatBoost are popular implementations. See [Gradient Boosting](/docs/machine-learning/supervised-learning/gradient-boosting).
+
+## H
+
+**Hallucination**: An output from a generative model (typically an LLM) that is fluent and confident but factually incorrect or unsupported by any real source — a failure mode that arises because language models are trained to produce plausible continuations, not verified facts.
+
+**Hyperparameter**: A configuration value set before training begins (learning rate, batch size, number of layers, regularization strength) rather than learned from data during training. Choosing hyperparameters well is itself an optimization problem. See [Hyperparameter Optimization](/docs/machine-learning/evaluation/hyperparameter-optimization).
+
+## I
+
+**Inference**: The process of running a trained model on new input to produce a prediction or generation, as opposed to *training*, where the model's parameters are being updated. For LLMs, inference cost and latency are dominated by autoregressive decoding, one token at a time.
+
+**Instruction Tuning**: A form of fine-tuning where a pretrained language model is trained on (instruction, response) pairs so that it learns to follow natural-language instructions rather than merely continuing text, a key step in turning a base LLM into an assistant-style model.
+
+## K
+
+**k-Nearest Neighbors (k-NN)**: A non-parametric algorithm that predicts a new point's label (or value) by looking at the *k* closest labeled points in the training data, by majority vote (classification) or average (regression). It requires no explicit training phase but is expensive at inference time. See [k-Nearest Neighbors](/docs/machine-learning/supervised-learning/k-nearest-neighbors).
+
+**KL Divergence (Kullback-Leibler Divergence)**: An asymmetric measure of how much one probability distribution differs from a reference distribution; it appears throughout ML as a regularizer (e.g. keeping a fine-tuned policy close to a reference policy in RLHF) and as the basis of the ELBO used to train VAEs. See [KL Divergence & Mutual Information](/docs/foundations/information-theory/kl-divergence-mutual-information).
+
+**KV Cache**: During autoregressive Transformer decoding, the cached key and value tensors from previous tokens' attention computations, reused rather than recomputed at each new decoding step. This is the single biggest lever for making LLM inference fast, at the cost of significant memory. See [KV Cache](/docs/llms/inference-serving/kv-cache).
+
+## L
+
+**LoRA (Low-Rank Adaptation)**: A parameter-efficient fine-tuning method that freezes a pretrained model's original weights and injects small, trainable low-rank matrices into each layer, drastically cutting the number of trainable parameters (and the memory needed) versus full fine-tuning. See [LoRA & QLoRA](/docs/llms/training-alignment/lora-qlora).
+
+**Loss Function**: A function that quantifies how far a model's predictions are from the true targets for a single example or batch; training minimizes the loss (aggregated as the *objective* or *cost* function) via gradient-based optimization. See the [Cheat Sheets](/docs/practice/reference/cheat-sheets) page for a table of common loss functions.
+
+**LSTM (Long Short-Term Memory)**: A recurrent neural network variant with gated memory cells (input, forget, and output gates) designed to preserve information over long sequences and mitigate the vanishing-gradient problem that plagues vanilla RNNs. See [RNN, LSTM & GRU](/docs/deep-learning/sequence-models/rnn-lstm-gru).
+
+## M
+
+**Maximum Likelihood Estimation (MLE)**: A method for estimating a model's parameters by choosing the values that make the observed data most probable under the model. Training a neural network with cross-entropy loss is, in effect, performing MLE. See [Maximum Likelihood Estimation](/docs/foundations/probability-statistics/maximum-likelihood-estimation).
+
+**Mixture of Experts (MoE)**: An architecture in which a layer contains many parallel "expert" sub-networks, but a learned router activates only a small subset of them per input token — letting total parameter count scale up dramatically while keeping per-token compute (and thus inference cost) far lower than a dense model of the same size. See [Mixture of Experts](/docs/deep-learning/modern-architectures/mixture-of-experts).
+
+## N
+
+**Naive Bayes**: A probabilistic classifier that applies Bayes' theorem while (naively) assuming all features are conditionally independent given the class label. Despite the unrealistic independence assumption, it's fast, cheap, and surprisingly effective for text classification and spam filtering. See [Naive Bayes](/docs/machine-learning/supervised-learning/naive-bayes).
+
+## O
+
+**Overfitting**: A failure mode where a model learns patterns specific to the training data (including its noise) rather than the underlying generalizable relationship, resulting in strong training performance but poor performance on unseen data. See [Bias-Variance Tradeoff](/docs/machine-learning/evaluation/bias-variance-tradeoff).
+
+**Optimizer**: The algorithm that updates a model's parameters using computed gradients — e.g. SGD, Momentum, RMSProp, or Adam — differing in how they adapt the effective step size per parameter and incorporate past gradient information. See [Optimizers](/docs/deep-learning/fundamentals/optimizers).
+
+## P
+
+**PCA (Principal Component Analysis)**: A dimensionality-reduction technique that projects data onto the orthogonal directions (principal components) that capture the most variance, ranked by how much variance each explains. Useful for compression, visualization, and denoising. See [PCA: Full Derivation](/docs/foundations/linear-algebra/pca-derivation).
+
+**Perplexity**: An evaluation metric for language models, equal to the exponentiated average negative log-likelihood the model assigns to a held-out sequence; lower perplexity means the model was, on average, less "surprised" by the true next tokens.
+
+**Prompt Engineering**: The practice of designing an LLM's input (instructions, examples, formatting, context) to reliably elicit a desired kind of output, without changing the model's weights.
+
+## Q
+
+**Quantization**: Reducing the numerical precision used to store and compute a model's weights and/or activations (e.g. from 16-bit floats to 8-bit or 4-bit integers), shrinking memory footprint and often improving inference speed at some cost to accuracy. See [Quantization](/docs/llms/inference-serving/quantization).
+
+**Q-learning**: A model-free reinforcement learning algorithm that learns the action-value function *Q(s, a)* — the expected return of taking action *a* in state *s* and acting optimally thereafter — without needing a model of the environment's dynamics. See [Q-Learning](/docs/machine-learning/reinforcement-learning/q-learning).
+
+## R
+
+**RAG (Retrieval-Augmented Generation)**: An architecture where a language model's generation is conditioned on documents retrieved from an external knowledge source at inference time, rather than relying solely on knowledge baked into its parameters — reducing hallucination and allowing knowledge to be updated without retraining. See [Retrieval-Augmented Generation](/docs/retrieval-knowledge/rag/retrieval-augmented-generation).
+
+**Regularization**: Any technique that constrains a model's capacity or penalizes complexity (L1/L2 weight penalties, dropout, early stopping) in order to reduce overfitting and improve generalization to unseen data.
+
+**Reinforcement Learning (RL)**: A learning paradigm where an agent learns to choose actions in an environment to maximize cumulative reward, learning from trial-and-error feedback rather than labeled examples. See [Markov Decision Processes](/docs/machine-learning/reinforcement-learning/markov-decision-processes).
+
+**RLHF (Reinforcement Learning from Human Feedback)**: A technique for aligning a language model's behavior with human preferences, typically by training a reward model on human-ranked comparisons of model outputs, then fine-tuning the language model with RL (commonly PPO) to maximize that learned reward. See [RLHF](/docs/llms/training-alignment/rlhf).
+
+**RNN (Recurrent Neural Network)**: A neural network architecture that processes sequences one element at a time while maintaining a hidden state that carries information forward, making it naturally suited to variable-length sequential data — though vanilla RNNs suffer from vanishing/exploding gradients over long sequences. See [RNN, LSTM & GRU](/docs/deep-learning/sequence-models/rnn-lstm-gru).
+
+## S
+
+**Scaling Laws**: Empirically observed power-law relationships between a language model's loss and its parameter count, dataset size, and compute budget, used to predict performance of larger models and to allocate a fixed compute budget optimally between model size and data. See [Pretraining & Scaling Laws](/docs/llms/training-alignment/pretraining-scaling-laws).
+
+**Self-Supervised Learning**: A training paradigm that generates its own supervisory signal from unlabeled data (e.g. predicting masked words, or the next word) rather than requiring human-annotated labels — the technique that made pretraining LLMs on internet-scale text possible. See [Self-Supervised Learning](/docs/machine-learning/unsupervised-learning/self-supervised-learning).
+
+**SFT (Supervised Fine-Tuning)**: Fine-tuning a pretrained model on labeled (typically instruction-response) examples using standard supervised loss; usually the first alignment stage applied after pretraining and before RLHF or DPO. See [Supervised Fine-Tuning](/docs/llms/training-alignment/supervised-fine-tuning).
+
+**Softmax**: A function that converts a vector of raw scores (logits) into a probability distribution — exponentiating each score and dividing by the sum of all exponentiated scores — used as the final layer for multi-class classification and, per position, inside attention to normalize attention weights.
+
+**SVM (Support Vector Machine)**: A classifier that finds the hyperplane maximizing the margin between classes, using only the closest points (support vectors) to define that boundary; the kernel trick lets SVMs learn nonlinear decision boundaries without explicitly computing high-dimensional feature maps. See [Support Vector Machines](/docs/machine-learning/supervised-learning/support-vector-machines).
+
+## T
+
+**Tokenization**: The process of splitting raw text into discrete units (tokens) — words, subwords, or characters — that a model's vocabulary can represent as integer IDs; modern LLMs almost universally use subword tokenization (e.g. BPE) to balance vocabulary size against sequence length. See [Tokenizers](/docs/llms/tokenization-representations/tokenizers).
+
+**Transfer Learning**: Reusing a model (or its learned representations) trained on one task or dataset as the starting point for a different but related task, rather than training from a random initialization — pretraining followed by fine-tuning is the dominant form of transfer learning in modern deep learning.
+
+**Transformer**: A neural network architecture built entirely from self-attention and feedforward layers (no recurrence or convolution), introduced in "Attention Is All You Need" (2017). It parallelizes far better than RNNs over long sequences and underlies essentially every modern LLM. See [The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture).
+
+## V
+
+**VAE (Variational Autoencoder)**: A generative model that learns a probabilistic encoder mapping inputs to a distribution over a latent space and a decoder mapping latent samples back to data space, trained by maximizing a tractable lower bound (the ELBO) on the data likelihood. See [Variational Autoencoders](/docs/deep-learning/generative-models/vae).
+
+**Vector Database**: A database purpose-built to store high-dimensional embedding vectors and perform fast approximate-nearest-neighbor search over them, the retrieval backbone behind most RAG systems. See [Vector Databases](/docs/retrieval-knowledge/rag/vector-databases).
+
+## W
+
+**Weight Decay**: A regularization technique that adds a penalty proportional to the squared magnitude of a model's weights to the loss function (equivalent to L2 regularization), discouraging large weights and reducing overfitting.
+
+## Z
+
+**Zero-shot Learning**: Asking a model to perform a task it was never explicitly trained or given examples for, relying entirely on knowledge and instruction-following ability acquired during pretraining/fine-tuning.
+
+## Drill the essentials
+
+<Flashcards cards={[
+  { front: "Backpropagation", back: "Computes the gradient of the loss with respect to every parameter by applying the chain rule backward through the network's computation graph." },
+  { front: "Attention", back: "A mechanism that produces a weighted combination of value vectors, where weights come from a query-key compatibility score — lets a model dynamically focus on relevant input positions." },
+  { front: "Overfitting", back: "A model learns the training data's noise/idiosyncrasies rather than the generalizable pattern, so it performs well on training data but poorly on unseen data." },
+  { front: "Cross-Entropy", back: "A loss function measuring the divergence between a predicted and true probability distribution; minimizing it is equivalent to maximum-likelihood training." },
+  { front: "KV Cache", back: "Cached key/value tensors from prior tokens' attention computations, reused during autoregressive decoding instead of recomputed — the main lever for fast LLM inference." },
+  { front: "LoRA", back: "Freezes the pretrained model's weights and injects small trainable low-rank matrices per layer, cutting trainable parameters and memory versus full fine-tuning." },
+  { front: "RLHF", back: "Aligns an LLM to human preferences by training a reward model on ranked human comparisons, then fine-tuning the LLM with RL (often PPO) to maximize that reward." },
+  { front: "Mixture of Experts (MoE)", back: "A layer with many parallel expert sub-networks where a router activates only a few per token, scaling total parameters without proportionally scaling per-token compute." },
+  { front: "Hallucination", back: "A fluent, confident model output that is factually incorrect or unsupported — arises because generative models optimize for plausible continuations, not verified truth." },
+  { front: "RAG", back: "Conditions an LLM's generation on documents retrieved from an external source at inference time, rather than relying only on knowledge baked into the model's weights." },
+]} />
+
+<KeyTakeaways items={[
+  "Precise terminology prevents cross-purpose conversations — 'fine-tuning', 'bias', and 'epoch' all have narrower, specific meanings than their everyday-English usage suggests.",
+  "Most terms here are entry points, not full explanations — click through to the linked derivation page whenever you need the 'why', not just the 'what'.",
+  "LLM-era terms (RAG, LoRA, RLHF, KV cache, MoE) build directly on classical ML and deep learning foundations — understanding the older term underneath usually makes the newer one click faster.",
+]} />
+
+## Check yourself
+
+<Quiz questions={[
+  {
+    question: "What's the key difference between an epoch and an iteration during training?",
+    options: [
+      "They're two names for exactly the same thing",
+      "An epoch is one full pass through the training dataset; an iteration is one gradient update, typically over a single mini-batch",
+      "An iteration is always larger than an epoch",
+      "An epoch only applies to reinforcement learning, not supervised learning",
+    ],
+    answerIndex: 1,
+    explanation: "An epoch means every training example has been seen once. If the dataset has 10,000 examples and batch size is 100, one epoch consists of 100 iterations (gradient updates).",
+  },
+  {
+    question: "Why does RAG (Retrieval-Augmented Generation) tend to reduce hallucination compared to relying on a model's parametric knowledge alone?",
+    options: [
+      "It doesn't — RAG has no effect on hallucination rates",
+      "It replaces the language model entirely with a search engine",
+      "It conditions generation on retrieved documents at inference time, grounding answers in an external, checkable source rather than solely in knowledge encoded (and potentially misremembered) in the model's weights",
+      "It fine-tunes the model on every user query before answering",
+    ],
+    answerIndex: 2,
+    explanation: "By retrieving relevant documents and including them in the model's context before generation, RAG gives the model concrete source material to draw from, and can also make it possible to update or verify the knowledge base without retraining the model.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Deep Learning", authors: "Ian Goodfellow, Yoshua Bengio, Aaron Courville", venue: "MIT Press", year: 2016, url: "https://www.deeplearningbook.org/" },
+  { title: "Speech and Language Processing", authors: "Dan Jurafsky, James H. Martin", venue: "Stanford (draft edition)", url: "https://web.stanford.edu/~jurafsky/slp3/" },
+]} />

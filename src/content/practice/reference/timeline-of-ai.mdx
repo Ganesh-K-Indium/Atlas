@@ -1,0 +1,146 @@
+---
+title: "Timeline of AI"
+description: "A verified chronology of AI/ML's defining moments, from the 1950 Turing Test to today's frontier LLMs — with the actual dates and papers, not the folklore versions."
+difficulty: "beginner"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["reference", "timeline", "ai-history"]
+prerequisites: []
+---
+
+<Callout type="tip" title="How to use this page">
+  AI history gets retold sloppily often enough that the folklore versions ("AlexNet invented deep learning," "ChatGPT was GPT-4") drift from what actually happened. Every date and claim below was checked against primary or well-corroborated secondary sources at this page's last-verified date. Entries from 2024 onward are hedged more explicitly, since recency makes both the facts and their significance harder to pin down with certainty.
+</Callout>
+
+## Why the dates matter
+
+It's tempting to treat AI history as a single smooth line from "symbolic AI" to "deep learning" to "LLMs." The real story has multiple false starts, two distinct "AI winters" where funding and interest collapsed, and long gaps between an idea's first publication and the moment it actually became practical (backpropagation was described in the 1970s–80s but didn't power state-of-the-art vision models until GPUs made it computationally feasible three decades later). Knowing the real chronology helps calibrate how much of "AI progress" is genuinely new ideas versus older ideas meeting new compute and data.
+
+## The chronology
+
+**1950 — The Turing Test.** Alan Turing publishes "Computing Machinery and Intelligence," proposing the "imitation game" as an operational test for machine intelligence — sidestepping the philosophically thorny question of whether a machine can "really" think.
+
+**1956 — The Dartmouth Workshop.** John McCarthy, Marvin Minsky, Nathaniel Rochester, and Claude Shannon convene the Dartmouth Summer Research Project on Artificial Intelligence (proposed August 1955, held June–August 1956). The term "artificial intelligence" is coined in the proposal, and the workshop is widely regarded as the field's founding event.
+
+**1958 — The Perceptron.** Frank Rosenblatt develops the Perceptron at Cornell, demonstrating the Mark I Perceptron hardware — the first trainable artificial neural network for pattern recognition, and the conceptual ancestor of every neural network since. See [Perceptrons & the Multilayer Perceptron](/docs/deep-learning/fundamentals/perceptrons-mlp).
+
+**1966 — ELIZA.** Joseph Weizenbaum builds ELIZA at MIT, a simple pattern-matching chatbot simulating a Rogerian psychotherapist. Its surprising ability to convince some users they were talking to something that understood them foreshadows recurring debates about anthropomorphizing language systems.
+
+**1969 — Limits of Perceptrons, and the first AI winter.** Marvin Minsky and Seymour Papert publish *Perceptrons*, formally proving that single-layer perceptrons cannot learn certain simple functions (like XOR). The result — often over-generalized at the time to all neural networks — contributed to a sharp pullback in neural network research funding through the 1970s.
+
+**1986 — Backpropagation popularized.** David Rumelhart, Geoffrey Hinton, and Ronald Williams publish "Learning representations by back-propagating errors," demonstrating that multi-layer networks trained with backpropagation could learn useful internal representations — reviving interest in neural networks after the first AI winter. (The core algorithm had been described earlier by others, including Paul Werbos in his 1974 dissertation, but this paper is what brought it into mainstream use.) See [Backpropagation: Full Derivation](/docs/foundations/calculus-optimization/backpropagation-derivation).
+
+**1989 — Convolutional networks for handwriting.** Yann LeCun and colleagues at Bell Labs apply backpropagation to convolutional neural networks for recognizing handwritten ZIP codes, an early precursor to the CNN architectures (like LeNet) later used for digit and image recognition.
+
+**1997 — Deep Blue defeats Kasparov.** On May 11, 1997, IBM's Deep Blue defeats reigning world chess champion Garry Kasparov 3½–2½ in a six-game rematch — the first time a computer defeated a sitting world champion in a match under standard tournament conditions. The same year, Sepp Hochreiter and Jürgen Schmidhuber publish the LSTM architecture, addressing the vanishing-gradient problem in recurrent networks. See [RNN, LSTM & GRU](/docs/deep-learning/sequence-models/rnn-lstm-gru).
+
+**2006 — "Deep learning" re-emerges.** Geoffrey Hinton and collaborators publish work on deep belief networks showing that greedy layer-wise pretraining could make training deep networks practical again, helping revive the term "deep learning" as researchers begin moving past the second AI winter of the 1990s–2000s.
+
+**2012 — The AlexNet moment.** Alex Krizhevsky, Ilya Sutskever, and Geoffrey Hinton's AlexNet wins the ImageNet Large Scale Visual Recognition Challenge by a wide margin, cutting the top-5 error rate from roughly 26% to about 15% using a deep convolutional network trained on GPUs. This result is widely credited with triggering the modern deep learning boom by proving that depth plus GPU-scale compute plus large labeled datasets (ImageNet) could dramatically outperform prior hand-engineered computer vision pipelines.
+
+**2013 — Word2Vec.** Tomas Mikolov and colleagues at Google publish Word2Vec, showing that simple neural network models trained on large text corpora produce word embeddings with striking linear structure (e.g. the classic "king − man + woman ≈ queen" analogy), popularizing dense word embeddings across NLP. See [Embeddings](/docs/llms/tokenization-representations/embeddings).
+
+**2014 — Generative Adversarial Networks.** Ian Goodfellow and colleagues introduce GANs: a generator and discriminator trained adversarially against each other, opening a new line of generative modeling research that dominates image synthesis for the rest of the decade. See [GANs](/docs/deep-learning/generative-models/gan).
+
+**2016 — AlphaGo defeats Lee Sedol.** DeepMind's AlphaGo defeats 9-dan professional Go player Lee Sedol 4–1 in March 2016 — a milestone considered years ahead of expert predictions, since Go's search space is vastly larger than chess's and had long been considered far harder for computers to master through brute-force search alone.
+
+**2017 — "Attention Is All You Need."** Ashish Vaswani and colleagues at Google publish the Transformer architecture (arXiv, June 12, 2017), replacing recurrence and convolution entirely with self-attention. It becomes the foundational architecture for virtually every major language model that follows. See [The Transformer Architecture](/docs/deep-learning/attention-transformers/transformer-architecture).
+
+**2018 — GPT-1 and BERT.** OpenAI (Radford et al.) releases GPT-1, demonstrating that generative pretraining on unlabeled text followed by task-specific fine-tuning transfers well across NLP tasks. Later the same year, Google (Devlin et al.) releases BERT, a bidirectionally-pretrained encoder that becomes the dominant NLP workhorse for the next several years. See [GPT (Decoder-Only Transformers)](/docs/deep-learning/attention-transformers/gpt-decoder-only) and [BERT](/docs/deep-learning/attention-transformers/bert).
+
+**2019 — GPT-2.** OpenAI releases GPT-2, notable both for a further scale-up in parameters and training data, and for OpenAI's initial staged release strategy, citing concerns about potential misuse — an early, widely-discussed instance of a lab explicitly weighing capability against release risk.
+
+**2020 — GPT-3.** OpenAI introduces GPT-3 (paper May 28, 2020; API access from June 2020), a 175-billion-parameter language model demonstrating strong few-shot and zero-shot performance across many tasks purely from in-context examples in the prompt, without any gradient updates — a striking demonstration of emergent capability from scale. See [Pretraining & Scaling Laws](/docs/llms/training-alignment/pretraining-scaling-laws).
+
+**2022 — Stable Diffusion and ChatGPT.** Stability AI releases Stable Diffusion (August 22, 2022) as an openly available text-to-image diffusion model, dramatically broadening access to high-quality image generation. Then on November 30, 2022, OpenAI releases ChatGPT, a conversational fine-tune of its GPT-3.5-series model — it reaches an estimated 100 million users within about two months, a record adoption curve at the time, and brings LLMs into mainstream public awareness practically overnight.
+
+**2023 — GPT-4 and the open-weight wave.** OpenAI releases GPT-4 on March 14, 2023, its first multimodal (text-and-image-input) flagship model. The same year sees Meta release the LLaMA model family, Anthropic and Google both ship competitive assistant products (Claude, Bard/Gemini precursors), and a wave of open-weight fine-tunes built on LLaMA accelerates open-source LLM experimentation.
+
+**2024 — Reasoning models arrive.** OpenAI releases o1-preview and o1-mini (September 12, 2024), the first models in a new "reasoning model" line trained to spend extended inference-time computation on chain-of-thought before answering, followed by a full o1 release to ChatGPT users in December 2024 — establishing "test-time compute" as a new scaling axis distinct from simply training larger models.
+
+**2025 — DeepSeek-R1 and continued frontier races.** On January 20, 2025, Chinese lab DeepSeek releases DeepSeek-R1, an open-weight reasoning model reported to be competitive with OpenAI's o1 on multiple benchmarks at a much lower reported training and inference cost — a moment widely covered as evidence that the gap between open-weight and proprietary frontier models had narrowed substantially, and that frontier-level capability no longer required only the largest labs' budgets. Throughout the year, OpenAI, Anthropic, Google, and others continued shipping successive flagship model updates at a fast cadence.
+
+<Callout type="warning" title="Hedging on 2025–2026">
+  Model naming and release cadence accelerated sharply through 2025–2026, with multiple labs shipping incremental point-releases every few weeks. Rather than assert specific version numbers or dates here that are likely to be stale or unverifiable by the time you're reading this, see the [Frontier Model Landscape](/docs/llms/frontier-landscape/frontier-model-landscape) page, which is explicitly framed and dated as a snapshot rather than a permanent record.
+</Callout>
+
+## A visual sequence
+
+<Mermaid chart={`graph LR
+  A["1950s-60s
+Symbolic AI era
+Turing Test, Dartmouth,
+Perceptron, ELIZA"] --> B["1970s-80s
+First AI winter,
+then Backprop
+revival (1986)"]
+  B --> C["1990s-2000s
+Deep Blue (1997),
+LSTM (1997),
+Deep learning
+re-emerges (2006)"]
+  C --> D["2012-2017
+Deep learning boom
+AlexNet, GANs,
+AlphaGo, Transformer"]
+  D --> E["2018-2020
+Pretrained LLM era
+GPT-1/BERT, GPT-2,
+GPT-3"]
+  E --> F["2022-2023
+Public LLM boom
+Stable Diffusion,
+ChatGPT, GPT-4"]
+  F --> G["2024-2026
+Reasoning models &
+open-weight frontier
+o1, DeepSeek-R1, ongoing"]
+`} />
+
+<KeyTakeaways items={[
+  "AI history isn't linear progress — it includes two real 'AI winters' where funding and enthusiasm collapsed after over-promised results, most notably after Minsky & Papert's 1969 Perceptrons critique.",
+  "Foundational ideas often precede their practical payoff by decades: backpropagation-style methods existed in some form well before the 1986 paper, and truly took off only once GPU-scale compute and large datasets (ImageNet, internet-scale text) made deep networks practical.",
+  "2012 (AlexNet) and 2017 (the Transformer) are the two single most consequential inflection points in the modern era — one triggered the deep learning boom in vision, the other created the architecture underlying essentially every LLM since.",
+  "ChatGPT (November 2022) was a product and interface milestone as much as a research one — it ran on a GPT-3.5-class model, not a new architecture — but it's what took LLMs from a research/developer audience to hundreds of millions of everyday users almost overnight.",
+  "Treat any specific 2025-2026 model version claim as a fast-decaying snapshot rather than settled history; check primary sources for anything you're citing from this window.",
+]} />
+
+## Check yourself
+
+<Quiz questions={[
+  {
+    question: "What actually happened in 2012 that's credited with triggering the modern deep learning boom?",
+    options: [
+      "OpenAI released ChatGPT",
+      "AlexNet, a deep convolutional neural network trained on GPUs, won the ImageNet competition by a wide margin over prior hand-engineered computer vision approaches",
+      "Google released the Transformer architecture",
+      "IBM's Deep Blue defeated Garry Kasparov at chess",
+    ],
+    answerIndex: 1,
+    explanation: "AlexNet (Krizhevsky, Sutskever, and Hinton) won ILSVRC 2012 by a large margin, demonstrating that deep networks trained on GPUs with large labeled datasets could dramatically outperform prior approaches — a result widely credited with kicking off the deep learning era. Deep Blue vs. Kasparov was 1997, the Transformer paper was 2017, and ChatGPT launched in 2022.",
+  },
+  {
+    question: "Which architecture, introduced in a 2017 paper, replaced recurrence and convolution with self-attention and now underlies essentially every major LLM?",
+    options: [
+      "The Perceptron",
+      "The Generative Adversarial Network (GAN)",
+      "The Transformer, introduced in 'Attention Is All You Need' (Vaswani et al., 2017)",
+      "LSTM (Long Short-Term Memory)",
+    ],
+    answerIndex: 2,
+    explanation: "Vaswani et al.'s 2017 paper 'Attention Is All You Need' introduced the Transformer architecture, built entirely on self-attention layers. It became the foundation for BERT, GPT, and virtually every subsequent large language model.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Computing Machinery and Intelligence", authors: "Alan M. Turing", venue: "Mind, vol. 59, no. 236", year: 1950 },
+  { title: "Learning representations by back-propagating errors", authors: "David E. Rumelhart, Geoffrey E. Hinton, Ronald J. Williams", venue: "Nature", year: 1986 },
+  { title: "Long Short-Term Memory", authors: "Sepp Hochreiter, Jürgen Schmidhuber", venue: "Neural Computation", year: 1997 },
+  { title: "ImageNet Classification with Deep Convolutional Neural Networks", authors: "Alex Krizhevsky, Ilya Sutskever, Geoffrey E. Hinton", venue: "NeurIPS (NIPS) 2012", year: 2012, url: "https://papers.nips.cc/paper/4824-imagenet-classification-with-deep-convolutional-neural-networks" },
+  { title: "Generative Adversarial Networks", authors: "Ian J. Goodfellow et al.", venue: "NeurIPS (NIPS) 2014", year: 2014, url: "https://arxiv.org/abs/1406.2661" },
+  { title: "Attention Is All You Need", authors: "Ashish Vaswani et al.", venue: "arXiv:1706.03762", year: 2017, url: "https://arxiv.org/abs/1706.03762" },
+  { title: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding", authors: "Jacob Devlin, Ming-Wei Chang, Kenton Lee, Kristina Toutanova", venue: "arXiv:1810.04805", year: 2018, url: "https://arxiv.org/abs/1810.04805" },
+  { title: "Language Models are Few-Shot Learners (GPT-3)", authors: "Tom B. Brown et al.", venue: "arXiv:2005.14165", year: 2020, url: "https://arxiv.org/abs/2005.14165" },
+]} />

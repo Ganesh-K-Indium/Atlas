@@ -1,0 +1,304 @@
+---
+title: "Coding Problems for ML/DS"
+description: "Five classic ML/DS coding-interview problems, each solved from scratch with working NumPy, complexity analysis, and the reasoning an interviewer wants to hear out loud."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["interview-prep", "career", "coding", "algorithms"]
+prerequisites: ["Python and NumPy basics", "Basic probability and linear algebra", "Gradient descent"]
+---
+
+## Why These Problems, and How to Approach Them
+
+ML coding interviews rarely ask you to invert a red-black tree. They ask you to implement a small piece of an ML algorithm you already "know" conceptually — and the gap between knowing an algorithm and being able to code it correctly, from a blank editor, under time pressure, is where most candidates lose points. The five problems below are the ones that recur most often: an unsupervised algorithm (k-means), an optimizer (gradient descent), an evaluation primitive (precision/recall/F1 from a confusion matrix), a supervised-learning building block (decision tree split-finding), and a data-hygiene routine (time-respecting train/test split) that DS interviewers use specifically to check whether you understand leakage.
+
+<Callout type="tip" title="How to work through these in an interview">
+  Narrate your plan before writing code: state the inputs/outputs, the loop structure, and the stopping condition. Interviewers weight "did you reason about edge cases (empty clusters, division by zero, ties)" as much as "did the code run."
+</Callout>
+
+## Problem 1: Implement K-Means from Scratch
+
+**Statement.** Given a dataset of `n` points in `d` dimensions and a target number of clusters `k`, implement Lloyd's algorithm: assign each point to its nearest centroid, recompute centroids as the mean of assigned points, and repeat until convergence.
+
+**Approach.** Initialize `k` centroids (randomly from the data, to guarantee they lie in the data's support). Alternate: (1) assignment step — for every point, compute distance to every centroid and assign to the closest; (2) update step — recompute each centroid as the mean of its assigned points. Stop when assignments stop changing or a max-iteration budget is hit. Handle the edge case of an empty cluster (no points assigned) by re-seeding that centroid randomly, otherwise the mean is undefined.
+
+```python
+import numpy as np
+
+def kmeans(X, k, max_iters=100, tol=1e-6, seed=0):
+    rng = np.random.default_rng(seed)
+    n, d = X.shape
+
+    # Initialize centroids by sampling k distinct data points.
+    centroid_idx = rng.choice(n, size=k, replace=False)
+    centroids = X[centroid_idx].copy()
+
+    for iteration in range(max_iters):
+        # Assignment step: squared Euclidean distance to each centroid.
+        # dists shape: (n, k)
+        dists = ((X[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
+        labels = dists.argmin(axis=1)
+
+        # Update step.
+        new_centroids = np.zeros_like(centroids)
+        for j in range(k):
+            members = X[labels == j]
+            if len(members) == 0:
+                # Empty cluster: re-seed from a random data point.
+                new_centroids[j] = X[rng.integers(n)]
+            else:
+                new_centroids[j] = members.mean(axis=0)
+
+        shift = np.linalg.norm(new_centroids - centroids)
+        centroids = new_centroids
+        if shift < tol:
+            break
+
+    return centroids, labels
+
+
+# Quick sanity check
+if __name__ == "__main__":
+    rng = np.random.default_rng(1)
+    cluster_a = rng.normal(loc=[0, 0], scale=0.5, size=(50, 2))
+    cluster_b = rng.normal(loc=[5, 5], scale=0.5, size=(50, 2))
+    X = np.vstack([cluster_a, cluster_b])
+    centroids, labels = kmeans(X, k=2)
+    print(centroids)  # should land near [0,0] and [5,5], in some order
+```
+
+**Complexity.** Each iteration is $O(n \cdot k \cdot d)$ for the distance computation. With $I$ iterations to convergence, total time is $O(n \cdot k \cdot d \cdot I)$. Space is $O(n \cdot k)$ for the distance matrix (or $O(n)$ if you avoid materializing it and loop over centroids). Note that Lloyd's algorithm only guarantees convergence to a *local* optimum — in production you'd run multiple random restarts (`k-means++` initialization is the standard fix to reduce this sensitivity).
+
+## Problem 2: Implement Gradient Descent for Linear Regression
+
+**Statement.** Given feature matrix `X` (n x d) and targets `y` (n,), implement batch gradient descent to minimize mean squared error, returning the learned weight vector.
+
+**Approach.** MSE loss is $\mathcal{L}(w) = \frac{1}{n}\|Xw - y\|^2$. Its gradient with respect to $w$ is:
+
+$$
+\nabla_w \mathcal{L} = \frac{2}{n} X^\top (Xw - y)
+$$
+
+Each step updates $w \leftarrow w - \eta \nabla_w \mathcal{L}$. Track the loss over iterations to confirm monotonic decrease (a rising loss signals a learning rate that's too large).
+
+```python
+import numpy as np
+
+def gradient_descent_linreg(X, y, lr=0.05, n_iters=1000):
+    n, d = X.shape
+    w = np.zeros(d)
+    losses = []
+
+    for _ in range(n_iters):
+        preds = X @ w
+        error = preds - y
+        loss = np.mean(error ** 2)
+        losses.append(loss)
+
+        grad = (2.0 / n) * (X.T @ error)
+        w -= lr * grad
+
+    return w, losses
+
+
+if __name__ == "__main__":
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(200, 3))
+    true_w = np.array([2.0, -1.0, 0.5])
+    y = X @ true_w + rng.normal(scale=0.1, size=200)
+
+    w, losses = gradient_descent_linreg(X, y, lr=0.1, n_iters=500)
+    print(w)              # should approach [2.0, -1.0, 0.5]
+    assert losses[-1] < losses[0]
+```
+
+**Complexity.** Each iteration costs $O(n \cdot d)$ for the matrix-vector products. Total: $O(n \cdot d \cdot I)$ for $I$ iterations. Batch gradient descent uses the full dataset every step; the standard follow-up an interviewer asks is to convert this to mini-batch/stochastic gradient descent, which reduces the per-step cost to $O(b \cdot d)$ for batch size $b \ll n$ at the cost of noisier gradient estimates.
+
+## Problem 3: Precision, Recall, and F1 from a Confusion Matrix — Without sklearn
+
+**Statement.** Given predicted labels and true labels for a binary classifier, compute the confusion matrix (TP, FP, FN, TN) and derive precision, recall, and F1, without using `sklearn.metrics`.
+
+**Approach.** Precision answers "of everything I predicted positive, how much was actually positive": $\text{precision} = TP / (TP + FP)$. Recall answers "of everything actually positive, how much did I catch": $\text{recall} = TP / (TP + FN)$. F1 is their harmonic mean, which penalizes a large gap between the two more than an arithmetic mean would. Guard division by zero explicitly — this edge case (a model that predicts nothing positive) is exactly what interviewers probe for.
+
+```python
+def precision_recall_f1(y_true, y_pred):
+    tp = fp = fn = tn = 0
+    for t, p in zip(y_true, y_pred):
+        if p == 1 and t == 1:
+            tp += 1
+        elif p == 1 and t == 0:
+            fp += 1
+        elif p == 0 and t == 1:
+            fn += 1
+        else:
+            tn += 1
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if (precision + recall) > 0
+        else 0.0
+    )
+
+    return {
+        "confusion_matrix": {"TP": tp, "FP": fp, "FN": fn, "TN": tn},
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+
+
+if __name__ == "__main__":
+    y_true = [1, 0, 1, 1, 0, 1, 0, 0]
+    y_pred = [1, 0, 0, 1, 1, 1, 0, 0]
+    result = precision_recall_f1(y_true, y_pred)
+    print(result)
+    # TP=3, FP=1, FN=1, TN=3 -> precision=0.75, recall=0.75, f1=0.75
+```
+
+**Complexity.** Single pass over the labels: $O(n)$ time, $O(1)$ additional space. The natural follow-up: generalize to multi-class via a per-class one-vs-rest confusion matrix, then macro- or micro-average — see [Metrics: Precision, Recall, F1, ROC-AUC](/docs/machine-learning/evaluation/metrics) for the averaging trade-offs.
+
+## Problem 4: Decision Tree Split-Finding (Gini Impurity)
+
+**Statement.** Given a set of feature values and binary labels, implement the function that finds the best single-feature threshold split, i.e., the core subroutine a decision tree calls at every node.
+
+**Approach.** For a candidate threshold, partition the data into left (`feature <= threshold`) and right (`feature > threshold`) groups. Score the split by the weighted Gini impurity of the two groups — lower is better. Gini impurity for a group with class-1 proportion $p$ is $1 - p^2 - (1-p)^2$ (binary case). Try every midpoint between consecutive sorted unique feature values as a candidate threshold — this is the exhaustive approach conceptually identical to what production libraries approximate via histogram binning (see [Gradient Boosting](/docs/machine-learning/supervised-learning/gradient-boosting) for how XGBoost/LightGBM speed this up at scale).
+
+```python
+import numpy as np
+
+def gini(labels):
+    if len(labels) == 0:
+        return 0.0
+    p1 = np.mean(labels)
+    return 1 - p1 ** 2 - (1 - p1) ** 2
+
+def best_split(feature_values, labels):
+    feature_values = np.asarray(feature_values)
+    labels = np.asarray(labels)
+    order = np.argsort(feature_values)
+    sorted_vals = feature_values[order]
+    sorted_labels = labels[order]
+
+    n = len(labels)
+    best_score = float("inf")
+    best_threshold = None
+
+    unique_vals = np.unique(sorted_vals)
+    for i in range(len(unique_vals) - 1):
+        threshold = (unique_vals[i] + unique_vals[i + 1]) / 2.0
+        left_mask = sorted_vals <= threshold
+        left_labels = sorted_labels[left_mask]
+        right_labels = sorted_labels[~left_mask]
+
+        weighted_gini = (
+            len(left_labels) * gini(left_labels)
+            + len(right_labels) * gini(right_labels)
+        ) / n
+
+        if weighted_gini < best_score:
+            best_score = weighted_gini
+            best_threshold = threshold
+
+    return best_threshold, best_score
+
+
+if __name__ == "__main__":
+    # Feature separates classes cleanly at x=5
+    feature_values = [1, 2, 3, 6, 7, 8]
+    labels =         [0, 0, 0, 1, 1, 1]
+    threshold, score = best_split(feature_values, labels)
+    print(threshold, score)  # threshold ~= 4.5, score ~= 0.0
+```
+
+**Complexity.** Sorting the feature is $O(n \log n)$; evaluating all $n-1$ candidate thresholds naively (recomputing Gini from scratch each time, as above) costs $O(n)$ per threshold, giving $O(n^2)$ total — the interview follow-up is to compute this in $O(n)$ after the sort, by maintaining running class counts for the left/right partitions as the threshold sweeps left to right, avoiding recomputation. For $d$ features, the full per-node split search is $O(n \log n \cdot d)$.
+
+## Problem 5: Time-Respecting Train/Test Split
+
+**Statement.** Given a dataset with a timestamp column, implement a train/test split (and a rolling cross-validation scheme) that never lets the model train on data from *after* the point it's being evaluated on — the single most common data-leakage bug in applied DS interviews.
+
+**Approach.** A random shuffled split (like `sklearn.model_selection.train_test_split` with `shuffle=True`) is wrong for time-ordered data: it lets future information leak into training, producing an offline metric that looks great and doesn't transfer to production, where you only ever have the past to predict the future. The fix: sort by time, then split by a time cutoff (not a row-count cutoff), and — for cross-validation — use expanding or rolling windows where each fold's validation period is strictly after its training period.
+
+```python
+import numpy as np
+import pandas as pd
+
+def time_train_test_split(df, time_col, test_frac=0.2):
+    df_sorted = df.sort_values(time_col).reset_index(drop=True)
+    cutoff_idx = int(len(df_sorted) * (1 - test_frac))
+    cutoff_time = df_sorted.iloc[cutoff_idx][time_col]
+
+    train = df_sorted[df_sorted[time_col] < cutoff_time]
+    test = df_sorted[df_sorted[time_col] >= cutoff_time]
+    return train, test
+
+
+def expanding_window_splits(df, time_col, n_splits=5):
+    """Yield (train, val) pairs where each val window follows its train window in time."""
+    df_sorted = df.sort_values(time_col).reset_index(drop=True)
+    n = len(df_sorted)
+    fold_size = n // (n_splits + 1)
+
+    for i in range(1, n_splits + 1):
+        train_end = i * fold_size
+        val_end = min((i + 1) * fold_size, n)
+        train = df_sorted.iloc[:train_end]
+        val = df_sorted.iloc[train_end:val_end]
+        yield train, val
+
+
+if __name__ == "__main__":
+    dates = pd.date_range("2025-01-01", periods=100, freq="D")
+    df = pd.DataFrame({"timestamp": dates, "value": np.arange(100)})
+
+    train, test = time_train_test_split(df, "timestamp", test_frac=0.2)
+    assert train["timestamp"].max() < test["timestamp"].min()  # no leakage
+
+    for train_fold, val_fold in expanding_window_splits(df, "timestamp", n_splits=3):
+        assert train_fold["timestamp"].max() < val_fold["timestamp"].min()
+```
+
+**Complexity.** The split itself is dominated by the sort: $O(n \log n)$. The expanding-window generator is $O(n)$ beyond the initial sort. The real cost of getting this wrong isn't computational — it's that a leaked random split can make an unusable model look production-ready, which is exactly why interviewers ask for this by name rather than accepting "just use `train_test_split`."
+
+<KeyTakeaways items={[
+  "K-means and gradient descent are both iterative refinement loops: state the update rule precisely and think through the stopping condition before coding.",
+  "Precision/recall/F1 from a confusion matrix is a one-pass counting problem — the interview signal is entirely about correctly handling the division-by-zero edge cases.",
+  "Decision tree split-finding is conceptually an exhaustive search over thresholds scored by an impurity measure; the naive O(n^2) version is fine to state first, then optimize to O(n log n) with running counts.",
+  "A random shuffled train/test split is a correctness bug, not a stylistic choice, whenever data has a time dimension — always split (and cross-validate) by time cutoff.",
+]} />
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "In the k-means implementation, what happens if a cluster ends up with zero assigned points after the assignment step, and why does the code handle it explicitly?",
+    options: [
+      "This can never happen with any initialization",
+      "The centroid update (mean of assigned points) is undefined for an empty set, so the code re-seeds that centroid from a random data point rather than dividing by zero",
+      "Empty clusters are simply removed, reducing k permanently",
+      "NumPy automatically assigns the nearest non-empty cluster's centroid",
+    ],
+    answerIndex: 1,
+    explanation: "Taking the mean of zero points is undefined (0/0). It's a real possibility, especially with poor random initialization or an unlucky assignment step, so production-quality k-means code must explicitly handle it — typically by re-seeding the empty centroid, which is what the example does.",
+  },
+  {
+    question: "Why is a random shuffled train/test split considered a correctness bug (not just a minor issue) for time-series or event-log data?",
+    options: [
+      "It's slower to compute than a time-based split",
+      "It lets the model train on data from after the evaluation period, producing an inflated offline metric that doesn't reflect the real production setting where only past data is available",
+      "Random splits always produce smaller test sets",
+      "It only matters if the dataset has fewer than 1000 rows",
+    ],
+    answerIndex: 1,
+    explanation: "In production, a model only ever has access to the past to predict the future. A random shuffled split lets training rows sampled from 'the future' relative to a test row leak information forward in time, so the offline evaluation is measuring something that cannot occur at serving time — the model will underperform its offline metric once deployed.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Designing Machine Learning Systems", authors: "Huyen, C.", venue: "O'Reilly Media", year: 2022 },
+  { title: "Cracking the Coding Interview", authors: "McDowell, G. L.", venue: "CareerCup", year: 2015 },
+  { title: "The Elements of Statistical Learning", authors: "Hastie, T., Tibshirani, R., & Friedman, J.", venue: "Springer", year: 2009 },
+]} />

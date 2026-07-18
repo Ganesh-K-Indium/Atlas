@@ -1,0 +1,112 @@
+---
+title: "Case Studies"
+description: "Four realistic ML diagnostic scenarios — offline/online metric mismatch, class imbalance, silent production degradation, and a data pipeline bug — worked through step by step."
+difficulty: "intermediate"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["interview-prep", "career", "diagnostics", "mlops"]
+prerequisites: ["Evaluation metrics", "Basic MLOps / production ML concepts", "Class imbalance techniques"]
+---
+
+## Why Case-Study Questions Exist
+
+Beyond "design a system" and "code an algorithm," interviewers ask open-ended diagnostic questions: *"here's a symptom, walk me through how you'd figure out what's wrong."* These questions test something design and coding questions don't — whether you have a disciplined, falsifiable investigation process, or whether you jump straight to a guessed fix. The strongest answers here narrate a *sequence of checks*, each one designed to rule things in or out, rather than listing every possible cause in no particular order.
+
+<Callout type="tip" title="The generic diagnostic shape">
+  Almost every one of these scenarios follows the same shape: (1) reproduce/quantify the symptom precisely, (2) check the data and pipeline before suspecting the model, (3) segment the problem (by cohort, by time, by feature) to localize it, (4) form a specific hypothesis, (5) test that hypothesis with the smallest possible experiment. Resist the urge to say "it could be X, Y, or Z" without a plan to distinguish between them.
+</Callout>
+
+## Case Study 1: Offline Metrics Look Great, but the Online A/B Test Shows No Improvement
+
+**The scenario.** You trained a new ranking model. It beats the current production model on every offline metric — AUC up 3 points, NDCG@10 up 5%. You ship it to an A/B test. After two weeks, the primary business metric (click-through rate, or watch time) shows no significant lift, or even a small regression.
+
+**Diagnostic walkthrough.**
+
+1. **Check the offline metric is measuring the right thing.** Was the offline evaluation done on logged data collected under the *old* model's policy? If so, the evaluation set is biased toward candidates the old model chose to show — the new model might look great on those, while actually being worse on candidates the old model rarely surfaced (which the new model would now show more of, live). This is exposure/selection bias in the offline set, and it's the single most common cause of this exact symptom. The fix going forward is inverse-propensity-weighted offline evaluation, but for the current test, verify whether the online-served distribution of items differs meaningfully from the training/eval distribution.
+2. **Check whether the offline metric and the online metric are actually measuring the same construct.** NDCG improvements reward getting the *most relevant* items into top positions, but online watch time or CTR also depends on presentation effects — position bias, thumbnail/title quality interacting with the ranking, and diversity fatigue (repeatedly showing similar content within a session can suppress engagement even if each individual item is "more relevant"). A model can be a genuine NDCG win and an engagement wash if it just reshuffles similarly-good items.
+3. **Segment the A/B result.** Look at the metric by user cohort (new vs. returning), by time (first three days vs. last three days of the test — novelty effects fade), and by traffic source. A flat aggregate can hide an improvement for one segment offset by a regression in another; that's actionable information the aggregate number destroys. See [Metrics: Precision, Recall, F1, ROC-AUC](/docs/machine-learning/evaluation/metrics) for how offline metric definitions can systematically diverge from business outcomes.
+4. **Check for a serving-side bug, not just a modeling issue.** Confirm the model actually being served in the treatment arm matches the model that was offline-evaluated — a stale feature store, a version mismatch in the model registry, or a fallback path silently reverting to the old model for some traffic are common, boring, and very real causes of "the numbers don't move." Rule this out before concluding anything about the model itself.
+5. **Check statistical power.** With a two-week test and a small effect size, "no significant lift" might mean "underpowered," not "no effect." Compute the minimum detectable effect for the sample size and duration actually used, before treating a null result as conclusive.
+
+<Callout type="note" title="Cross-reference">
+  This exact failure mode — and the training-time framework for avoiding it — is discussed in the offline/online evaluation trade-off section of [ML System Design](/docs/practice/interview-prep/ml-system-design).
+</Callout>
+
+## Case Study 2: Training Data Is Very Imbalanced — What Do You Do?
+
+**The scenario.** You're building a fraud/churn/rare-disease classifier where the positive class is 0.5% of the data. A naive model trained on this data predicts "negative" for everything and gets 99.5% accuracy — clearly useless, but the team needs a plan for what to actually do.
+
+**Diagnostic and design walkthrough.**
+
+1. **First, throw out accuracy as the metric.** This is a metric problem before it's a modeling problem. Use precision/recall/F1 or PR-AUC (not ROC-AUC, which can look deceptively good under heavy imbalance because the false-positive rate stays low relative to the huge negative class) — see [Metrics: Precision, Recall, F1, ROC-AUC](/docs/machine-learning/evaluation/metrics) for exactly why PR-AUC is preferred to ROC-AUC under severe imbalance.
+2. **Clarify the actual cost asymmetry.** Ask: what's the cost of a false negative (missed fraud) versus a false positive (blocking a legitimate transaction)? This determines the operating point and often matters more than any resampling technique — a model tuned to the wrong threshold is a bigger problem than one trained on raw imbalanced data.
+3. **Try class weighting before resampling.** Most model families (logistic regression, gradient-boosted trees, neural nets) support a `class_weight` or `scale_pos_weight` parameter that reweights the loss to penalize minority-class errors more — this is usually the first thing to try because it doesn't touch the data distribution or discard information.
+4. **Consider resampling only if weighting isn't enough.** Random oversampling of the minority class risks overfitting to duplicated examples; SMOTE (synthetic minority oversampling) generates interpolated synthetic minority points instead, reducing (but not eliminating) that risk. Undersampling the majority class is cheap and often effective when the majority class is large enough to lose data without harm, but throwing away majority-class data always risks losing signal about what "normal" looks like — validate this doesn't hurt performance on held-out majority-class examples.
+5. **Consider whether this is actually an anomaly-detection problem, not classification.** At extreme imbalance (much less than 1% positive), it's often more effective to model the majority class's normal behavior (e.g., via an isolation forest or an autoencoder reconstruction-error threshold) and flag deviations, rather than trying to learn a decision boundary for a vanishingly rare class directly.
+6. **Validate with a held-out set that reflects the real-world imbalance**, not an artificially rebalanced one — resampling should only ever touch the training set. Evaluating on a rebalanced test set will overstate real-world performance.
+
+## Case Study 3: The Model Was Working Well and Degraded in Production Over a Month
+
+**The scenario.** A model shipped three months ago with strong offline and online metrics. A month ago, someone notices the production metric has been quietly sliding down. Nothing was redeployed. What's your investigation process?
+
+**Diagnostic walkthrough.**
+
+1. **Establish the timeline precisely.** Plot the metric day-by-day (not just "before vs. now") to determine whether the degradation was gradual (consistent with drift) or a step-change on a specific date (consistent with an upstream pipeline change, a schema change, or a dependency's silent behavior change on that date). This single plot usually eliminates half the hypothesis space immediately.
+2. **Check for data/feature drift first — it's the most common cause and the cheapest to check.** Compare the distribution of each input feature between the training period and the last month of production traffic (population stability index or a KS-test per feature). A shift in user behavior, a seasonal effect, or a new product surface sending different traffic are classic causes, and this is precisely what [Monitoring & Observability for ML](/docs/mlops/production-ml/monitoring-observability) is built to catch automatically going forward — if it wasn't caught automatically here, that's itself a finding (the monitoring gap, not just the drift).
+3. **Check for an upstream pipeline break, not just gradual drift.** A step-change is often a broken feature — an upstream service started returning nulls for one field, a categorical encoding changed, or a joined table's schema changed and a feature silently started defaulting to a constant. Check the null rate and cardinality of every feature over time; a feature that flips from meaningful to constant will tank the model's discriminative power for anything that depended on it, without touching the code.
+4. **Check label distribution shift versus concept drift.** Distinguish "the inputs look different" (covariate shift) from "the same inputs now map to a different outcome" (concept drift — e.g., fraud patterns evolving to evade the existing model, which is adversarial concept drift, versus a genuine change in user behavior). These require different fixes: covariate shift is often addressed by retraining on recent data; adversarial concept drift requires actively hunting for the new pattern, since the model's blind spot is exactly what the adversary is exploiting.
+5. **Rule out a serving-side regression.** Confirm feature computation still matches between training and serving (a feature-store schema migration a few weeks back is a very plausible silent cause), and check that latency/timeouts haven't caused a fallback path to kick in for a growing fraction of traffic.
+6. **Once localized, decide fix vs. retrain.** If it's drift and the underlying relationship is stable, scheduled retraining on recent data resolves it. If it's a broken feature, fix the pipeline and retrain. If it's adversarial concept drift, retraining alone is a temporary patch — you need a plan for continued monitoring and faster iteration, since the adversary will adapt again.
+
+## Case Study 4: A Data Pipeline Refactor Silently Broke Model Quality
+
+**The scenario.** Someone refactors an ETL job that computes features for a model — no logic is supposed to change, just code cleanup and a migration to a new data warehouse table. A week later, model quality has dropped, and nobody flagged the refactor as the cause because "nothing about the model changed."
+
+**Diagnostic walkthrough.**
+
+1. **Establish correlation with the refactor's deploy date first.** Same technique as Case Study 3: plot the metric against time and check whether the drop lines up with the refactor's rollout, not a gradual trend. A tight correlation with a specific deploy is strong evidence, even before looking at any code.
+2. **Diff feature statistics before vs. after the refactor**, feature by feature: mean, null rate, cardinality, min/max. "No logic changed" is a claim, not a fact — a subtly different join (e.g., an inner join replacing a left join, silently dropping rows with missing joins instead of null-filling them) or a changed aggregation window (rolling 7-day average computed with a different timezone boundary) are exactly the kind of "harmless" refactors that change the actual numbers while looking unchanged in a code review.
+3. **Spot-check a sample of rows old-pipeline vs. new-pipeline, for the same entities and same timestamp**, rather than only comparing aggregate distributions — aggregate stats can look similar while individual row-level values are wrong (e.g., a feature accidentally shifted by one time period, which barely moves the mean but silently breaks temporal features and can even leak future information).
+4. **Treat this as a test-suite gap, not just a bug.** The long-term fix is a data-contract or schema test that asserts feature-level statistical invariants (null rate, range, distribution shape) between pipeline versions before a refactor is allowed to ship — the same category of safeguard discussed in [Monitoring & Observability for ML](/docs/mlops/production-ml/monitoring-observability).
+
+<KeyTakeaways items={[
+  "Offline-online metric mismatches are most often caused by selection bias in the offline evaluation set or by online-only effects (position bias, diversity fatigue) the offline metric can't see — check both before doubting the model itself.",
+  "For imbalanced classification, fix the metric first (precision/recall/PR-AUC, not accuracy or ROC-AUC), fix the cost function or threshold second, and only reach for resampling if class weighting isn't sufficient.",
+  "For production degradation, plot the metric over time before hypothesizing — a gradual slide points to drift, a step-change points to a pipeline break — and check feature drift and null/cardinality rates before suspecting the model.",
+  "'No logic changed' refactors are a common source of silent feature-pipeline bugs; diff feature-level statistics and spot-check individual rows across pipeline versions, not just aggregate metrics.",
+]} />
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "A new ranking model shows a strong NDCG@10 improvement offline but no significant lift in an online A/B test. What is the most likely first thing to check, before concluding the model is not actually better?",
+    options: [
+      "Immediately retrain with more epochs",
+      "Whether the offline evaluation set was collected under the old model's exposure policy (creating selection bias) and whether the served treatment model actually matches the offline-evaluated model (ruling out a serving-side bug)",
+      "Switch the evaluation metric to raw accuracy",
+      "Assume the A/B test infrastructure is broken and ignore the result",
+    ],
+    answerIndex: 1,
+    explanation: "The two highest-likelihood, cheapest-to-check causes are: (1) the offline logs are biased toward what the old policy chose to show, inflating the new model's apparent offline gain, and (2) a serving/version mismatch means the online treatment arm isn't actually running the evaluated model. Both should be ruled out before concluding anything deeper about model quality or online-only effects like position bias.",
+  },
+  {
+    question: "For a severely imbalanced classification problem (0.5% positive class), why is ROC-AUC a risky primary metric even though it can look good?",
+    options: [
+      "ROC-AUC cannot be computed for imbalanced data at all",
+      "ROC-AUC's false-positive rate axis is normalized by the large negative class, so it can look deceptively high even when precision is poor (many false positives relative to the small number of true positives) — PR-AUC better reflects performance in this regime",
+      "ROC-AUC only works for multi-class problems",
+      "ROC-AUC and accuracy are mathematically identical",
+    ],
+    answerIndex: 1,
+    explanation: "Because the false-positive rate divides by the (very large) number of true negatives, a substantial absolute number of false positives can still translate into a tiny false-positive rate, keeping ROC-AUC high. Precision, which divides by predicted positives instead, exposes this directly, which is why PR-AUC is the standard recommendation for heavily imbalanced problems.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Designing Machine Learning Systems", authors: "Huyen, C.", venue: "O'Reilly Media", year: 2022 },
+  { title: "System Design Interview – An Insider's Guide (Vol. 1 & 2)", authors: "Xu, A.", venue: "Independently published", year: 2020 },
+  { title: "Reliable Machine Learning: Applying SRE Principles to ML in Production", authors: "Hulten, G., Loukides, M., & Whittaker, T.", venue: "O'Reilly Media", year: 2021 },
+]} />

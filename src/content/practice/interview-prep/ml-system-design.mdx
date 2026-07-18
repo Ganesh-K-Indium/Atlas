@@ -1,0 +1,164 @@
+---
+title: "ML System Design"
+description: "A repeatable framework for ML system design interviews, applied end-to-end to designing a video recommendation system with real model, serving, and monitoring trade-offs."
+difficulty: "advanced"
+status: "published"
+lastVerified: "2026-07-18"
+tags: ["interview-prep", "career", "system-design", "mlops"]
+prerequisites: ["Supervised learning basics", "Evaluation metrics", "Basic distributed systems concepts"]
+---
+
+## Why ML System Design Is Different
+
+A standard software system design interview asks you to design something that behaves *deterministically* given its inputs — a URL shortener, a rate limiter, a news feed. An ML system design interview adds three axes that don't exist in ordinary system design: the system's core logic is *learned* rather than hand-coded, its quality is *probabilistic and drifts over time*, and there are two entirely separate infrastructures to design — one for training (batch, throughput-oriented) and one for serving (online, latency-oriented) — that must stay consistent with each other.
+
+<Callout type="note" title="What interviewers are actually scoring">
+  Nobody expects a fully-specified system in 45 minutes. Interviewers are scoring whether you can (1) turn a vague business goal into a precise, measurable ML problem, (2) reason about real trade-offs (offline vs. online metrics, latency vs. accuracy, freshness vs. stability) with specifics rather than buzzwords, and (3) know what happens *after* the model ships — monitoring, retraining, failure modes.
+</Callout>
+
+## A Framework You Can Reuse in Any Interview
+
+Use this seven-step structure as scaffolding. Say the steps out loud as you move through them — it signals structure to the interviewer and keeps you from getting lost in premature detail.
+
+<Mermaid chart={`graph TD
+  A["1. Clarify requirements & scale"] --> B["2. Frame the ML problem"]
+  B --> C["3. Data & features"]
+  C --> D["4. Model choice"]
+  D --> E["5. Training & serving architecture"]
+  E --> F["6. Evaluation: offline + online"]
+  F --> G["7. Monitoring & iteration"]
+  G -->|feedback loop| C
+`} />
+
+### 1. Clarify Requirements and Scale
+
+Before touching ML at all, pin down: who is the user, what business metric does this move, what's the traffic volume and latency budget, and what's out of scope. Ask about scale explicitly — a system serving 10,000 requests/day and one serving 1 million requests/second are different systems, not the same system at different sizes. Also clarify the acceptable trade-off between precision and recall, since that shapes everything downstream (see [Metrics: Precision, Recall, F1, ROC-AUC](/docs/machine-learning/evaluation/metrics)).
+
+### 2. Frame the ML Problem
+
+Translate the business goal into a supervised/unsupervised learning problem with a concrete label definition. This is the step candidates skip most often, and it's the one that matters most — a vague goal like "increase engagement" must become something like "predict `P(watch > 30s | user, video, context)` for ranking." State explicitly: what's the label, what's the prediction target, what's the training objective, and how does optimizing that objective actually serve the business goal (and where might it diverge).
+
+### 3. Data and Features
+
+Identify the raw data sources (logs, user profiles, content metadata, real-time signals), how labels are obtained (implicit feedback vs. explicit, and the delay before a label is observed), and the feature categories: user features, item features, contextual features, and cross features. Flag training/serving skew risk early — features computed differently in the offline training pipeline versus the online serving path is one of the most common silent production bugs.
+
+### 4. Model Choice
+
+Pick a specific model family and justify it against the latency budget and data characteristics — don't just say "we'll use deep learning." For structured/tabular signals under a tight latency budget, gradient-boosted trees (see [Gradient Boosting: XGBoost, LightGBM & CatBoost](/docs/machine-learning/supervised-learning/gradient-boosting)) are often the right first model: fast to train, fast to score, strong on tabular features, and easy to debug via feature importance. Deep architectures (two-tower embeddings, transformers) earn their complexity budget when you have large-scale interaction data and the marginal quality lift is worth the added latency and operational cost. State explicitly what you're trading off.
+
+### 5. Training and Serving Architecture
+
+Decide: batch vs. online training, and — separately — batch vs. online (real-time) inference. Most large-scale recommendation and ranking systems use a **multi-stage funnel** (candidate generation → ranking → re-ranking) rather than a single model scoring the entire catalog, because scoring millions of items with an expensive model at request time is infeasible under a tight latency budget. Discuss the serving path concretely: feature store for consistent online/offline features, a model registry, and how the model artifact gets deployed (see [Model Serving](/docs/mlops/production-ml/model-serving) for batch vs. online vs. streaming serving patterns).
+
+### 6. Evaluation: Offline and Online
+
+State the offline metric (AUC, NDCG, log-loss) used during model development, and the online metric (click-through rate, watch time, retention) used in the actual A/B test — and explicitly acknowledge that these can diverge. A model that wins offline on NDCG can lose online because the offline metric doesn't capture position bias, diversity, or downstream effects like content fatigue. This offline/online metric mismatch is one of the most commonly probed failure modes in these interviews (see [Case Studies](/docs/practice/interview-prep/case-studies) for a full diagnostic walkthrough of this exact scenario).
+
+### 7. Monitoring and Iteration
+
+Cover feature drift, prediction drift, label delay, and the retraining cadence. State what alerts you'd set up and what "the model is broken" looks like operationally — a spike in null features, a shift in the prediction distribution, or a drop in coverage (see [Monitoring & Observability for ML](/docs/mlops/production-ml/monitoring-observability)).
+
+<Prerequisites items={["Familiarity with precision/recall/AUC and ranking metrics", "Basic understanding of gradient boosting or embedding-based models", "Awareness of the training/serving pipeline split"]} />
+
+## Worked Example: Design a Video Recommendation System (Home Feed)
+
+Let's apply the framework concretely instead of abstractly.
+
+### Step 1 — Requirements and Scale
+
+Goal: recommend videos on the home feed to maximize long-term watch time without sacrificing content diversity or user trust. Scale: 200M daily active users, catalog of 500M videos, feed refreshed on every app open (~2B requests/day), p99 latency budget of 100ms end-to-end for the ranking service. Business constraint: must not systematically starve new/small creators (a "cold-start fairness" requirement) — this shapes candidate generation later.
+
+### Step 2 — Problem Framing
+
+Frame it as pointwise ranking: for a given `(user, candidate video, context)` triple, predict `P(engagement | user, video, context)`, where "engagement" is defined as a weighted combination of watch-time-ratio and an explicit signal (like/share) to avoid pure clickbait optimization. Label: derived from logged impressions — watch-time-ratio is observed with a delay of minutes to hours (a user might watch later), so training data must account for this label latency, typically via a fixed attribution window (e.g., label finalized 24 hours after impression).
+
+### Step 3 — Data and Features
+
+- **User features**: watch history embeddings, subscribed channels, device, time-of-day, session-level signals.
+- **Item features**: video embedding (from a separately-trained content model), channel/creator features, video age, historical CTR/watch-time-ratio (with Bayesian smoothing to avoid overweighting videos with tiny impression counts).
+- **Cross features**: user-topic affinity computed from watch history, recency-weighted.
+- **Skew risk**: historical CTR must be computed identically offline and online (same aggregation window, same smoothing) — a common bug is the online feature store serving a fresher aggregate than what the model was trained on, silently degrading calibration.
+
+### Step 4 — Model Choice
+
+Use a **multi-stage funnel**, since scoring 500M videos per request at 100ms is not feasible:
+
+1. **Candidate generation** (retrieve ~500 candidates from 500M): a two-tower neural retrieval model (user tower + item tower, dot-product scoring) backed by approximate nearest-neighbor search (e.g., HNSW). Two-tower models are chosen here specifically because the item tower can be precomputed and indexed offline, making retrieval sub-millisecond.
+2. **Ranking** (score ~500 candidates down to ~50): a gradient-boosted tree model (LightGBM) on the richer feature set described above — chosen over a deep ranker here because tabular cross-features dominate the signal at this stage, GBTs give fast, well-calibrated scores, and feature importance from the trained trees provides straightforward debuggability in production (see [Gradient Boosting](/docs/machine-learning/supervised-learning/gradient-boosting)). A deep ranker is a reasonable alternative if the team wants to jointly learn feature interactions, at the cost of interpretability and serving latency.
+3. **Re-ranking** (final 50 → displayed order): a lightweight heuristic/learned layer that enforces diversity (no two consecutive videos from the same channel) and the cold-start-fairness constraint from Step 1 (guaranteed slots for a diversity-sampled set of newer creators).
+
+### Step 5 — Training and Serving Architecture
+
+<Mermaid chart={`graph LR
+  subgraph Offline
+    Logs[Impression + Engagement Logs] --> FeatEng[Feature Engineering]
+    FeatEng --> FS[(Feature Store)]
+    FeatEng --> Train[Model Training: Two-Tower + LightGBM Ranker]
+    Train --> Registry[(Model Registry)]
+  end
+  subgraph Online
+    Request[User Opens App] --> Retrieval[Candidate Retrieval - ANN Index]
+    Retrieval --> Ranker[Ranking Service - LightGBM]
+    FS -.serves online features.-> Ranker
+    Registry -.deploys model.-> Ranker
+    Ranker --> Rerank[Re-ranking: diversity + fairness]
+    Rerank --> Feed[Home Feed Response]
+    Feed --> Logs
+  end
+`} />
+
+The feature store is the critical piece that prevents training/serving skew: both the offline training pipeline and the online ranking service read the same feature definitions, computed by the same logic, just at different times (batch vs. real-time). See [Model Serving](/docs/mlops/production-ml/model-serving) for the trade-offs between this real-time serving pattern and simpler batch-precomputed recommendations (which would be cheaper but couldn't react to the current session).
+
+### Step 6 — Evaluation
+
+**Offline**: NDCG@50 and AUC on held-out logged impressions, computed with inverse-propensity weighting to correct for the fact that the logging policy itself biased which videos got shown (avoiding the trap of evaluating a new ranker only on the old ranker's exposure distribution).
+
+**Online**: A/B test measuring total watch time per user per day and a longer-horizon retention metric (7-day return rate), not just session-level CTR — because a model that boosts a single session's watch time via clickbait can quietly erode next-week retention. This is exactly the offline/online mismatch discussed in the framework: a ranker can win on offline NDCG while its online watch-time and retention numbers are flat or negative, usually because the offline evaluation set doesn't capture position bias or long-horizon user fatigue effects.
+
+### Step 7 — Monitoring and Iteration
+
+Track feature drift on the top-20 ranking features (population stability index), prediction-score distribution shift, and a canary comparison between the new model's score distribution and the currently-serving model's, before full rollout. Retrain the ranker daily (fast-moving trend signal) and the two-tower retrieval model weekly (embeddings change more slowly and are more expensive to recompute and re-index). Full detail on drift detection and alerting design lives in [Monitoring & Observability for ML](/docs/mlops/production-ml/monitoring-observability).
+
+<KeyTakeaways items={[
+  "Always translate a vague business goal into a precise ML problem statement (label definition, training objective) before discussing models — this is the step that differentiates strong answers.",
+  "State an explicit model choice and justify it against the latency budget and data characteristics, rather than defaulting to 'we'd use deep learning.'",
+  "Large-scale recommendation/ranking systems almost always need a multi-stage funnel (retrieval → ranking → re-ranking), because scoring the full catalog per request is infeasible under real latency budgets.",
+  "Explicitly separate the offline metric (used for model selection) from the online metric (used in the A/B test) and be ready to explain why they can diverge.",
+  "A complete answer covers what happens after deployment: drift monitoring, retraining cadence, and rollback strategy — not just training and initial deployment.",
+]} />
+
+## Interview Questions
+
+<Quiz questions={[
+  {
+    question: "In the video recommendation worked example, why is a multi-stage funnel (retrieval → ranking → re-ranking) used instead of a single model scoring the full catalog?",
+    options: [
+      "Multi-stage funnels are always more accurate than single-stage models",
+      "Scoring hundreds of millions of candidates with an expensive model within a tight latency budget is infeasible, so a cheap retrieval stage narrows the candidate set before an expensive ranker scores a much smaller set",
+      "It's required for A/B testing to work",
+      "Two-tower models cannot be used for ranking, only retrieval",
+    ],
+    answerIndex: 1,
+    explanation: "The funnel exists purely to manage the latency/accuracy trade-off: a cheap, approximate retrieval step (ANN search over precomputed item embeddings) reduces millions of candidates to a few hundred, making it feasible for a more expensive, higher-accuracy ranker to score only that smaller set within the latency budget.",
+  },
+  {
+    question: "A candidate proposes evaluating a new ranking model purely with offline NDCG computed on logs generated by the currently-deployed model, then shipping it directly to 100% of users based on an NDCG improvement. What is the key risk with this plan?",
+    options: [
+      "NDCG cannot be computed offline at all",
+      "The offline logs are biased by the exposure distribution of the current model (candidates it never showed can't be evaluated), and offline metrics don't capture online-only effects like position bias or long-term user fatigue — an offline win doesn't guarantee an online win",
+      "There is no risk; offline and online metrics always agree",
+      "NDCG only applies to classification problems, not ranking",
+    ],
+    answerIndex: 1,
+    explanation: "This is the offline/online metric mismatch: logged data reflects what the current policy chose to show, biasing offline evaluation, and offline metrics miss effects (position bias, diversity, long-horizon fatigue) that only show up in a live A/B test. The standard mitigation is inverse-propensity weighting offline plus a staged, monitored online rollout rather than a direct 100% ship.",
+  },
+]} />
+
+## References
+
+<ReferenceList items={[
+  { title: "Designing Machine Learning Systems", authors: "Huyen, C.", venue: "O'Reilly Media", year: 2022 },
+  { title: "System Design Interview – An Insider's Guide (Vol. 1 & 2)", authors: "Xu, A.", venue: "Independently published", year: 2020 },
+  { title: "Deep Neural Networks for YouTube Recommendations", authors: "Covington, P., Adams, J., & Sargin, E.", venue: "RecSys", year: 2016 },
+  { title: "Wide & Deep Learning for Recommender Systems", authors: "Cheng, H. et al.", venue: "DLRS Workshop", year: 2016, url: "https://arxiv.org/abs/1606.07792" },
+]} />
