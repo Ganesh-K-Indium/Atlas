@@ -17,6 +17,7 @@ import { DocPageHeader } from "@/components/layout/doc-page-header";
 import { PlannedPlaceholder } from "@/components/layout/planned-placeholder";
 import { Paywall } from "@/components/layout/paywall";
 import { Toc } from "@/components/layout/toc";
+import { DocsPagination } from "@/components/layout/docs-pagination";
 import { hasActiveSubscription } from "@/lib/subscription";
 
 interface PageProps {
@@ -99,6 +100,7 @@ export default async function DocPage({ params }: PageProps) {
           />
         </div>
         )}
+        <DocsPagination currentHref={`/docs/${p.group}/${p.section}/${p.item}`} />
       </article>
       <aside className="sticky top-20 hidden h-fit w-56 shrink-0 xl:block">
         <Toc entries={toc} />
