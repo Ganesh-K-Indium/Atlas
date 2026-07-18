@@ -62,9 +62,7 @@ export default function Home() {
               </Button>
             </div>
             <p className="mt-6 text-sm text-muted-foreground">
-              {overall.published} of {overall.total} topics published across{" "}
-              {overall.groups} curriculum areas — see what&apos;s live vs.
-              planned on the{" "}
+              {overall.published} of {overall.total} topics published across {overall.groups} curriculum areas — see what&apos;s live vs. planned on the{" "}
               <Link href="/roadmap" className="underline underline-offset-4">
                 roadmap
               </Link>
