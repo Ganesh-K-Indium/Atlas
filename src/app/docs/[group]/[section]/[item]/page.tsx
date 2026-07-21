@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { MDXRemote } from "next-mdx-remote/rsc";
 import remarkMath from "remark-math";
+import remarkGfm from "remark-gfm";
 import rehypeKatex from "rehype-katex";
 import rehypeSlug from "rehype-slug";
 import rehypePrettyCode from "rehype-pretty-code";
@@ -83,7 +84,7 @@ export default async function DocPage({ params }: PageProps) {
               // for ComparisonTable, Quiz, etc. rely on this).
               blockJS: false,
               mdxOptions: {
-                remarkPlugins: [remarkMath],
+                remarkPlugins: [remarkGfm, remarkMath],
                 rehypePlugins: [
                   rehypeSlug,
                   rehypeKatex,
